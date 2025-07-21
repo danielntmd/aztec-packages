@@ -47,7 +47,17 @@ import {
 } from '../services/reqresp/interface.js';
 import { pingHandler } from '../services/reqresp/protocols/index.js';
 import { ReqResp } from '../services/reqresp/reqresp.js';
+<<<<<<< Updated upstream
 import { type FullLibp2p, type PubSubLibp2p, convertToMultiaddr, createLibP2PPeerIdFromPrivateKey } from '../util.js';
+=======
+import {
+  type FullLibp2p,
+  type PubSubLibp2p,
+  convertToMultiaddr,
+  createSecp256k1PrivateKey,
+  privateKeyToHex,
+} from '../util.js';
+>>>>>>> Stashed changes
 import { getVersions } from '../versioning.js';
 
 /**

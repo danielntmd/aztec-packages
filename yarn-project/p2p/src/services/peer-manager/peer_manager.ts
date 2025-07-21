@@ -761,16 +761,30 @@ export class PeerManager implements PeerManagerInterface {
    * */
   private async exchangeStatusHandshake(peerId: PeerId) {
     try {
+<<<<<<< HEAD
       const ourStatus = await this.createStatusMessage();
       //Note: Technically we don't have to send out status to peer as well, but we do.
       //It will be easier to update protocol in the future this way if need be.
       this.logger.trace(`Initiating status handshake with peer ${peerId}`);
       const response = await this.reqresp.sendRequestToPeer(peerId, ReqRespSubProtocol.STATUS, ourStatus.toBuffer());
       const { status } = response;
+=======
+      const syncSummary = (await this.worldStateSynchronizer.status()).syncSummary;
+      const ourStatus = StatusMessage.fromWorldStateSyncStatus(this.protocolVersion, syncSummary);
+      //Note: Technically we don't have to send out status to peer as well, but we do.
+      //It will be easier to update protocol in the future this way if need be.
+      const { status, data } = await this.reqresp.sendRequestToPeer(
+        peerId,
+        ReqRespSubProtocol.STATUS,
+        ourStatus.toBuffer(),
+      );
+      const logData = { peerId, status: ReqRespStatus[status], data: data ? bufferToHex(data) : undefined };
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
       if (status !== ReqRespStatus.SUCCESS) {
         //TODO: maybe hard ban these peers in the future.
         //We could allow this to happen up to N times, and then hard ban?
         //Hard ban: Disallow connection via e.g. libp2p's Gater
+<<<<<<< HEAD
         this.logger.warn(`Disconnecting peer ${peerId} who failed to respond status handshake`, {
           peerId,
           status: ReqRespStatus[status],
@@ -785,6 +799,17 @@ export class PeerManager implements PeerManagerInterface {
       if (!ourStatus.validate(peerStatusMessage)) {
         this.logger.warn(`Disconnecting peer ${peerId} due to failed status handshake.`, logData);
         this.markPeerForDisconnect(peerId);
+=======
+        this.logger.warn(`Disconnecting peer ${peerId} who failed to respond status handshake`, logData);
+        await this.disconnectPeer(peerId);
+        return;
+      }
+
+      const peerStatusMessage = StatusMessage.fromBuffer(data);
+      if (!ourStatus.validate(peerStatusMessage)) {
+        this.logger.warn(`Disconnecting peer ${peerId} due to failed status handshake.`, logData);
+        await this.disconnectPeer(peerId);
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
         return;
       }
       this.logger.debug(`Successfully completed status handshake with peer ${peerId}`, logData);
@@ -793,6 +818,7 @@ export class PeerManager implements PeerManagerInterface {
       this.logger.warn(`Disconnecting peer ${peerId} due to error during status handshake: ${err.message ?? err}`, {
         peerId,
       });
+<<<<<<< HEAD
       this.markPeerForDisconnect(peerId);
     }
   }
@@ -873,6 +899,9 @@ export class PeerManager implements PeerManagerInterface {
         peerId,
       });
       this.markPeerForDisconnect(peerId);
+=======
+      await this.disconnectPeer(peerId);
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
     }
   }
 

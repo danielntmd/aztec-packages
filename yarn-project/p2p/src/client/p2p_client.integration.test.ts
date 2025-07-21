@@ -644,10 +644,146 @@ describe('p2p client integration', () => {
     TEST_TIMEOUT,
   );
 
+<<<<<<< HEAD
   it('should not disconnect clients when it returns correct status', async () => {
     clients = (
       await makeTestP2PClients(NUMBER_OF_PEERS, {
         p2pBaseConfig,
+=======
+  it(
+    'should not disconnect clients when it returns correct status',
+    async () => {
+      clients = (
+        await makeTestP2PClients(NUMBER_OF_PEERS, {
+          p2pBaseConfig,
+          mockAttestationPool: attestationPool,
+          mockTxPool: txPool,
+          mockEpochCache: epochCache,
+          mockWorldState: worldState,
+        })
+      ).map(x => x.client);
+
+      const disconnectSpies = clients.map(c => jest.spyOn((c as any).p2pService.peerManager, 'disconnectPeer'));
+      const statusHandshakeSpies = clients.map(c =>
+        jest.spyOn((c as any).p2pService.peerManager, 'exchangeStatusHandshake'),
+      );
+
+      await startTestP2PClients(clients);
+      await sleep(5000);
+      logger.info(`Finished waiting for clients to connect`);
+
+      for (const handshakeSpy of statusHandshakeSpies) {
+        expect(handshakeSpy).toHaveBeenCalled();
+      }
+
+      for (const disconnectSpy of disconnectSpies) {
+        expect(disconnectSpy).not.toHaveBeenCalled();
+      }
+
+      await shutdown(clients);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'should disconnect client when it returns status with wrong version',
+    async () => {
+      clients = (
+        await makeTestP2PClients(NUMBER_OF_PEERS, {
+          p2pBaseConfig,
+          mockAttestationPool: attestationPool,
+          mockTxPool: txPool,
+          mockEpochCache: epochCache,
+          mockWorldState: worldState,
+        })
+      ).map(x => x.client);
+      const [c0] = clients;
+      (c0 as any).p2pService.peerManager.protocolVersion = 'WRONG_VERSION';
+
+      const disconnectSpy = jest.spyOn((c0 as any).p2pService.peerManager, 'disconnectPeer');
+      const statusHandshakeSpies = clients.map(c =>
+        jest.spyOn((c as any).p2pService.peerManager, 'exchangeStatusHandshake'),
+      );
+
+      await startTestP2PClients(clients);
+      await sleep(5000);
+      logger.info(`Finished waiting for clients to connect`);
+
+      for (const handshakeSpy of statusHandshakeSpies) {
+        expect(handshakeSpy).toHaveBeenCalled();
+      }
+
+      expect(disconnectSpy).toHaveBeenCalled();
+
+      await shutdown(clients);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skip(
+    'should disconnect client when it returns an invalid status',
+    async () => {
+      const peerTestCount = 3;
+      clients = (
+        await makeTestP2PClients(peerTestCount, {
+          p2pBaseConfig,
+          mockAttestationPool: attestationPool,
+          mockTxPool: txPool,
+          mockEpochCache: epochCache,
+          mockWorldState: worldState,
+        })
+      ).map(x => x.client);
+      const [_c0, c1, _c2] = clients;
+
+      const statusHandshakeSpies = clients.map(c =>
+        jest.spyOn((c as any).p2pService.peerManager, 'exchangeStatusHandshake'),
+      );
+      const disconnectSpies = clients.map(c => jest.spyOn((c as any).p2pService.peerManager, 'disconnectPeer'));
+
+      const badPeerId = (clients[0] as any).p2pService.node.peerId;
+      const c1PeerManager = (c1 as any).p2pService.peerManager;
+      const realSend = c1PeerManager.reqresp.sendRequestToPeer.bind(c1PeerManager.reqresp);
+
+      //@ts-expect-error arguments not expected
+      jest.spyOn(c1PeerManager.reqresp, 'sendRequestToPeer').mockImplementation(async (peerId: PeerId, ...rest) => {
+        if (peerId.toString() === badPeerId.toString()) {
+          return { status: ReqRespStatus.SUCCESS, data: Buffer.from('invalid status') };
+        }
+        return await realSend(peerId, ...rest);
+      });
+
+      await startTestP2PClients(clients);
+      await sleep(5000);
+      logger.info(`Finished waiting for clients to connect`);
+
+      expect(disconnectSpies[1]).toHaveBeenCalled(); // c1 <> C0 disconnected
+      expect(disconnectSpies[2]).not.toHaveBeenCalled(); // c2 is ok with both c0 and c1
+
+      const expectedHandshakeCount = peerTestCount - 1;
+      // c2 established connection exactly once with both c0 and c1
+      expect(statusHandshakeSpies[2]).toHaveBeenCalledTimes(expectedHandshakeCount);
+
+      // c1 received invalid status from c0 exactly once
+      // the connection between c0 and c1 might have been retried in the meantime
+      // I say "might" because the test is flaky especially on CI
+      // This is why we use `toBeGreaterThanOrEqual` instead of `toHaveBeenCalledTimes`
+      expect(statusHandshakeSpies[0].mock.calls.length).toBeGreaterThanOrEqual(expectedHandshakeCount);
+      expect(statusHandshakeSpies[1].mock.calls.length).toBeGreaterThanOrEqual(expectedHandshakeCount);
+
+      await shutdown(clients);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'propagates messages using mocked gossip sub network',
+    async () => {
+      const numberOfNodes = 3;
+      const mockGossipSubNetwork = new MockGossipSubNetwork();
+
+      const testConfig = {
+        p2pBaseConfig: { ...p2pBaseConfig, rollupVersion: 1 },
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
         mockAttestationPool: attestationPool,
         mockTxPool: txPool,
         mockEpochCache: epochCache,

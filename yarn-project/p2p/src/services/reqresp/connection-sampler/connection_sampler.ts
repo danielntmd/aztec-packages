@@ -220,6 +220,7 @@ export class ConnectionSampler {
     let peerId = undefined;
 
     try {
+<<<<<<< HEAD
       peerId = stream.metadata.peerId;
       let updatedActiveConnectionsCount = undefined;
 
@@ -228,6 +229,12 @@ export class ConnectionSampler {
       } else {
         updatedActiveConnectionsCount = (this.activeConnectionsCount.get(peerId) ?? 1) - 1;
         this.activeConnectionsCount.set(peerId, updatedActiveConnectionsCount);
+=======
+      const streamAndPeerId = this.streams.get(streamId);
+      if (!streamAndPeerId || !streamAndPeerId.stream) {
+        this.logger.debug(`Stream ${streamId} not found`);
+        return;
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
       }
 
       this.logger.trace('Closing connection', {
@@ -237,11 +244,15 @@ export class ConnectionSampler {
         activeConnectionsCount: updatedActiveConnectionsCount,
       });
 
+<<<<<<< HEAD
       if (!this.streams.has(stream)) {
         this.logger.debug(`Stream ${stream.id} is not in the active streams set`);
       }
 
       await stream.close();
+=======
+      await stream!.close();
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
     } catch (error) {
       this.logger.error(`Failed to close connection to peer ${peerId ?? 'unknown'} with stream id ${stream.id}`, error);
       // graceful close failed, abort the stream

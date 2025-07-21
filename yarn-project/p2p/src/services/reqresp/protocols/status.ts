@@ -113,8 +113,13 @@ export function reqRespStatusHandler(
       compressedComponentsVersion,
       (await worldStateSynchronizer.status()).syncSummary,
     );
+<<<<<<< HEAD
     const response = status.toBuffer();
     logger?.trace(`Responding status handshake from ${peerId}`, { data: bufferToHex(response) });
     return response;
+=======
+
+    return status.toBuffer();
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
   };
 }

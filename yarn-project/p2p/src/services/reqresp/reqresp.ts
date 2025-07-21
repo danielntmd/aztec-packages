@@ -764,4 +764,152 @@ export class ReqResp implements ReqRespInterface {
     this.logger.error(`Unexpected error in ReqResp protocol`, e, logTags);
     return PeerErrorSeverity.HighToleranceError;
   }
+<<<<<<< HEAD
+=======
+
+  /**
+   * Read a message returned from a stream into a single buffer
+   *
+   * The message is split into two components
+   * - The first chunk should contain a control byte, indicating the status of the response see `ReqRespStatus`
+   * - The second chunk should contain the response data
+   */
+  private async readMessage(source: AsyncIterable<Uint8ArrayList>): Promise<ReqRespResponse> {
+    let statusBuffer: ReqRespStatus | undefined;
+    const chunks: Uint8Array[] = [];
+
+    try {
+      for await (const chunk of source) {
+        if (statusBuffer === undefined) {
+          const firstChunkBuffer = chunk.subarray();
+          statusBuffer = parseStatusChunk(firstChunkBuffer);
+        } else {
+          chunks.push(chunk.subarray());
+        }
+      }
+
+      const messageData = Buffer.concat(chunks);
+      const message: Buffer = this.snappyTransform.inboundTransformNoTopic(messageData);
+
+      return {
+        status: statusBuffer ?? ReqRespStatus.UNKNOWN,
+        data: message,
+      };
+    } catch (e: any) {
+      this.logger.debug(`Reading message failed: ${e.message}`);
+
+      let status = ReqRespStatus.UNKNOWN;
+      if (e instanceof ReqRespStatusError) {
+        status = e.status;
+      }
+
+      return {
+        status,
+        data: Buffer.from([]),
+      };
+    }
+  }
+
+  /**
+   * Stream Handler
+   * Reads the incoming stream, determines the protocol, then triggers the appropriate handler
+   *
+   * @param param0 - The incoming stream data
+   *
+   * @description
+   * An individual stream handler will be bound to each sub protocol, and handles returning data back
+   * to the requesting peer.
+   *
+   * The sub protocol handler interface is defined within `interface.ts` and will be assigned to the
+   * req resp service on start up.
+   *
+   * We check rate limits for each peer, note the peer will be penalised within the rate limiter implementation
+   * if they exceed their peer specific limits.
+   */
+  @trackSpan('ReqResp.streamHandler', (protocol: ReqRespSubProtocol, { connection }: IncomingStreamData) => ({
+    [Attributes.P2P_REQ_RESP_PROTOCOL]: protocol,
+    [Attributes.P2P_ID]: connection.remotePeer.toString(),
+  }))
+  private async streamHandler(protocol: ReqRespSubProtocol, { stream, connection }: IncomingStreamData) {
+    this.metrics.recordRequestReceived(protocol);
+
+    try {
+      // Store a reference to from this for the async generator
+      const rateLimitStatus = this.rateLimiter.allow(protocol, connection.remotePeer);
+      if (rateLimitStatus != RateLimitStatus.Allowed) {
+        this.logger.warn(
+          `Rate limit exceeded ${prettyPrintRateLimitStatus(rateLimitStatus)} for ${protocol} from ${
+            connection.remotePeer
+          }`,
+        );
+
+        throw new ReqRespStatusError(ReqRespStatus.RATE_LIMIT_EXCEEDED);
+      }
+
+      const handler = this.subProtocolHandlers[protocol];
+      const transform = this.snappyTransform;
+
+      await pipe(
+        stream,
+        async function* (source: any) {
+          for await (const chunkList of source) {
+            const msg = Buffer.from(chunkList.subarray());
+            const response = await handler(connection.remotePeer, msg);
+
+            if (protocol === ReqRespSubProtocol.GOODBYE) {
+              // NOTE: The stream was already closed by Goodbye handler
+              // peerManager.goodbyeReceived(peerId, reason); will call libp2p.hangUp closing all active streams and connections
+              // Don't respond
+              return;
+            }
+
+            // Send success code first, then the response
+            const successChunk = Buffer.from([ReqRespStatus.SUCCESS]);
+            yield new Uint8Array(successChunk);
+
+            yield new Uint8Array(transform.outboundTransformNoTopic(response));
+          }
+        },
+        stream,
+      );
+    } catch (e: any) {
+      this.logger.warn('Reqresp response error: ', e);
+      this.metrics.recordResponseError(protocol);
+
+      // If we receive a known error, we use the error status in the response chunk, otherwise we categorize as unknown
+      let errorStatus = ReqRespStatus.UNKNOWN;
+      if (e instanceof ReqRespStatusError) {
+        errorStatus = e.status;
+      }
+
+      const canWriteToStream =
+        stream.status === 'open' && (stream.writeStatus === 'writing' || stream.writeStatus === 'ready');
+      if (!canWriteToStream) {
+        this.logger.debug('Stream already closed, not sending error response', { protocol, err: e, errorStatus });
+        return;
+      }
+
+      // Return and yield the response chunk
+      try {
+        const sendErrorChunk = this.sendErrorChunk(errorStatus);
+        await pipe(
+          stream,
+          async function* (_source: any) {
+            yield* sendErrorChunk;
+          },
+          stream,
+        );
+      } catch (e: any) {
+        this.logger.warn('Error while sending error response', { protocol, err: e, errorStatus });
+      }
+    } finally {
+      await stream.close();
+    }
+  }
+
+  private async *sendErrorChunk(error: ReqRespStatus): AsyncIterable<Uint8Array> {
+    const errorChunk = Buffer.from([error]);
+    yield new Uint8Array(errorChunk);
+  }
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
 }

@@ -177,9 +177,22 @@ describe('ConnectionSampler', () => {
     });
 
     it('properly cleans up on stop', async () => {
+<<<<<<< HEAD
       const mockStream1 = makeStream('1');
       const mockStream2 = makeStream('2');
 
+=======
+      const mockStream1: Partial<Stream> = {
+        id: '1',
+        close: jest.fn(),
+        status: 'open',
+      } as Partial<Stream>;
+      const mockStream2: Partial<Stream> = {
+        id: '2',
+        close: jest.fn(),
+        status: 'open',
+      } as Partial<Stream>;
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
       mockLibp2p.dialProtocol.mockResolvedValueOnce(mockStream1).mockResolvedValueOnce(mockStream2);
 
       await sampler.dialProtocol(peers[0], 'test');

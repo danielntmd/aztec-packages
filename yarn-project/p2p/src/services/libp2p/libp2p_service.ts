@@ -294,7 +294,10 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
       connectionEncryption: [noise()],
       connectionManager: {
         minConnections: 0,
+<<<<<<< HEAD
         maxConnections: maxPeerCount,
+=======
+>>>>>>> 4800d08570 (fix: p2p qol fixes (#14900))
         maxParallelDials: 100,
         dialTimeout: 30_000,
         maxPeerAddrsToDial: 5,
