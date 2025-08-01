@@ -299,10 +299,10 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
       connectionManager: {
         maxConnections: maxPeerCount,
         maxParallelDials: 100,
-        dialTimeout: process.env.CI ? 60_000 : 30_000, // 60s in CI, 30s locally for connection establishment
-        maxPeerAddrsToDial: 5,
-        maxIncomingPendingConnections: 5,
-        inboundUpgradeTimeout: 60_000,
+        dialTimeout: 180_000, // 60s in CI, 30s locally for connection establishment
+        maxPeerAddrsToDial: 10, //increase for CI
+        maxIncomingPendingConnections: 10, //increase for CI
+        inboundUpgradeTimeout: 120_000, //increase timeout for CI
       },
       connectionMonitor: {
         protocolPrefix: 'aztec',
