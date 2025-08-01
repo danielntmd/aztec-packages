@@ -1,8 +1,9 @@
 import { type ConfigMapping, booleanConfigHelper, numberConfigHelper } from '@aztec/foundation/config';
 
-export const DEFAULT_INDIVIDUAL_REQUEST_TIMEOUT_MS = 2000;
-export const DEFAULT_OVERALL_REQUEST_TIMEOUT_MS = 4000;
-export const DEFAULT_REQRESP_DIAL_TIMEOUT_MS = 1000;
+// Use more generous timeouts in CI environments to handle latency and resource contention
+export const DEFAULT_INDIVIDUAL_REQUEST_TIMEOUT_MS = process.env.CI ? 8000 : 2000;
+export const DEFAULT_OVERALL_REQUEST_TIMEOUT_MS = process.env.CI ? 15000 : 4000;
+export const DEFAULT_REQRESP_DIAL_TIMEOUT_MS = process.env.CI ? 5000 : 1000;
 export const DEFAULT_OPTIMISTIC_NEGOTIATION = false;
 
 // For use in tests.

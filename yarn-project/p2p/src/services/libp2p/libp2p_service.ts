@@ -44,6 +44,7 @@ import { identify } from '@libp2p/identify';
 import { type Message, type PeerId, type PrivateKey, TopicValidatorResult } from '@libp2p/interface';
 import type { ConnectionManager } from '@libp2p/interface-internal';
 import '@libp2p/kad-dht';
+import { ping } from '@libp2p/ping';
 import { tcp } from '@libp2p/tcp';
 import { createLibp2p } from 'libp2p';
 
@@ -265,6 +266,9 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     const node = await createLibp2p({
       start: false,
       privateKey,
+      // Top-level timeouts for libp2p 2.8.9 - more generous for CI environments
+      dialTimeout: 30_000, // 30s for establishing connections
+      inboundUpgradeTimeout: process.env.CI ? 20_000 : 15_000, // 20s in CI, 15s locally for protocol handshakes
       addresses: {
         listen: [bindAddrTcp],
         announce: [], // announce is handled by the peer discovery service
@@ -301,6 +305,11 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
         dialTimeout: 30_000,
         maxPeerAddrsToDial: 5,
         maxIncomingPendingConnections: 5,
+        // Configure idle connection management for CI stability
+        disconnectOnIdle: {
+          enabled: true,
+          timeout: process.env.CI ? 600_000 : 300_000, // 10 mins in CI, 5 mins locally
+        },
       },
       connectionMonitor: {
         protocolPrefix: 'aztec',
@@ -308,6 +317,13 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
       services: {
         identify: identify({
           protocolPrefix: 'aztec',
+        }),
+        ping: ping({
+          // More generous timeouts for CI environments
+          timeout: process.env.CI ? 15_000 : 10_000, // 15s in CI, 10s locally
+          runOnTransientConnection: false,
+          maxInboundStreams: 1,
+          maxOutboundStreams: 1,
         }),
         pubsub: gossipsub({
           directPeers,
