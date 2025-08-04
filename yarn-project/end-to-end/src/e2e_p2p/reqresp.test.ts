@@ -84,7 +84,7 @@ describe('e2e_p2p_reqresp_tx', () => {
     );
 
     t.logger.info('Sleeping to allow nodes to connect');
-    await sleep(4000);
+    await sleep(10000);
 
     await t.setupAccount();
 
@@ -92,9 +92,11 @@ describe('e2e_p2p_reqresp_tx', () => {
     const contexts = await timesAsync(2, () =>
       createPXEServiceAndPrepareTransactions(t.logger, t.ctx.aztecNode, NUM_TXS_PER_NODE, t.fundedAccount),
     );
+    await sleep(10000);
 
     t.logger.info('Removing initial node');
     await t.removeInitialNode();
+    await sleep(10000);
 
     t.logger.info('Starting fresh slot');
     const [timestamp] = await t.ctx.cheatCodes.rollup.advanceToNextSlot();
@@ -128,6 +130,7 @@ describe('e2e_p2p_reqresp_tx', () => {
         return new SentTx(node, () => Promise.resolve(tx.getTxHash()));
       }),
     );
+    await sleep(10000);
 
     t.logger.info('Waiting for all transactions to be mined');
     await Promise.all(
