@@ -240,7 +240,6 @@ export class PeerManager implements PeerManagerInterface {
    */
   private handleConnectedPeerEvent(e: CustomEvent<PeerId>) {
     const peerId = e.detail;
-    const connectionTime = Date.now();
     this.logger.verbose(`[REQRESP_DEBUG] Connected to peer ${peerId.toString()}`, {
       totalConnectedPeers: this.libP2PNode.getPeers().length,
       isProtectedPeer: this.isProtectedPeer(peerId),
@@ -279,7 +278,6 @@ export class PeerManager implements PeerManagerInterface {
    */
   private handleDisconnectedPeerEvent(e: CustomEvent<PeerId>) {
     const peerId = e.detail;
-    const disconnectionTime = Date.now();
     const peerScore = this.peerScoring.getScore(peerId.toString());
 
     this.logger.verbose(`[REQRESP_DEBUG] Disconnected from peer ${peerId.toString()}`, {
