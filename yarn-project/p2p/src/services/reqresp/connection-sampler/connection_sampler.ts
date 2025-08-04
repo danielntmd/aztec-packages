@@ -68,7 +68,13 @@ export class ConnectionSampler {
   getPeer(excluding?: Map<string, boolean>): PeerId | undefined {
     // In libp2p getPeers performs a shallow copy, so this array can be sliced from safetly
     const peers = this.libp2p.getPeers();
+    this.logger.trace(
+      `[REQRESP_DEBUG] getPeer called with ${peers.length} available peers, excluding ${excluding?.size || 0} peers`,
+    );
+
     const { peer } = this.getPeerFromList(peers, excluding);
+
+    this.logger.trace(`[REQRESP_DEBUG] getPeer returning: ${peer?.toString() || 'undefined'}`);
     return peer;
   }
 
@@ -186,10 +192,18 @@ export class ConnectionSampler {
    * @returns The stream
    */
   async dialProtocol(peerId: PeerId, protocol: string, timeout?: number): Promise<Stream> {
+    const dialStart = Date.now();
     // Dialling at the same time can cause race conditions where two different streams
     // end up with the same id, hence a serial queue
-    this.logger.debug(`Dial queue length: ${this.dialQueue.length()}`);
+    this.logger.debug(`[REQRESP_DEBUG] dialProtocol starting for ${peerId.toString()}`, {
+      protocol,
+      timeout,
+      queueLength: this.dialQueue.length(),
+      optimisticNegotiation: this.opts.p2pOptimisticNegotiation,
+      activeConnectionsForPeer: this.activeConnectionsCount.get(peerId) ?? 0,
+    });
 
+    const queueWaitStart = Date.now();
     const stream = await this.dialQueue.put(() =>
       this.libp2p.dialProtocol(peerId, protocol, {
         signal: AbortSignal.any(
@@ -198,17 +212,23 @@ export class ConnectionSampler {
         negotiateFully: !this.opts.p2pOptimisticNegotiation,
       }),
     );
+    const queueWaitEnd = Date.now();
+
     stream.metadata.peerId = peerId;
     this.streams.add(stream);
 
     const updatedActiveConnectionsCount = (this.activeConnectionsCount.get(peerId) ?? 0) + 1;
     this.activeConnectionsCount.set(peerId, updatedActiveConnectionsCount);
 
-    this.logger.trace('Dialed protocol', {
+    const dialEnd = Date.now();
+    this.logger.debug(`[REQRESP_DEBUG] dialProtocol completed successfully`, {
       streamId: stream.id,
       protocol,
       peerId: peerId.toString(),
       activeConnectionsCount: updatedActiveConnectionsCount,
+      totalDialTime: dialEnd - dialStart,
+      queueWaitTime: queueWaitEnd - queueWaitStart,
+      actualDialTime: dialEnd - queueWaitEnd,
     });
     return stream;
   }

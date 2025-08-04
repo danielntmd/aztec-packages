@@ -175,6 +175,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
   }
 
   public updateConfig(config: Partial<P2PReqRespConfig>) {
+    this.logger.debug(`[REQRESP_DEBUG] Updating reqresp config:`, config);
     this.reqresp.updateConfig(config);
   }
 
@@ -543,7 +544,28 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     requests: InstanceType<SubProtocolMap[SubProtocol]['request']>[],
     pinnedPeerId: PeerId | undefined,
   ): Promise<InstanceType<SubProtocolMap[SubProtocol]['response']>[]> {
-    return this.reqresp.sendBatchRequest(protocol, requests, pinnedPeerId);
+    const requestStart = Date.now();
+    this.logger.debug(
+      `[REQRESP_DEBUG] Sending batch request for protocol ${protocol}, ${requests.length} requests, pinnedPeerId: ${pinnedPeerId?.toString() || 'none'}`,
+    );
+
+    const result = this.reqresp.sendBatchRequest(protocol, requests, pinnedPeerId);
+
+    // Add timing information when the promise resolves
+    result.then(
+      responses => {
+        const requestEnd = Date.now();
+        this.logger.debug(
+          `[REQRESP_DEBUG] Batch request completed in ${requestEnd - requestStart}ms, got ${responses.length} responses`,
+        );
+      },
+      error => {
+        const requestEnd = Date.now();
+        this.logger.error(`[REQRESP_DEBUG] Batch request failed after ${requestEnd - requestStart}ms: ${error}`);
+      },
+    );
+
+    return result;
   }
 
   /**
@@ -690,29 +712,46 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
   }
 
   protected async handleGossipedTx(payloadData: Buffer, msgId: string, source: PeerId) {
+    const handleStart = Date.now();
+    const tx = Tx.fromBuffer(payloadData);
+    const txHash = tx.getTxHash().toString();
+    this.logger.debug(`[REQRESP_DEBUG] handleGossipedTx started for tx ${txHash} from peer ${source.toString()}`);
+
     const validationFunc = async () => {
-      const tx = Tx.fromBuffer(payloadData);
       const result = await this.validatePropagatedTx(tx, source);
       return { result, obj: tx };
     };
 
-    const { result, obj: tx } = await this.validateReceivedMessage<Tx>(validationFunc, msgId, source, TopicType.tx);
-    if (!result || !tx) {
+    const { result, obj: validatedTx } = await this.validateReceivedMessage<Tx>(
+      validationFunc,
+      msgId,
+      source,
+      TopicType.tx,
+    );
+    if (!result || !validatedTx) {
+      const handleEnd = Date.now();
+      this.logger.debug(
+        `[REQRESP_DEBUG] handleGossipedTx validation failed for tx ${txHash} in ${handleEnd - handleStart}ms`,
+      );
       return;
     }
-    const txHash = tx.getTxHash();
-    const txHashString = txHash.toString();
-    this.logger.verbose(`Received tx ${txHashString} from external peer ${source.toString()} via gossip`, {
-      source: source.toString(),
-      txHash: txHashString,
-    });
+    const txHashString = txHash;
+    this.logger.verbose(
+      `[REQRESP_DEBUG] Received tx ${txHashString} from external peer ${source.toString()} via gossip`,
+      {
+        source: source.toString(),
+        txHash: txHashString,
+      },
+    );
 
     if (this.config.dropTransactions && randomInt(1000) < this.config.dropTransactionsProbability * 1000) {
-      this.logger.debug(`Intentionally dropping tx ${txHashString} (probability rule)`);
+      this.logger.debug(`[REQRESP_DEBUG] Intentionally dropping tx ${txHashString} (probability rule)`);
       return;
     }
 
-    await this.mempools.txPool.addTxs([tx]);
+    await this.mempools.txPool.addTxs([validatedTx]);
+    const handleEnd = Date.now();
+    this.logger.debug(`[REQRESP_DEBUG] handleGossipedTx completed for tx ${txHash} in ${handleEnd - handleStart}ms`);
   }
 
   /**

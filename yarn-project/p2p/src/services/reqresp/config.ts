@@ -6,6 +6,15 @@ export const DEFAULT_OVERALL_REQUEST_TIMEOUT_MS = 180000; // 4000;
 export const DEFAULT_REQRESP_DIAL_TIMEOUT_MS = 180000; // 1000;
 export const DEFAULT_OPTIMISTIC_NEGOTIATION = false;
 
+// Log timeout values for debugging - using a debug function to avoid linting issues
+const logTimeouts = () => {
+  // eslint-disable-next-line no-console
+  console.log(
+    `[REQRESP_DEBUG] Default reqresp timeouts: individual=${DEFAULT_INDIVIDUAL_REQUEST_TIMEOUT_MS}ms, overall=${DEFAULT_OVERALL_REQUEST_TIMEOUT_MS}ms, dial=${DEFAULT_REQRESP_DIAL_TIMEOUT_MS}ms, optimisticNegotiation=${DEFAULT_OPTIMISTIC_NEGOTIATION}`,
+  );
+};
+logTimeouts();
+
 // For use in tests.
 export const DEFAULT_P2P_REQRESP_CONFIG: P2PReqRespConfig = {
   overallRequestTimeoutMs: DEFAULT_OVERALL_REQUEST_TIMEOUT_MS,

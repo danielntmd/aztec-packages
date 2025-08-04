@@ -25,6 +25,9 @@ describe('e2e_p2p_reqresp_tx', () => {
   let nodes: AztecNodeService[];
 
   beforeEach(async () => {
+    const beforeEachStart = Date.now();
+
+    const networkTestCreateStart = Date.now();
     t = await P2PNetworkTest.create({
       testName: 'e2e_p2p_reqresp_tx',
       numberOfNodes: 0,
@@ -38,17 +41,55 @@ describe('e2e_p2p_reqresp_tx', () => {
         aztecEpochDuration: 64, // stable committee
       },
     });
-    t.logger.info('Testing Changes....');
+    const networkTestCreateEnd = Date.now();
+
+    // Use a debug logger that will be available after t is created
+    const logger = createLogger('reqresp_test_debug');
+    logger.info(`[REQRESP_DEBUG] beforeEach started at ${new Date().toISOString()}`);
+    logger.info(
+      `[REQRESP_DEBUG] P2PNetworkTest.create completed in ${networkTestCreateEnd - networkTestCreateStart}ms`,
+    );
+
+    t.logger.info('[REQRESP_DEBUG] Testing Changes....');
+
+    const snapshotsStart = Date.now();
     await t.applyBaseSnapshots();
+    const snapshotsEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] applyBaseSnapshots completed in ${snapshotsEnd - snapshotsStart}ms`);
+
+    const setupStart = Date.now();
     await t.setup();
+    const setupEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] setup completed in ${setupEnd - setupStart}ms`);
+
+    const beforeEachEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] beforeEach completed in ${beforeEachEnd - beforeEachStart}ms`);
   });
 
   afterEach(async () => {
+    const afterEachStart = Date.now();
+    const logger = createLogger('reqresp_test_debug');
+    logger.info(`[REQRESP_DEBUG] afterEach started at ${new Date().toISOString()}`);
+
+    const stopNodesStart = Date.now();
     await t.stopNodes(nodes);
+    const stopNodesEnd = Date.now();
+    logger.info(`[REQRESP_DEBUG] stopNodes completed in ${stopNodesEnd - stopNodesStart}ms`);
+
+    const teardownStart = Date.now();
     await t.teardown();
+    const teardownEnd = Date.now();
+    logger.info(`[REQRESP_DEBUG] teardown completed in ${teardownEnd - teardownStart}ms`);
+
+    const cleanupStart = Date.now();
     for (let i = 0; i < NUM_VALIDATORS; i++) {
       fs.rmSync(`${DATA_DIR}-${i}`, { recursive: true, force: true, maxRetries: 3 });
     }
+    const cleanupEnd = Date.now();
+    logger.info(`[REQRESP_DEBUG] cleanup completed in ${cleanupEnd - cleanupStart}ms`);
+
+    const afterEachEnd = Date.now();
+    logger.info(`[REQRESP_DEBUG] afterEach completed in ${afterEachEnd - afterEachStart}ms`);
   });
 
   const getNodePort = (nodeIndex: number) => BOOT_NODE_UDP_PORT + 1 + nodeIndex;
@@ -67,11 +108,15 @@ describe('e2e_p2p_reqresp_tx', () => {
      *       from the other pxes.
      */
 
+    const testStartTime = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Test started at ${new Date().toISOString()}`);
+
     if (!t.bootstrapNodeEnr) {
       throw new Error('Bootstrap node ENR is not available');
     }
 
-    t.logger.info('Creating nodes');
+    const nodeCreationStart = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Creating ${NUM_VALIDATORS} nodes at ${new Date().toISOString()}`);
     nodes = await createNodes(
       t.ctx.aztecNodeConfig,
       t.ctx.dateProvider,
@@ -82,102 +127,220 @@ describe('e2e_p2p_reqresp_tx', () => {
       DATA_DIR,
       shouldCollectMetrics(),
     );
+    const nodeCreationEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Node creation completed in ${nodeCreationEnd - nodeCreationStart}ms`);
 
-    t.logger.info('Sleeping to allow nodes to connect');
+    const connectionWaitStart = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Sleeping 4000ms to allow nodes to connect at ${new Date().toISOString()}`);
     await sleep(4000);
+    const connectionWaitEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Connection wait completed in ${connectionWaitEnd - connectionWaitStart}ms`);
 
+    // Log peer connections for each node
+    for (let i = 0; i < nodes.length; i++) {
+      const peers = (nodes[i] as any).p2pClient?.p2pService?.getPeers();
+      t.logger.info(`[REQRESP_DEBUG] Node ${i} (port ${getNodePort(i)}) has ${peers?.length || 0} connected peers`);
+    }
+
+    const accountSetupStart = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Setting up account at ${new Date().toISOString()}`);
     await t.setupAccount();
+    const accountSetupEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Account setup completed in ${accountSetupEnd - accountSetupStart}ms`);
 
-    t.logger.info('Preparing transactions to send');
+    const txPrepStart = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Preparing transactions to send at ${new Date().toISOString()}`);
     const contexts = await timesAsync(2, () =>
       createPXEServiceAndPrepareTransactions(t.logger, t.ctx.aztecNode, NUM_TXS_PER_NODE, t.fundedAccount),
     );
+    const txPrepEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Transaction preparation completed in ${txPrepEnd - txPrepStart}ms`);
+    t.logger.info(
+      `[REQRESP_DEBUG] Prepared ${contexts.length} contexts with ${contexts.reduce((sum, ctx) => sum + ctx.txs.length, 0)} total transactions`,
+    );
 
-    t.logger.info('Removing initial node');
+    const nodeRemovalStart = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Removing initial node at ${new Date().toISOString()}`);
     await t.removeInitialNode();
+    const nodeRemovalEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Initial node removal completed in ${nodeRemovalEnd - nodeRemovalStart}ms`);
 
-    t.logger.info('Starting fresh slot');
+    const slotAdvanceStart = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Starting fresh slot at ${new Date().toISOString()}`);
     const [timestamp] = await t.ctx.cheatCodes.rollup.advanceToNextSlot();
     t.ctx.dateProvider.setTime(Number(timestamp) * 1000);
+    const slotAdvanceEnd = Date.now();
+    t.logger.info(
+      `[REQRESP_DEBUG] Slot advance completed in ${slotAdvanceEnd - slotAdvanceStart}ms, new timestamp: ${timestamp}`,
+    );
 
+    const proposerSelectionStart = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Getting proposer indexes at ${new Date().toISOString()}`);
     const { proposerIndexes, nodesToTurnOffTxGossip } = await getProposerIndexes();
-    t.logger.info(`Turning off tx gossip for nodes: ${nodesToTurnOffTxGossip.map(getNodePort)}`);
-    t.logger.info(`Sending txs to proposer nodes: ${proposerIndexes.map(getNodePort)}`);
+    const proposerSelectionEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Proposer selection completed in ${proposerSelectionEnd - proposerSelectionStart}ms`);
+    t.logger.info(
+      `[REQRESP_DEBUG] Turning off tx gossip for nodes: ${nodesToTurnOffTxGossip.map(getNodePort)} (${nodesToTurnOffTxGossip.length} nodes)`,
+    );
+    t.logger.info(
+      `[REQRESP_DEBUG] Sending txs to proposer nodes: ${proposerIndexes.map(getNodePort)} (${proposerIndexes.length} nodes)`,
+    );
 
     // Replace the p2p node implementation of some of the nodes with a spy such that it does not store transactions that are gossiped to it
     // Original implementation of `handleGossipedTx` will store received transactions in the tx pool.
     // We chose the first 2 nodes that will be the proposers for the next few slots
+    const gossipDisableStart = Date.now();
+    t.logger.info(
+      `[REQRESP_DEBUG] Disabling gossip for ${nodesToTurnOffTxGossip.length} nodes at ${new Date().toISOString()}`,
+    );
     for (const nodeIndex of nodesToTurnOffTxGossip) {
       const logger = createLogger(`p2p:${getNodePort(nodeIndex)}`);
+      t.logger.info(`[REQRESP_DEBUG] Disabling gossip for node ${nodeIndex} (port ${getNodePort(nodeIndex)})`);
       jest.spyOn((nodes[nodeIndex] as any).p2pClient.p2pService, 'handleGossipedTx').mockImplementation(((
         payloadData: Buffer,
       ) => {
         const txHash = Tx.fromBuffer(payloadData).getTxHash();
-        logger.info(`Skipping storage of gossiped transaction ${txHash.toString()}`);
+        logger.info(
+          `[REQRESP_DEBUG] Skipping storage of gossiped transaction ${txHash.toString()} on node ${nodeIndex}`,
+        );
         return Promise.resolve();
       }) as any);
     }
+    const gossipDisableEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Gossip disabling completed in ${gossipDisableEnd - gossipDisableStart}ms`);
 
     // We send the tx to the proposer nodes directly, ignoring the pxe and node in each context
     // We cannot just call tx.send since they were created using a pxe wired to the first node which is now stopped
-    t.logger.info('Sending transactions through proposer nodes');
+    const txSendStart = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Sending transactions through proposer nodes at ${new Date().toISOString()}`);
     const sentTxs = contexts.map((c, i) =>
-      c.txs.map(tx => {
+      c.txs.map((tx, txIndex) => {
         const node = nodes[proposerIndexes[i]];
-        void node.sendTx(tx).catch(err => t.logger.error(`Error sending tx: ${err}`));
+        const txHash = tx.getTxHash().toString();
+        t.logger.info(
+          `[REQRESP_DEBUG] Sending tx ${i}-${txIndex} (${txHash}) to proposer node ${proposerIndexes[i]} (port ${getNodePort(proposerIndexes[i])})`,
+        );
+        void node.sendTx(tx).catch(err => t.logger.error(`[REQRESP_DEBUG] Error sending tx ${txHash}: ${err}`));
         return new SentTx(node, () => Promise.resolve(tx.getTxHash()));
       }),
     );
+    const txSendEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] Transaction sending completed in ${txSendEnd - txSendStart}ms`);
+    t.logger.info(`[REQRESP_DEBUG] Sent ${sentTxs.reduce((sum, txs) => sum + txs.length, 0)} total transactions`);
 
-    t.logger.info('Waiting for all transactions to be mined');
+    const txWaitStart = Date.now();
+    const timeoutMs = WAIT_FOR_TX_TIMEOUT * 1.5;
+    t.logger.info(`[REQRESP_DEBUG] Waiting for all transactions to be mined at ${new Date().toISOString()}`);
+    t.logger.info(`[REQRESP_DEBUG] Using timeout of ${timeoutMs}ms (WAIT_FOR_TX_TIMEOUT * 1.5)`);
+    t.logger.info(
+      `[REQRESP_DEBUG] Total transactions to wait for: ${sentTxs.reduce((sum, txs) => sum + txs.length, 0)}`,
+    );
+
     await Promise.all(
       sentTxs.flatMap((txs, i) =>
         txs.map(async (tx, j) => {
-          t.logger.info(`Waiting for tx ${i}-${j} ${(await tx.getTxHash()).toString()} to be mined`);
-          await tx.wait({ timeout: WAIT_FOR_TX_TIMEOUT * 1.5 }); // more transactions in this test so allow more time
-          t.logger.info(`Tx ${i}-${j} ${(await tx.getTxHash()).toString()} has been mined`);
+          const txWaitStartIndividual = Date.now();
+          const txHash = (await tx.getTxHash()).toString();
+          t.logger.info(
+            `[REQRESP_DEBUG] Waiting for tx ${i}-${j} (${txHash}) to be mined at ${new Date().toISOString()}`,
+          );
+
+          try {
+            await tx.wait({ timeout: timeoutMs }); // more transactions in this test so allow more time
+            const txWaitEndIndividual = Date.now();
+            t.logger.info(
+              `[REQRESP_DEBUG] Tx ${i}-${j} (${txHash}) has been mined in ${txWaitEndIndividual - txWaitStartIndividual}ms`,
+            );
+          } catch (error) {
+            const txWaitEndIndividual = Date.now();
+            t.logger.error(
+              `[REQRESP_DEBUG] Tx ${i}-${j} (${txHash}) failed to mine after ${txWaitEndIndividual - txWaitStartIndividual}ms: ${error}`,
+            );
+            throw error;
+          }
         }),
       ),
     );
 
-    t.logger.info('All transactions mined');
+    const txWaitEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] All transactions mined in ${txWaitEnd - txWaitStart}ms`);
+    const totalTestTime = txWaitEnd - testStartTime;
+    t.logger.info(`[REQRESP_DEBUG] Total test time so far: ${totalTestTime}ms`);
   });
 
   /**
    * Get the indexes in the nodes array that will produce the next few blocks
    */
   async function getProposerIndexes() {
+    const fnStart = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] getProposerIndexes started at ${new Date().toISOString()}`);
+
     // Get the nodes for the next set of slots
+    const contractInitStart = Date.now();
     const rollupContract = new RollupContract(
       t.ctx.deployL1ContractsValues.l1Client,
       t.ctx.deployL1ContractsValues.l1ContractAddresses.rollupAddress,
     );
+    const contractInitEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] RollupContract initialization took ${contractInitEnd - contractInitStart}ms`);
 
+    const attestersStart = Date.now();
     const attesters = await rollupContract.getAttesters();
+    const attestersEnd = Date.now();
+    t.logger.info(
+      `[REQRESP_DEBUG] getAttesters() took ${attestersEnd - attestersStart}ms, got ${attesters.length} attesters`,
+    );
 
+    const timestampStart = Date.now();
     const currentTime = await t.ctx.cheatCodes.eth.timestamp();
+    const timestampEnd = Date.now();
+    t.logger.info(
+      `[REQRESP_DEBUG] Getting timestamp took ${timestampEnd - timestampStart}ms, currentTime: ${currentTime}`,
+    );
+
+    const slotDurationStart = Date.now();
     const slotDuration = await rollupContract.getSlotDuration();
+    const slotDurationEnd = Date.now();
+    t.logger.info(
+      `[REQRESP_DEBUG] getSlotDuration() took ${slotDurationEnd - slotDurationStart}ms, slotDuration: ${slotDuration}`,
+    );
 
     const proposers = [];
+    const proposerQueryStart = Date.now();
 
     for (let i = 0; i < 3; i++) {
       const nextSlot = BigInt(currentTime) + BigInt(i) * BigInt(slotDuration);
+      const proposerStart = Date.now();
       const proposer = await rollupContract.getProposerAt(nextSlot);
+      const proposerEnd = Date.now();
+      t.logger.info(
+        `[REQRESP_DEBUG] getProposerAt(${nextSlot}) took ${proposerEnd - proposerStart}ms, proposer: ${proposer}`,
+      );
       proposers.push(proposer);
     }
+    const proposerQueryEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] All proposer queries took ${proposerQueryEnd - proposerQueryStart}ms`);
+
     // Get the indexes of the nodes that are responsible for the next two slots
     const proposerIndexes = proposers.map(proposer => attesters.indexOf(proposer as `0x${string}`));
+    t.logger.info(`[REQRESP_DEBUG] Proposer indexes: ${proposerIndexes.join(', ')}`);
 
     if (proposerIndexes.some(i => i === -1)) {
-      throw new Error(
-        `Proposer index not found for proposer ` +
-          `(proposers=${proposers.join(',')}, indices=${proposerIndexes.join(',')})`,
-      );
+      const errorMsg = `Proposer index not found for proposer (proposers=${proposers.join(',')}, indices=${proposerIndexes.join(',')})`;
+      t.logger.error(`[REQRESP_DEBUG] ${errorMsg}`);
+      throw new Error(errorMsg);
     }
 
     const nodesToTurnOffTxGossip = Array.from({ length: NUM_VALIDATORS }, (_, i) => i).filter(
       i => !proposerIndexes.includes(i),
     );
+
+    const fnEnd = Date.now();
+    t.logger.info(`[REQRESP_DEBUG] getProposerIndexes completed in ${fnEnd - fnStart}ms`);
+    t.logger.info(
+      `[REQRESP_DEBUG] ProposerIndexes: ${proposerIndexes.join(', ')}, nodesToTurnOffTxGossip: ${nodesToTurnOffTxGossip.join(', ')}`,
+    );
+
     return { proposerIndexes, nodesToTurnOffTxGossip };
   }
 });

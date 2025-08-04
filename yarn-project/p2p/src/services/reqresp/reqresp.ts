@@ -215,6 +215,18 @@ export class ReqResp implements ReqRespInterface {
     maxPeers = Math.max(10, Math.ceil(requests.length / 3)),
     maxRetryAttempts = 3,
   ): Promise<InstanceType<SubProtocolMap[SubProtocol]['response']>[]> {
+    const batchStartTime = Date.now();
+    this.logger.debug(`[REQRESP_DEBUG] sendBatchRequest started for protocol ${subProtocol}`, {
+      requestCount: requests.length,
+      pinnedPeer: pinnedPeer?.toString() || 'none',
+      timeoutMs,
+      maxPeers,
+      maxRetryAttempts,
+      overallTimeout: this.overallRequestTimeoutMs,
+      individualTimeout: this.individualRequestTimeoutMs,
+      dialTimeout: this.dialTimeoutMs,
+    });
+
     const responseValidator = this.subProtocolValidators[subProtocol];
     const responses: InstanceType<SubProtocolMap[SubProtocol]['response']>[] = new Array(requests.length);
     const requestBuffers = requests.map(req => req.toBuffer());
@@ -233,9 +245,11 @@ export class ReqResp implements ReqRespInterface {
       );
 
       if (batchSampler.activePeerCount === 0 && !pinnedPeer) {
-        this.logger.warn('No active peers to send requests to');
+        this.logger.warn('[REQRESP_DEBUG] No active peers to send requests to');
         return [];
       }
+
+      this.logger.debug(`[REQRESP_DEBUG] Initialized batch sampler with ${batchSampler.activePeerCount} active peers`);
 
       // This is where it gets fun
       // The outer loop is the retry loop, we will continue to retry until we process all indices we have
@@ -247,6 +261,12 @@ export class ReqResp implements ReqRespInterface {
 
       let retryAttempts = 0;
       while (pendingRequestIndices.size > 0 && batchSampler.activePeerCount > 0 && retryAttempts < maxRetryAttempts) {
+        const retryStartTime = Date.now();
+        this.logger.debug(`[REQRESP_DEBUG] Starting retry attempt ${retryAttempts + 1}/${maxRetryAttempts}`, {
+          pendingRequestCount: pendingRequestIndices.size,
+          activePeerCount: batchSampler.activePeerCount,
+        });
+
         if (signal.aborted) {
           throw new AbortError('Batch request aborted');
         }
@@ -271,11 +291,17 @@ export class ReqResp implements ReqRespInterface {
         // We use the default limits for the subprotocol to avoid hitting the rate limiter
         if (pinnedPeer) {
           const limit = this.rateLimiter.getRateLimits(subProtocol).peerLimit.quotaCount;
+          const pinnedIndices = Array.from(pendingRequestIndices.values()).slice(0, limit);
           requestBatches.set(pinnedPeer.toString(), {
             peerId: pinnedPeer,
-            indices: Array.from(pendingRequestIndices.values()).slice(0, limit),
+            indices: pinnedIndices,
           });
+          this.logger.debug(
+            `[REQRESP_DEBUG] Added pinned peer ${pinnedPeer.toString()} with ${pinnedIndices.length} requests (limit: ${limit})`,
+          );
         }
+
+        this.logger.debug(`[REQRESP_DEBUG] Created ${requestBatches.size} peer batches for parallel processing`);
 
         // Make parallel requests for each peer's batch
         // A batch entry will look something like this:
@@ -327,33 +353,69 @@ export class ReqResp implements ReqRespInterface {
         );
 
         // Process results
+        let processedResponses = 0;
         for (const { results } of batchResults) {
           for (const { index, response } of results) {
             if (response) {
               responses[index] = response;
               pendingRequestIndices.delete(index);
+              processedResponses++;
             }
           }
         }
+
+        const retryEndTime = Date.now();
+        this.logger.debug(
+          `[REQRESP_DEBUG] Retry attempt ${retryAttempts + 1} completed in ${retryEndTime - retryStartTime}ms`,
+          {
+            processedResponses,
+            remainingRequests: pendingRequestIndices.size,
+            batchResultsCount: batchResults.length,
+          },
+        );
 
         retryAttempts++;
       }
 
       if (retryAttempts >= maxRetryAttempts) {
-        this.logger.debug(`Max retry attempts ${maxRetryAttempts} reached for batch request`);
+        this.logger.warn(`[REQRESP_DEBUG] Max retry attempts ${maxRetryAttempts} reached for batch request`);
       }
 
       return responses;
     };
 
     try {
-      return await executeTimeout<InstanceType<SubProtocolMap[SubProtocol]['response']>[]>(
+      this.logger.debug(`[REQRESP_DEBUG] Starting timeout wrapper with ${timeoutMs}ms timeout`);
+      const result = await executeTimeout<InstanceType<SubProtocolMap[SubProtocol]['response']>[]>(
         requestFunction,
         timeoutMs,
         () => new CollectiveReqRespTimeoutError(),
       );
+
+      const batchEndTime = Date.now();
+      const successfulResponses = result.filter(r => r !== undefined).length;
+      this.logger.debug(
+        `[REQRESP_DEBUG] sendBatchRequest completed successfully in ${batchEndTime - batchStartTime}ms`,
+        {
+          protocol: subProtocol,
+          totalRequests: requests.length,
+          successfulResponses,
+          successRate: `${((successfulResponses / requests.length) * 100).toFixed(1)}%`,
+        },
+      );
+
+      return result;
     } catch (e: any) {
-      this.logger.debug(`${e.message} | subProtocol: ${subProtocol}`);
+      const batchEndTime = Date.now();
+      this.logger.error(
+        `[REQRESP_DEBUG] sendBatchRequest failed after ${batchEndTime - batchStartTime}ms: ${e.message}`,
+        {
+          protocol: subProtocol,
+          requestCount: requests.length,
+          errorType: e.constructor.name,
+          timeoutMs,
+        },
+      );
       return [];
     }
   }
@@ -393,14 +455,33 @@ export class ReqResp implements ReqRespInterface {
     payload: Buffer,
     dialTimeout: number = this.dialTimeoutMs,
   ): Promise<ReqRespResponse> {
+    const requestStartTime = Date.now();
+    this.logger.debug(`[REQRESP_DEBUG] sendRequestToPeer started for peer ${peerId.toString()}`, {
+      protocol: subProtocol,
+      payloadSize: payload.length,
+      dialTimeout,
+      individualTimeout: this.individualRequestTimeoutMs,
+    });
+
     let stream: Stream | undefined;
     try {
       this.metrics.recordRequestSent(subProtocol);
 
-      this.logger.trace(`Sending request to peer ${peerId.toString()} on sub protocol ${subProtocol}`);
-      stream = await this.connectionSampler.dialProtocol(peerId, subProtocol, dialTimeout);
+      const dialStartTime = Date.now();
       this.logger.trace(
-        `Opened stream ${stream.id} for sending request to peer ${peerId.toString()} on sub protocol ${subProtocol}`,
+        `[REQRESP_DEBUG] Dialing protocol for peer ${peerId.toString()} on sub protocol ${subProtocol}`,
+      );
+      stream = await this.connectionSampler.dialProtocol(peerId, subProtocol, dialTimeout);
+      const dialEndTime = Date.now();
+      this.logger.debug(`[REQRESP_DEBUG] Protocol dial completed in ${dialEndTime - dialStartTime}ms`, {
+        streamId: stream.id,
+        peer: peerId.toString(),
+        protocol: subProtocol,
+      });
+
+      const pipelineStartTime = Date.now();
+      this.logger.trace(
+        `[REQRESP_DEBUG] Starting pipeline execution with ${this.individualRequestTimeoutMs}ms timeout`,
       );
 
       const timeoutErr = new IndividualReqRespTimeoutError();
@@ -413,12 +494,36 @@ export class ReqResp implements ReqRespInterface {
         this.individualRequestTimeoutMs,
         () => timeoutErr,
       );
+
+      const pipelineEndTime = Date.now();
+      const requestEndTime = Date.now();
+      this.logger.debug(
+        `[REQRESP_DEBUG] sendRequestToPeer completed successfully in ${requestEndTime - requestStartTime}ms`,
+        {
+          peer: peerId.toString(),
+          protocol: subProtocol,
+          pipelineTime: pipelineEndTime - pipelineStartTime,
+          responseStatus: resp.status,
+          responseDataLength: 'data' in resp ? resp.data?.length || 0 : 0,
+        },
+      );
+
       return resp;
     } catch (e: any) {
+      const requestEndTime = Date.now();
+      this.logger.error(`[REQRESP_DEBUG] sendRequestToPeer failed after ${requestEndTime - requestStartTime}ms`, {
+        peer: peerId.toString(),
+        protocol: subProtocol,
+        error: e.message,
+        errorType: e.constructor.name,
+        hasStream: !!stream,
+      });
+
       // On error we immediately abort the stream, this is preferred way,
       // because it signals to the sender that error happened, whereas
       // closing the stream only closes our side and is much slower
       if (stream) {
+        this.logger.trace(`[REQRESP_DEBUG] Aborting stream ${stream.id} due to error`);
         stream!.abort(e);
       }
 
@@ -426,21 +531,24 @@ export class ReqResp implements ReqRespInterface {
       this.handleResponseError(e, peerId, subProtocol);
 
       // If there is an exception, we return an unknown response
-      this.logger.debug(`Error sending request to peer ${peerId.toString()} on sub protocol ${subProtocol}: ${e}`);
+      this.logger.debug(`[REQRESP_DEBUG] Returning FAILURE status for failed request`);
       return { status: ReqRespStatus.FAILURE };
     } finally {
       // Only close the stream if we created it
       // Note even if we aborted the stream, calling close on it is ok, it's just a no-op
       if (stream) {
         try {
-          this.logger.trace(
-            `Closing stream ${stream.id} for request to peer ${peerId.toString()} on sub protocol ${subProtocol}`,
-          );
+          const closeStartTime = Date.now();
+          this.logger.trace(`[REQRESP_DEBUG] Closing stream ${stream.id} for peer ${peerId.toString()}`);
           await this.connectionSampler.close(stream);
+          const closeEndTime = Date.now();
+          this.logger.trace(`[REQRESP_DEBUG] Stream closed in ${closeEndTime - closeStartTime}ms`);
         } catch (closeError) {
-          this.logger.error(
-            `Error closing stream: ${closeError instanceof Error ? closeError.message : 'Unknown error'}`,
-          );
+          this.logger.error(`[REQRESP_DEBUG] Error closing stream ${stream.id}:`, {
+            error: closeError instanceof Error ? closeError.message : 'Unknown error',
+            peer: peerId.toString(),
+            protocol: subProtocol,
+          });
         }
       }
     }

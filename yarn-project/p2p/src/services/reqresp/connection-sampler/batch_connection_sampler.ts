@@ -28,6 +28,12 @@ export class BatchConnectionSampler {
     exclude?: PeerId[],
     private readonly logger = createLogger('p2p:reqresp:batch-connection-sampler'),
   ) {
+    this.logger.debug(`[REQRESP_DEBUG] BatchConnectionSampler creating batch`, {
+      batchSize,
+      maxPeers,
+      excludeCount: exclude?.length || 0,
+    });
+
     if (maxPeers <= 0) {
       throw new Error('Max peers cannot be 0');
     }
@@ -40,7 +46,16 @@ export class BatchConnectionSampler {
 
     // Sample initial peers
     const excluding = exclude && new Map(exclude.map(peerId => [peerId.toString(), true] as const));
+    const samplingStart = Date.now();
     this.batch = this.connectionSampler.samplePeersBatch(maxPeers, excluding);
+    const samplingEnd = Date.now();
+
+    this.logger.debug(`[REQRESP_DEBUG] BatchConnectionSampler initialized`, {
+      sampledPeerCount: this.batch.length,
+      requestsPerPeer: this.requestsPerPeer,
+      samplingTimeMs: samplingEnd - samplingStart,
+      peers: this.batch.map(p => p.toString()),
+    });
   }
 
   /**
@@ -68,19 +83,40 @@ export class BatchConnectionSampler {
   removePeerAndReplace(peerId: PeerId): void {
     const index = this.batch.findIndex(p => p === peerId);
     if (index === -1) {
+      this.logger.debug(`[REQRESP_DEBUG] Peer not found in batch for removal: ${peerId.toString()}`);
       return;
     }
 
+    this.logger.debug(`[REQRESP_DEBUG] Removing and replacing peer at index ${index}`, {
+      peerId: peerId.toString(),
+      batchSizeBefore: this.batch.length,
+    });
+
     const excluding = new Map([[peerId.toString(), true]]);
+    const replacementStart = Date.now();
     const newPeer = this.connectionSampler.getPeer(excluding); // Q: Shouldn't we accumulate all excluded peers? Otherwise the sampler could return us a previously excluded peer?
+    const replacementEnd = Date.now();
 
     if (newPeer) {
       this.batch[index] = newPeer;
-      this.logger.trace('Replaced peer', { peerId, newPeer });
+      this.logger.debug(`[REQRESP_DEBUG] Replaced peer successfully in ${replacementEnd - replacementStart}ms`, {
+        oldPeer: peerId.toString(),
+        newPeer: newPeer.toString(),
+        index,
+        batchSizeAfter: this.batch.length,
+      });
     } else {
       // If we couldn't get a replacement, remove the peer and compact the array
       this.batch.splice(index, 1);
-      this.logger.trace('Removed peer', { peerId });
+      this.logger.warn(
+        `[REQRESP_DEBUG] No replacement peer available, removed peer from batch in ${replacementEnd - replacementStart}ms`,
+        {
+          removedPeer: peerId.toString(),
+          index,
+          batchSizeBefore: this.batch.length + 1,
+          batchSizeAfter: this.batch.length,
+        },
+      );
     }
   }
 

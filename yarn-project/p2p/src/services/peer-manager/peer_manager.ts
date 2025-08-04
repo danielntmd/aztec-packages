@@ -151,14 +151,47 @@ export class PeerManager implements PeerManagerInterface {
 
   @trackSpan('PeerManager.heartbeat')
   public async heartbeat() {
+    const heartbeatStart = Date.now();
     this.heartbeatCounter++;
+
+    this.logger.debug(`[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} starting`, {
+      connectedPeers: this.libP2PNode.getPeers().length,
+      timedOutPeers: this.timedOutPeers.size,
+      peersToDisconnect: this.peersToBeDisconnected.size,
+      cachedPeers: this.cachedPeers.size,
+    });
+
+    const scoringStart = Date.now();
     this.peerScoring.decayAllScores();
+    const scoringEnd = Date.now();
+
+    const cleanupStart = Date.now();
     this.cleanupExpiredTimeouts();
+    const cleanupEnd = Date.now();
 
+    const authUpdateStart = Date.now();
     await this.updateAuthenticatedPeers();
-    await this.processScheduledDisconnects();
+    const authUpdateEnd = Date.now();
 
+    const disconnectStart = Date.now();
+    await this.processScheduledDisconnects();
+    const disconnectEnd = Date.now();
+
+    const discoverStart = Date.now();
     this.discover();
+    const discoverEnd = Date.now();
+
+    const heartbeatEnd = Date.now();
+    this.logger.debug(
+      `[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} completed in ${heartbeatEnd - heartbeatStart}ms`,
+      {
+        scoringTime: scoringEnd - scoringStart,
+        cleanupTime: cleanupEnd - cleanupStart,
+        authUpdateTime: authUpdateEnd - authUpdateStart,
+        disconnectTime: disconnectEnd - disconnectStart,
+        discoverTime: discoverEnd - discoverStart,
+      },
+    );
   }
 
   /**
@@ -207,23 +240,36 @@ export class PeerManager implements PeerManagerInterface {
    */
   private handleConnectedPeerEvent(e: CustomEvent<PeerId>) {
     const peerId = e.detail;
-    this.logger.verbose(`Connected to peer ${peerId.toString()}`);
+    const connectionTime = Date.now();
+    this.logger.verbose(`[REQRESP_DEBUG] Connected to peer ${peerId.toString()}`, {
+      totalConnectedPeers: this.libP2PNode.getPeers().length,
+      isProtectedPeer: this.isProtectedPeer(peerId),
+      statusHandshakeDisabled: this.config.p2pDisableStatusHandshake,
+      allowOnlyValidators: this.config.p2pAllowOnlyValidators,
+    });
+
     if (this.config.p2pDisableStatusHandshake) {
+      this.logger.debug(`[REQRESP_DEBUG] Status handshake disabled for peer ${peerId.toString()}`);
       return;
     }
     // If we are not configured to only allow validators then perform a status handshake
     if (!this.config.p2pAllowOnlyValidators) {
+      this.logger.debug(
+        `[REQRESP_DEBUG] Starting status handshake with peer ${peerId.toString()} (allow all peers mode)`,
+      );
       void this.exchangeStatusHandshake(peerId);
       return;
     }
 
     // We are configured to only allow validators, but this doesn't apply to trusted, private peers or preferred peers
     if (this.isProtectedPeer(peerId)) {
+      this.logger.debug(`[REQRESP_DEBUG] Starting status handshake with protected peer ${peerId.toString()}`);
       void this.exchangeStatusHandshake(peerId);
       return;
     }
 
     // Initiate auth handshake
+    this.logger.debug(`[REQRESP_DEBUG] Starting auth handshake with peer ${peerId.toString()} (validators only mode)`);
     void this.exchangeAuthHandshake(peerId);
   }
 
@@ -233,11 +279,19 @@ export class PeerManager implements PeerManagerInterface {
    */
   private handleDisconnectedPeerEvent(e: CustomEvent<PeerId>) {
     const peerId = e.detail;
-    this.logger.verbose(`Disconnected from peer ${peerId.toString()}`);
+    const disconnectionTime = Date.now();
+    const peerScore = this.peerScoring.getScore(peerId.toString());
+
+    this.logger.verbose(`[REQRESP_DEBUG] Disconnected from peer ${peerId.toString()}`, {
+      totalConnectedPeers: this.libP2PNode.getPeers().length,
+      peerScore,
+      wasAuthenticated: this.authenticatedPeerIdToValidatorAddress.has(peerId.toString()),
+    });
+
     const validatorAddress = this.authenticatedPeerIdToValidatorAddress.get(peerId.toString());
     if (validatorAddress !== undefined) {
       this.logger.info(
-        `Removing authentication for validator ${validatorAddress} at peer id ${peerId.toString()} due to disconnection`,
+        `[REQRESP_DEBUG] Removing authentication for validator ${validatorAddress} at peer id ${peerId.toString()} due to disconnection`,
       );
       this.authenticatedValidatorAddressToPeerId.delete(validatorAddress.toString());
       this.authenticatedPeerIdToValidatorAddress.delete(peerId.toString());
@@ -342,7 +396,16 @@ export class PeerManager implements PeerManagerInterface {
   }
 
   public penalizePeer(peerId: PeerId, penalty: PeerErrorSeverity) {
+    const scoreBefore = this.peerScoring.getScore(peerId.toString());
     this.peerScoring.penalizePeer(peerId, penalty);
+    const scoreAfter = this.peerScoring.getScore(peerId.toString());
+
+    this.logger.debug(`[REQRESP_DEBUG] Penalized peer ${peerId.toString()}`, {
+      penalty,
+      scoreBefore,
+      scoreAfter,
+      scoreDelta: scoreAfter - scoreBefore,
+    });
   }
 
   public getPeerScore(peerId: string): number {
