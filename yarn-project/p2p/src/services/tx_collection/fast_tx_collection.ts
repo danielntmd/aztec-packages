@@ -251,7 +251,7 @@ export class FastTxCollection {
     }
 
     const reqrespStartTime = Date.now();
-    this.log.debug(
+    this.log.info(
       `[REQRESP_DEBUG] Starting fast reqresp for ${request.missingTxHashes.size} txs for ${request.type} at slot ${blockInfo.slotNumber}`,
       {
         ...blockInfo,
@@ -267,7 +267,7 @@ export class FastTxCollection {
       await this.txCollectionSink.collect(
         async txHashes => {
           const batchStartTime = Date.now();
-          this.log.debug(`[REQRESP_DEBUG] Sending batch request for ${txHashes.length} tx hashes`, {
+          this.log.info(`[REQRESP_DEBUG] Sending batch request for ${txHashes.length} tx hashes`, {
             slot: slotNumber,
             txHashes: txHashes.map(h => h.toString()),
             timeoutMs,
@@ -284,7 +284,7 @@ export class FastTxCollection {
           );
 
           const batchEndTime = Date.now();
-          this.log.debug(`[REQRESP_DEBUG] Batch request completed in ${batchEndTime - batchStartTime}ms`, {
+          this.log.info(`[REQRESP_DEBUG] Batch request completed in ${batchEndTime - batchStartTime}ms`, {
             slot: slotNumber,
             requestedCount: txHashes.length,
             receivedCount: txs.flat().length,
@@ -298,7 +298,7 @@ export class FastTxCollection {
       );
 
       const reqrespEndTime = Date.now();
-      this.log.debug(`[REQRESP_DEBUG] Fast reqresp collection completed in ${reqrespEndTime - reqrespStartTime}ms`, {
+      this.log.info(`[REQRESP_DEBUG] Fast reqresp collection completed in ${reqrespEndTime - reqrespStartTime}ms`, {
         slot: slotNumber,
         type: request.type,
         totalRequested: request.missingTxHashes.size,
@@ -320,7 +320,7 @@ export class FastTxCollection {
    * Called internally and from the main tx collection manager whenever the tx pool emits a tx-added event.
    */
   public foundTxs(txs: Tx[]) {
-    this.log.debug(`[REQRESP_DEBUG] foundTxs called with ${txs.length} transactions`);
+    this.log.info(`[REQRESP_DEBUG] foundTxs called with ${txs.length} transactions`);
 
     for (const request of this.requests) {
       const initialMissingCount = request.missingTxHashes.size;
@@ -341,7 +341,7 @@ export class FastTxCollection {
           });
           // If we found all txs for this request, we resolve the promise
           if (request.missingTxHashes.size === 0) {
-            this.log.debug(`[REQRESP_DEBUG] All txs found for fast collection request`, {
+            this.log.info(`[REQRESP_DEBUG] All txs found for fast collection request`, {
               ...request.blockInfo,
               type: request.type,
               totalFound: request.foundTxs.size,
@@ -352,7 +352,7 @@ export class FastTxCollection {
       }
 
       if (foundForThisRequest > 0) {
-        this.log.debug(`[REQRESP_DEBUG] Found ${foundForThisRequest}/${initialMissingCount} txs for request`, {
+        this.log.info(`[REQRESP_DEBUG] Found ${foundForThisRequest}/${initialMissingCount} txs for request`, {
           ...request.blockInfo,
           type: request.type,
           remaining: request.missingTxHashes.size,

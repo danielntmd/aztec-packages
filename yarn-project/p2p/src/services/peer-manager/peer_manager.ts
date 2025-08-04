@@ -154,7 +154,7 @@ export class PeerManager implements PeerManagerInterface {
     const heartbeatStart = Date.now();
     this.heartbeatCounter++;
 
-    this.logger.debug(`[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} starting`, {
+    this.logger.info(`[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} starting`, {
       connectedPeers: this.libP2PNode.getPeers().length,
       timedOutPeers: this.timedOutPeers.size,
       peersToDisconnect: this.peersToBeDisconnected.size,
@@ -182,7 +182,7 @@ export class PeerManager implements PeerManagerInterface {
     const discoverEnd = Date.now();
 
     const heartbeatEnd = Date.now();
-    this.logger.debug(
+    this.logger.info(
       `[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} completed in ${heartbeatEnd - heartbeatStart}ms`,
       {
         scoringTime: scoringEnd - scoringStart,
@@ -248,12 +248,12 @@ export class PeerManager implements PeerManagerInterface {
     });
 
     if (this.config.p2pDisableStatusHandshake) {
-      this.logger.debug(`[REQRESP_DEBUG] Status handshake disabled for peer ${peerId.toString()}`);
+      this.logger.info(`[REQRESP_DEBUG] Status handshake disabled for peer ${peerId.toString()}`);
       return;
     }
     // If we are not configured to only allow validators then perform a status handshake
     if (!this.config.p2pAllowOnlyValidators) {
-      this.logger.debug(
+      this.logger.info(
         `[REQRESP_DEBUG] Starting status handshake with peer ${peerId.toString()} (allow all peers mode)`,
       );
       void this.exchangeStatusHandshake(peerId);
@@ -262,13 +262,13 @@ export class PeerManager implements PeerManagerInterface {
 
     // We are configured to only allow validators, but this doesn't apply to trusted, private peers or preferred peers
     if (this.isProtectedPeer(peerId)) {
-      this.logger.debug(`[REQRESP_DEBUG] Starting status handshake with protected peer ${peerId.toString()}`);
+      this.logger.info(`[REQRESP_DEBUG] Starting status handshake with protected peer ${peerId.toString()}`);
       void this.exchangeStatusHandshake(peerId);
       return;
     }
 
     // Initiate auth handshake
-    this.logger.debug(`[REQRESP_DEBUG] Starting auth handshake with peer ${peerId.toString()} (validators only mode)`);
+    this.logger.info(`[REQRESP_DEBUG] Starting auth handshake with peer ${peerId.toString()} (validators only mode)`);
     void this.exchangeAuthHandshake(peerId);
   }
 
@@ -398,7 +398,7 @@ export class PeerManager implements PeerManagerInterface {
     this.peerScoring.penalizePeer(peerId, penalty);
     const scoreAfter = this.peerScoring.getScore(peerId.toString());
 
-    this.logger.debug(`[REQRESP_DEBUG] Penalized peer ${peerId.toString()}`, {
+    this.logger.info(`[REQRESP_DEBUG] Penalized peer ${peerId.toString()}`, {
       penalty,
       scoreBefore,
       scoreAfter,

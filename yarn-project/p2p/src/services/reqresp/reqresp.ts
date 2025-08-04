@@ -216,7 +216,7 @@ export class ReqResp implements ReqRespInterface {
     maxRetryAttempts = 3,
   ): Promise<InstanceType<SubProtocolMap[SubProtocol]['response']>[]> {
     const batchStartTime = Date.now();
-    this.logger.debug(`[REQRESP_DEBUG] sendBatchRequest started for protocol ${subProtocol}`, {
+    this.logger.info(`[REQRESP_DEBUG] sendBatchRequest started for protocol ${subProtocol}`, {
       requestCount: requests.length,
       pinnedPeer: pinnedPeer?.toString() || 'none',
       timeoutMs,
@@ -249,7 +249,7 @@ export class ReqResp implements ReqRespInterface {
         return [];
       }
 
-      this.logger.debug(`[REQRESP_DEBUG] Initialized batch sampler with ${batchSampler.activePeerCount} active peers`);
+      this.logger.info(`[REQRESP_DEBUG] Initialized batch sampler with ${batchSampler.activePeerCount} active peers`);
 
       // This is where it gets fun
       // The outer loop is the retry loop, we will continue to retry until we process all indices we have
@@ -262,7 +262,7 @@ export class ReqResp implements ReqRespInterface {
       let retryAttempts = 0;
       while (pendingRequestIndices.size > 0 && batchSampler.activePeerCount > 0 && retryAttempts < maxRetryAttempts) {
         const retryStartTime = Date.now();
-        this.logger.debug(`[REQRESP_DEBUG] Starting retry attempt ${retryAttempts + 1}/${maxRetryAttempts}`, {
+        this.logger.info(`[REQRESP_DEBUG] Starting retry attempt ${retryAttempts + 1}/${maxRetryAttempts}`, {
           pendingRequestCount: pendingRequestIndices.size,
           activePeerCount: batchSampler.activePeerCount,
         });
@@ -296,12 +296,12 @@ export class ReqResp implements ReqRespInterface {
             peerId: pinnedPeer,
             indices: pinnedIndices,
           });
-          this.logger.debug(
+          this.logger.info(
             `[REQRESP_DEBUG] Added pinned peer ${pinnedPeer.toString()} with ${pinnedIndices.length} requests (limit: ${limit})`,
           );
         }
 
-        this.logger.debug(`[REQRESP_DEBUG] Created ${requestBatches.size} peer batches for parallel processing`);
+        this.logger.info(`[REQRESP_DEBUG] Created ${requestBatches.size} peer batches for parallel processing`);
 
         // Make parallel requests for each peer's batch
         // A batch entry will look something like this:
@@ -365,7 +365,7 @@ export class ReqResp implements ReqRespInterface {
         }
 
         const retryEndTime = Date.now();
-        this.logger.debug(
+        this.logger.info(
           `[REQRESP_DEBUG] Retry attempt ${retryAttempts + 1} completed in ${retryEndTime - retryStartTime}ms`,
           {
             processedResponses,
@@ -385,7 +385,7 @@ export class ReqResp implements ReqRespInterface {
     };
 
     try {
-      this.logger.debug(`[REQRESP_DEBUG] Starting timeout wrapper with ${timeoutMs}ms timeout`);
+      this.logger.info(`[REQRESP_DEBUG] Starting timeout wrapper with ${timeoutMs}ms timeout`);
       const result = await executeTimeout<InstanceType<SubProtocolMap[SubProtocol]['response']>[]>(
         requestFunction,
         timeoutMs,
@@ -394,7 +394,7 @@ export class ReqResp implements ReqRespInterface {
 
       const batchEndTime = Date.now();
       const successfulResponses = result.filter(r => r !== undefined).length;
-      this.logger.debug(
+      this.logger.info(
         `[REQRESP_DEBUG] sendBatchRequest completed successfully in ${batchEndTime - batchStartTime}ms`,
         {
           protocol: subProtocol,
@@ -456,7 +456,7 @@ export class ReqResp implements ReqRespInterface {
     dialTimeout: number = this.dialTimeoutMs,
   ): Promise<ReqRespResponse> {
     const requestStartTime = Date.now();
-    this.logger.debug(`[REQRESP_DEBUG] sendRequestToPeer started for peer ${peerId.toString()}`, {
+    this.logger.info(`[REQRESP_DEBUG] sendRequestToPeer started for peer ${peerId.toString()}`, {
       protocol: subProtocol,
       payloadSize: payload.length,
       dialTimeout,
@@ -473,7 +473,7 @@ export class ReqResp implements ReqRespInterface {
       );
       stream = await this.connectionSampler.dialProtocol(peerId, subProtocol, dialTimeout);
       const dialEndTime = Date.now();
-      this.logger.debug(`[REQRESP_DEBUG] Protocol dial completed in ${dialEndTime - dialStartTime}ms`, {
+      this.logger.info(`[REQRESP_DEBUG] Protocol dial completed in ${dialEndTime - dialStartTime}ms`, {
         streamId: stream.id,
         peer: peerId.toString(),
         protocol: subProtocol,
@@ -497,7 +497,7 @@ export class ReqResp implements ReqRespInterface {
 
       const pipelineEndTime = Date.now();
       const requestEndTime = Date.now();
-      this.logger.debug(
+      this.logger.info(
         `[REQRESP_DEBUG] sendRequestToPeer completed successfully in ${requestEndTime - requestStartTime}ms`,
         {
           peer: peerId.toString(),
@@ -531,7 +531,7 @@ export class ReqResp implements ReqRespInterface {
       this.handleResponseError(e, peerId, subProtocol);
 
       // If there is an exception, we return an unknown response
-      this.logger.debug(`[REQRESP_DEBUG] Returning FAILURE status for failed request`);
+      this.logger.info(`[REQRESP_DEBUG] Returning FAILURE status for failed request`);
       return { status: ReqRespStatus.FAILURE };
     } finally {
       // Only close the stream if we created it

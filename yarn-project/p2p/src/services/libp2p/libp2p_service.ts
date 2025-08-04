@@ -175,7 +175,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
   }
 
   public updateConfig(config: Partial<P2PReqRespConfig>) {
-    this.logger.debug(`[REQRESP_DEBUG] Updating reqresp config:`, config);
+    this.logger.info(`[REQRESP_DEBUG] Updating reqresp config:`, config);
     this.reqresp.updateConfig(config);
   }
 
@@ -545,7 +545,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     pinnedPeerId: PeerId | undefined,
   ): Promise<InstanceType<SubProtocolMap[SubProtocol]['response']>[]> {
     const requestStart = Date.now();
-    this.logger.debug(
+    this.logger.info(
       `[REQRESP_DEBUG] Sending batch request for protocol ${protocol}, ${requests.length} requests, pinnedPeerId: ${pinnedPeerId?.toString() || 'none'}`,
     );
 
@@ -555,7 +555,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     result.then(
       responses => {
         const requestEnd = Date.now();
-        this.logger.debug(
+        this.logger.info(
           `[REQRESP_DEBUG] Batch request completed in ${requestEnd - requestStart}ms, got ${responses.length} responses`,
         );
       },
@@ -715,7 +715,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     const handleStart = Date.now();
     const tx = Tx.fromBuffer(payloadData);
     const txHash = tx.getTxHash().toString();
-    this.logger.debug(`[REQRESP_DEBUG] handleGossipedTx started for tx ${txHash} from peer ${source.toString()}`);
+    this.logger.info(`[REQRESP_DEBUG] handleGossipedTx started for tx ${txHash} from peer ${source.toString()}`);
 
     const validationFunc = async () => {
       const result = await this.validatePropagatedTx(tx, source);
@@ -745,13 +745,13 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     );
 
     if (this.config.dropTransactions && randomInt(1000) < this.config.dropTransactionsProbability * 1000) {
-      this.logger.debug(`[REQRESP_DEBUG] Intentionally dropping tx ${txHashString} (probability rule)`);
+      this.logger.info(`[REQRESP_DEBUG] Intentionally dropping tx ${txHashString} (probability rule)`);
       return;
     }
 
     await this.mempools.txPool.addTxs([validatedTx]);
     const handleEnd = Date.now();
-    this.logger.debug(`[REQRESP_DEBUG] handleGossipedTx completed for tx ${txHash} in ${handleEnd - handleStart}ms`);
+    this.logger.info(`[REQRESP_DEBUG] handleGossipedTx completed for tx ${txHash} in ${handleEnd - handleStart}ms`);
   }
 
   /**

@@ -195,7 +195,7 @@ export class ConnectionSampler {
     const dialStart = Date.now();
     // Dialling at the same time can cause race conditions where two different streams
     // end up with the same id, hence a serial queue
-    this.logger.debug(`[REQRESP_DEBUG] dialProtocol starting for ${peerId.toString()}`, {
+    this.logger.info(`[REQRESP_DEBUG] dialProtocol starting for ${peerId.toString()}`, {
       protocol,
       timeout,
       queueLength: this.dialQueue.length(),
@@ -221,7 +221,7 @@ export class ConnectionSampler {
     this.activeConnectionsCount.set(peerId, updatedActiveConnectionsCount);
 
     const dialEnd = Date.now();
-    this.logger.debug(`[REQRESP_DEBUG] dialProtocol completed successfully`, {
+    this.logger.info(`[REQRESP_DEBUG] dialProtocol completed successfully`, {
       streamId: stream.id,
       protocol,
       peerId: peerId.toString(),

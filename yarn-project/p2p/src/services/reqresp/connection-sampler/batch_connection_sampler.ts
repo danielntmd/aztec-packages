@@ -28,7 +28,7 @@ export class BatchConnectionSampler {
     exclude?: PeerId[],
     private readonly logger = createLogger('p2p:reqresp:batch-connection-sampler'),
   ) {
-    this.logger.debug(`[REQRESP_DEBUG] BatchConnectionSampler creating batch`, {
+    this.logger.info(`[REQRESP_DEBUG] BatchConnectionSampler creating batch`, {
       batchSize,
       maxPeers,
       excludeCount: exclude?.length || 0,
@@ -50,7 +50,7 @@ export class BatchConnectionSampler {
     this.batch = this.connectionSampler.samplePeersBatch(maxPeers, excluding);
     const samplingEnd = Date.now();
 
-    this.logger.debug(`[REQRESP_DEBUG] BatchConnectionSampler initialized`, {
+    this.logger.info(`[REQRESP_DEBUG] BatchConnectionSampler initialized`, {
       sampledPeerCount: this.batch.length,
       requestsPerPeer: this.requestsPerPeer,
       samplingTimeMs: samplingEnd - samplingStart,
@@ -83,11 +83,11 @@ export class BatchConnectionSampler {
   removePeerAndReplace(peerId: PeerId): void {
     const index = this.batch.findIndex(p => p === peerId);
     if (index === -1) {
-      this.logger.debug(`[REQRESP_DEBUG] Peer not found in batch for removal: ${peerId.toString()}`);
+      this.logger.info(`[REQRESP_DEBUG] Peer not found in batch for removal: ${peerId.toString()}`);
       return;
     }
 
-    this.logger.debug(`[REQRESP_DEBUG] Removing and replacing peer at index ${index}`, {
+    this.logger.info(`[REQRESP_DEBUG] Removing and replacing peer at index ${index}`, {
       peerId: peerId.toString(),
       batchSizeBefore: this.batch.length,
     });
@@ -99,7 +99,7 @@ export class BatchConnectionSampler {
 
     if (newPeer) {
       this.batch[index] = newPeer;
-      this.logger.debug(`[REQRESP_DEBUG] Replaced peer successfully in ${replacementEnd - replacementStart}ms`, {
+      this.logger.info(`[REQRESP_DEBUG] Replaced peer successfully in ${replacementEnd - replacementStart}ms`, {
         oldPeer: peerId.toString(),
         newPeer: newPeer.toString(),
         index,
