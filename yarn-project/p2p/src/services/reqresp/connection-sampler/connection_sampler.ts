@@ -68,13 +68,13 @@ export class ConnectionSampler {
   getPeer(excluding?: Map<string, boolean>): PeerId | undefined {
     // In libp2p getPeers performs a shallow copy, so this array can be sliced from safetly
     const peers = this.libp2p.getPeers();
-    this.logger.trace(
-      `[REQRESP_DEBUG] getPeer called with ${peers.length} available peers, excluding ${excluding?.size || 0} peers`,
-    );
+    // this.logger.trace(
+    //   `[REQRESP_DEBUG] getPeer called with ${peers.length} available peers, excluding ${excluding?.size || 0} peers`,
+    // );
 
     const { peer } = this.getPeerFromList(peers, excluding);
 
-    this.logger.trace(`[REQRESP_DEBUG] getPeer returning: ${peer?.toString() || 'undefined'}`);
+    // this.logger.trace(`[REQRESP_DEBUG] getPeer returning: ${peer?.toString() || 'undefined'}`);
     return peer;
   }
 
@@ -195,13 +195,13 @@ export class ConnectionSampler {
     const dialStart = Date.now();
     // Dialling at the same time can cause race conditions where two different streams
     // end up with the same id, hence a serial queue
-    this.logger.info(`[REQRESP_DEBUG] dialProtocol starting for ${peerId.toString()}`, {
-      protocol,
-      timeout,
-      queueLength: this.dialQueue.length(),
-      optimisticNegotiation: this.opts.p2pOptimisticNegotiation,
-      activeConnectionsForPeer: this.activeConnectionsCount.get(peerId) ?? 0,
-    });
+    // this.logger.info(`[REQRESP_DEBUG] dialProtocol starting for ${peerId.toString()}`, {
+    //   protocol,
+    //   timeout,
+    //   queueLength: this.dialQueue.length(),
+    //   optimisticNegotiation: this.opts.p2pOptimisticNegotiation,
+    //   activeConnectionsForPeer: this.activeConnectionsCount.get(peerId) ?? 0,
+    // });
 
     const queueWaitStart = Date.now();
     const stream = await this.dialQueue.put(() =>
@@ -221,15 +221,15 @@ export class ConnectionSampler {
     this.activeConnectionsCount.set(peerId, updatedActiveConnectionsCount);
 
     const dialEnd = Date.now();
-    this.logger.info(`[REQRESP_DEBUG] dialProtocol completed successfully`, {
-      streamId: stream.id,
-      protocol,
-      peerId: peerId.toString(),
-      activeConnectionsCount: updatedActiveConnectionsCount,
-      totalDialTime: dialEnd - dialStart,
-      queueWaitTime: queueWaitEnd - queueWaitStart,
-      actualDialTime: dialEnd - queueWaitEnd,
-    });
+    // this.logger.info(`[REQRESP_DEBUG] dialProtocol completed successfully`, {
+    //   streamId: stream.id,
+    //   protocol,
+    //   peerId: peerId.toString(),
+    //   activeConnectionsCount: updatedActiveConnectionsCount,
+    //   totalDialTime: dialEnd - dialStart,
+    //   queueWaitTime: queueWaitEnd - queueWaitStart,
+    //   actualDialTime: dialEnd - queueWaitEnd,
+    // });
     return stream;
   }
 
