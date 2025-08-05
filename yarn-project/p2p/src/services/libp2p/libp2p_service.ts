@@ -550,7 +550,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
         );
       },
       error => {
-        this.logger.warn(`[REQRESP_TEST] Batch request for ${protocol} failed: ${error.message}`);
+        this.logger.info(`[REQRESP_TEST] Batch request for ${protocol} failed: ${error.message}`);
       },
     );
 

@@ -305,15 +305,11 @@ export class FastTxCollection {
           });
           // If we found all txs for this request, we resolve the promise
           if (request.missingTxHashes.size === 0) {
-            this.log.info(`[REQRESP_TEST] All transactions found for ${request.type} collection request`, {
+            this.log.trace(`All txs found for fast collection request`, {
               ...request.blockInfo,
-              totalTxs: foundForThisRequest,
+              type: request.type,
             });
             request.promise.resolve();
-          } else if (foundForThisRequest > 0) {
-            this.log.info(
-              `[REQRESP_TEST] Found ${foundForThisRequest} transactions for ${request.type}, ${request.missingTxHashes.size} still missing`,
-            );
           }
         }
       }

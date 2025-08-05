@@ -571,15 +571,15 @@ export class P2PClient<T extends P2PClientType = P2PClientType.Full>
    **/
   public async sendTx(tx: Tx): Promise<void> {
     const txHash = tx.getTxHash().toString();
-    this.logger.info(`[REQRESP_TEST] Received sendTx request for transaction ${txHash}`);
+    this.log.info(`[REQRESP_TEST] Received sendTx request for transaction ${txHash}`);
 
     const addedCount = await this.addTxsToPool([tx]);
     const txAddedSuccessfully = addedCount === 1;
     if (txAddedSuccessfully) {
-      this.logger.info(`[REQRESP_TEST] Transaction ${txHash} added to pool, propagating via gossip`);
+      this.log.info(`[REQRESP_TEST] Transaction ${txHash} added to pool, propagating via gossip`);
       await this.p2pService.propagate(tx);
     } else {
-      this.logger.warn(`[REQRESP_TEST] Transaction ${txHash} was not added to pool, skipping propagation`);
+      this.log.info(`[REQRESP_TEST] Transaction ${txHash} was not added to pool, skipping propagation`);
     }
   }
 
@@ -739,21 +739,38 @@ export class P2PClient<T extends P2PClientType = P2PClientType.Full>
       // the slot number of the block.
       const provenBlockNumber = await this.l2BlockSource.getProvenBlockNumber();
       const unprovenBlocks = blocks.filter(block => block.number > provenBlockNumber);
+
+      this.log.info(`[REQRESP_TEST] Checking ${unprovenBlocks.length} unproven blocks for missing transactions`);
+
       for (const block of unprovenBlocks) {
         const txHashes = block.body.txEffects.map(txEffect => txEffect.txHash);
-        const missingTxHashes = await this.txPool
-          .hasTxs(txHashes)
-          .then(availability => txHashes.filter((_, index) => !availability[index]));
+        const availability = await this.txPool.hasTxs(txHashes);
+        const missingTxHashes = txHashes.filter((_, index) => !availability[index]);
+
+        this.log.info(
+          `[REQRESP_TEST] Block ${block.number}: ${txHashes.length} total txs, ${missingTxHashes.length} missing from pool`,
+          {
+            blockNumber: block.number,
+            totalTxs: txHashes.length,
+            missingTxs: missingTxHashes.length,
+            missingTxHashes: missingTxHashes.map(h => h.toString()),
+          },
+        );
+
         if (missingTxHashes.length > 0) {
-          this.log.verbose(
-            `Starting collection of ${missingTxHashes.length} missing txs for unproven mined block ${block.number}`,
-            { missingTxHashes, blockNumber: block.number, blockHash: await block.hash().then(h => h.toString()) },
+          this.log.info(
+            `[REQRESP_TEST] Starting collection of ${missingTxHashes.length} missing txs for unproven mined block ${block.number}`,
+            {
+              missingTxHashes: missingTxHashes.map(h => h.toString()),
+              blockNumber: block.number,
+              blockHash: await block.hash().then(h => h.toString()),
+            },
           );
           this.txCollection.startCollecting(block, missingTxHashes);
         }
       }
     } catch (err) {
-      this.log.error(`Error while starting collection of missing txs for unproven blocks`, err);
+      this.log.error(`[REQRESP_TEST] Error while starting collection of missing txs for unproven blocks`, err);
     }
   }
 
