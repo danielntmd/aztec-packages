@@ -750,7 +750,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     }
 
     await this.mempools.txPool.addTxs([validatedTx]);
-    const handleEnd = Date.now();
+    const _handleEnd = Date.now();
     // this.logger.info(`[REQRESP_DEBUG] handleGossipedTx completed for tx ${txHash} in ${handleEnd - handleStart}ms`);
   }
 

@@ -192,7 +192,7 @@ export class ConnectionSampler {
    * @returns The stream
    */
   async dialProtocol(peerId: PeerId, protocol: string, timeout?: number): Promise<Stream> {
-    const dialStart = Date.now();
+    // const dialStart = Date.now();
     // Dialling at the same time can cause race conditions where two different streams
     // end up with the same id, hence a serial queue
     // this.logger.info(`[REQRESP_DEBUG] dialProtocol starting for ${peerId.toString()}`, {
@@ -203,7 +203,7 @@ export class ConnectionSampler {
     //   activeConnectionsForPeer: this.activeConnectionsCount.get(peerId) ?? 0,
     // });
 
-    const queueWaitStart = Date.now();
+    // const queueWaitStart = Date.now();
     const stream = await this.dialQueue.put(() =>
       this.libp2p.dialProtocol(peerId, protocol, {
         signal: AbortSignal.any(
@@ -212,7 +212,7 @@ export class ConnectionSampler {
         negotiateFully: !this.opts.p2pOptimisticNegotiation,
       }),
     );
-    const queueWaitEnd = Date.now();
+    // const queueWaitEnd = Date.now();
 
     stream.metadata.peerId = peerId;
     this.streams.add(stream);
@@ -220,7 +220,7 @@ export class ConnectionSampler {
     const updatedActiveConnectionsCount = (this.activeConnectionsCount.get(peerId) ?? 0) + 1;
     this.activeConnectionsCount.set(peerId, updatedActiveConnectionsCount);
 
-    const dialEnd = Date.now();
+    // const dialEnd = Date.now();
     // this.logger.info(`[REQRESP_DEBUG] dialProtocol completed successfully`, {
     //   streamId: stream.id,
     //   protocol,

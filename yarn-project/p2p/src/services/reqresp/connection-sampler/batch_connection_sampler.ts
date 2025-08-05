@@ -93,9 +93,9 @@ export class BatchConnectionSampler {
     // });
 
     const excluding = new Map([[peerId.toString(), true]]);
-    const replacementStart = Date.now();
+    // const replacementStart = Date.now();
     const newPeer = this.connectionSampler.getPeer(excluding); // Q: Shouldn't we accumulate all excluded peers? Otherwise the sampler could return us a previously excluded peer?
-    const replacementEnd = Date.now();
+    // const replacementEnd = Date.now();
 
     if (newPeer) {
       this.batch[index] = newPeer;

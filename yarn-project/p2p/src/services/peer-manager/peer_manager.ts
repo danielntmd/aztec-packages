@@ -151,7 +151,7 @@ export class PeerManager implements PeerManagerInterface {
 
   @trackSpan('PeerManager.heartbeat')
   public async heartbeat() {
-    const heartbeatStart = Date.now();
+    const _heartbeatStart = Date.now();
     this.heartbeatCounter++;
 
     // this.logger.info(`[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} starting`, {
@@ -161,27 +161,27 @@ export class PeerManager implements PeerManagerInterface {
     //   cachedPeers: this.cachedPeers.size,
     // });
 
-    const scoringStart = Date.now();
+    const _scoringStart = Date.now();
     this.peerScoring.decayAllScores();
-    const scoringEnd = Date.now();
+    const _scoringEnd = Date.now();
 
-    const cleanupStart = Date.now();
+    const _cleanupStart = Date.now();
     this.cleanupExpiredTimeouts();
-    const cleanupEnd = Date.now();
+    const _cleanupEnd = Date.now();
 
-    const authUpdateStart = Date.now();
+    const _authUpdateStart = Date.now();
     await this.updateAuthenticatedPeers();
-    const authUpdateEnd = Date.now();
+    const _authUpdateEnd = Date.now();
 
-    const disconnectStart = Date.now();
+    const _disconnectStart = Date.now();
     await this.processScheduledDisconnects();
-    const disconnectEnd = Date.now();
+    const _disconnectEnd = Date.now();
 
-    const discoverStart = Date.now();
+    const _discoverStart = Date.now();
     this.discover();
-    const discoverEnd = Date.now();
+    const _discoverEnd = Date.now();
 
-    const heartbeatEnd = Date.now();
+    const _heartbeatEnd = Date.now();
     // this.logger.info(
     //   `[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} completed in ${heartbeatEnd - heartbeatStart}ms`,
     //   {
@@ -278,7 +278,7 @@ export class PeerManager implements PeerManagerInterface {
    */
   private handleDisconnectedPeerEvent(e: CustomEvent<PeerId>) {
     const peerId = e.detail;
-    const peerScore = this.peerScoring.getScore(peerId.toString());
+    const _peerScore = this.peerScoring.getScore(peerId.toString());
 
     // this.logger.verbose(`[REQRESP_DEBUG] Disconnected from peer ${peerId.toString()}`, {
     //   totalConnectedPeers: this.libP2PNode.getPeers().length,
@@ -394,9 +394,9 @@ export class PeerManager implements PeerManagerInterface {
   }
 
   public penalizePeer(peerId: PeerId, penalty: PeerErrorSeverity) {
-    const scoreBefore = this.peerScoring.getScore(peerId.toString());
+    const _scoreBefore = this.peerScoring.getScore(peerId.toString());
     this.peerScoring.penalizePeer(peerId, penalty);
-    const scoreAfter = this.peerScoring.getScore(peerId.toString());
+    const _scoreAfter = this.peerScoring.getScore(peerId.toString());
 
     // this.logger.info(`[REQRESP_DEBUG] Penalized peer ${peerId.toString()}`, {
     //   penalty,
