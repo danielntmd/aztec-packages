@@ -320,7 +320,7 @@ export class FastTxCollection {
    * Called internally and from the main tx collection manager whenever the tx pool emits a tx-added event.
    */
   public foundTxs(txs: Tx[]) {
-    this.log.info(`[REQRESP_DEBUG] foundTxs called with ${txs.length} transactions`);
+    // this.log.info(`[REQRESP_DEBUG] foundTxs called with ${txs.length} transactions`);
 
     for (const request of this.requests) {
       const initialMissingCount = request.missingTxHashes.size;

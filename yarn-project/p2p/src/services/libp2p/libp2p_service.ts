@@ -715,7 +715,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     const handleStart = Date.now();
     const tx = Tx.fromBuffer(payloadData);
     const txHash = tx.getTxHash().toString();
-    this.logger.info(`[REQRESP_DEBUG] handleGossipedTx started for tx ${txHash} from peer ${source.toString()}`);
+    // this.logger.info(`[REQRESP_DEBUG] handleGossipedTx started for tx ${txHash} from peer ${source.toString()}`);
 
     const validationFunc = async () => {
       const result = await this.validatePropagatedTx(tx, source);
@@ -750,8 +750,8 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     }
 
     await this.mempools.txPool.addTxs([validatedTx]);
-    const handleEnd = Date.now();
-    this.logger.info(`[REQRESP_DEBUG] handleGossipedTx completed for tx ${txHash} in ${handleEnd - handleStart}ms`);
+    const _handleEnd = Date.now();
+    // this.logger.info(`[REQRESP_DEBUG] handleGossipedTx completed for tx ${txHash} in ${handleEnd - handleStart}ms`);
   }
 
   /**

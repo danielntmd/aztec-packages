@@ -151,47 +151,47 @@ export class PeerManager implements PeerManagerInterface {
 
   @trackSpan('PeerManager.heartbeat')
   public async heartbeat() {
-    const heartbeatStart = Date.now();
+    const _heartbeatStart = Date.now();
     this.heartbeatCounter++;
 
-    this.logger.info(`[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} starting`, {
-      connectedPeers: this.libP2PNode.getPeers().length,
-      timedOutPeers: this.timedOutPeers.size,
-      peersToDisconnect: this.peersToBeDisconnected.size,
-      cachedPeers: this.cachedPeers.size,
-    });
+    // this.logger.info(`[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} starting`, {
+    //   connectedPeers: this.libP2PNode.getPeers().length,
+    //   timedOutPeers: this.timedOutPeers.size,
+    //   peersToDisconnect: this.peersToBeDisconnected.size,
+    //   cachedPeers: this.cachedPeers.size,
+    // });
 
-    const scoringStart = Date.now();
+    const _scoringStart = Date.now();
     this.peerScoring.decayAllScores();
-    const scoringEnd = Date.now();
+    const _scoringEnd = Date.now();
 
-    const cleanupStart = Date.now();
+    const _cleanupStart = Date.now();
     this.cleanupExpiredTimeouts();
-    const cleanupEnd = Date.now();
+    const _cleanupEnd = Date.now();
 
-    const authUpdateStart = Date.now();
+    const _authUpdateStart = Date.now();
     await this.updateAuthenticatedPeers();
-    const authUpdateEnd = Date.now();
+    const _authUpdateEnd = Date.now();
 
-    const disconnectStart = Date.now();
+    const _disconnectStart = Date.now();
     await this.processScheduledDisconnects();
-    const disconnectEnd = Date.now();
+    const _disconnectEnd = Date.now();
 
-    const discoverStart = Date.now();
+    const _discoverStart = Date.now();
     this.discover();
-    const discoverEnd = Date.now();
+    const _discoverEnd = Date.now();
 
-    const heartbeatEnd = Date.now();
-    this.logger.info(
-      `[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} completed in ${heartbeatEnd - heartbeatStart}ms`,
-      {
-        scoringTime: scoringEnd - scoringStart,
-        cleanupTime: cleanupEnd - cleanupStart,
-        authUpdateTime: authUpdateEnd - authUpdateStart,
-        disconnectTime: disconnectEnd - disconnectStart,
-        discoverTime: discoverEnd - discoverStart,
-      },
-    );
+    const _heartbeatEnd = Date.now();
+    // this.logger.info(
+    //   `[REQRESP_DEBUG] PeerManager heartbeat ${this.heartbeatCounter} completed in ${heartbeatEnd - heartbeatStart}ms`,
+    //   {
+    //     scoringTime: scoringEnd - scoringStart,
+    //     cleanupTime: cleanupEnd - cleanupStart,
+    //     authUpdateTime: authUpdateEnd - authUpdateStart,
+    //     disconnectTime: disconnectEnd - disconnectStart,
+    //     discoverTime: discoverEnd - discoverStart,
+    //   },
+    // );
   }
 
   /**
@@ -240,12 +240,12 @@ export class PeerManager implements PeerManagerInterface {
    */
   private handleConnectedPeerEvent(e: CustomEvent<PeerId>) {
     const peerId = e.detail;
-    this.logger.verbose(`[REQRESP_DEBUG] Connected to peer ${peerId.toString()}`, {
-      totalConnectedPeers: this.libP2PNode.getPeers().length,
-      isProtectedPeer: this.isProtectedPeer(peerId),
-      statusHandshakeDisabled: this.config.p2pDisableStatusHandshake,
-      allowOnlyValidators: this.config.p2pAllowOnlyValidators,
-    });
+    // this.logger.verbose(`[REQRESP_DEBUG] Connected to peer ${peerId.toString()}`, {
+    //   totalConnectedPeers: this.libP2PNode.getPeers().length,
+    //   isProtectedPeer: this.isProtectedPeer(peerId),
+    //   statusHandshakeDisabled: this.config.p2pDisableStatusHandshake,
+    //   allowOnlyValidators: this.config.p2pAllowOnlyValidators,
+    // });
 
     if (this.config.p2pDisableStatusHandshake) {
       this.logger.info(`[REQRESP_DEBUG] Status handshake disabled for peer ${peerId.toString()}`);
@@ -278,13 +278,13 @@ export class PeerManager implements PeerManagerInterface {
    */
   private handleDisconnectedPeerEvent(e: CustomEvent<PeerId>) {
     const peerId = e.detail;
-    const peerScore = this.peerScoring.getScore(peerId.toString());
+    const _peerScore = this.peerScoring.getScore(peerId.toString());
 
-    this.logger.verbose(`[REQRESP_DEBUG] Disconnected from peer ${peerId.toString()}`, {
-      totalConnectedPeers: this.libP2PNode.getPeers().length,
-      peerScore,
-      wasAuthenticated: this.authenticatedPeerIdToValidatorAddress.has(peerId.toString()),
-    });
+    // this.logger.verbose(`[REQRESP_DEBUG] Disconnected from peer ${peerId.toString()}`, {
+    //   totalConnectedPeers: this.libP2PNode.getPeers().length,
+    //   peerScore,
+    //   wasAuthenticated: this.authenticatedPeerIdToValidatorAddress.has(peerId.toString()),
+    // });
 
     const validatorAddress = this.authenticatedPeerIdToValidatorAddress.get(peerId.toString());
     if (validatorAddress !== undefined) {
@@ -394,16 +394,16 @@ export class PeerManager implements PeerManagerInterface {
   }
 
   public penalizePeer(peerId: PeerId, penalty: PeerErrorSeverity) {
-    const scoreBefore = this.peerScoring.getScore(peerId.toString());
+    const _scoreBefore = this.peerScoring.getScore(peerId.toString());
     this.peerScoring.penalizePeer(peerId, penalty);
-    const scoreAfter = this.peerScoring.getScore(peerId.toString());
+    const _scoreAfter = this.peerScoring.getScore(peerId.toString());
 
-    this.logger.info(`[REQRESP_DEBUG] Penalized peer ${peerId.toString()}`, {
-      penalty,
-      scoreBefore,
-      scoreAfter,
-      scoreDelta: scoreAfter - scoreBefore,
-    });
+    // this.logger.info(`[REQRESP_DEBUG] Penalized peer ${peerId.toString()}`, {
+    //   penalty,
+    //   scoreBefore,
+    //   scoreAfter,
+    //   scoreDelta: scoreAfter - scoreBefore,
+    // });
   }
 
   public getPeerScore(peerId: string): number {
