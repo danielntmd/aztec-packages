@@ -82,27 +82,27 @@ case "$cmd" in
   "fast")
     # Spin up ec2 instance and run the fast flow.
     export JOB_ID="x1-fast"
-    exec bootstrap_ec2 "./bootstrap.sh ci-fast"
+    exec bootstrap_ec2 "PARALLELISM=1 ./bootstrap.sh ci-fast"
     ;;
   "full")
     # Spin up ec2 instance and run the full flow.
     export JOB_ID="x1-full"
-    exec bootstrap_ec2 "E2E_ONLY=1 ./bootstrap.sh ci-full"
+    exec bootstrap_ec2 "PARALLELISM=1 E2E_ONLY=1 ./bootstrap.sh ci-full"
     ;;
   "docs")
     # Spin up ec2 instance and run docs-only CI.
     export JOB_ID="x1-docs"
-    exec bootstrap_ec2 "./bootstrap.sh ci-docs"
+    exec bootstrap_ec2 "PARALLELISM=1 ./bootstrap.sh ci-docs"
     ;;
   "barretenberg")
     # Spin up ec2 instance and run barretenberg-only CI.
     export JOB_ID="x1-barretenberg"
-    exec bootstrap_ec2 "./bootstrap.sh ci-barretenberg"
+    exec bootstrap_ec2 "PARALLELISM=1 ./bootstrap.sh ci-barretenberg"
     ;;
   "grind")
     # Spin up ec2 instance and run the merge-queue flow.
     run() {
-      JOB_ID=$1 INSTANCE_POSTFIX=$1 ARCH=$2 exec denoise "bootstrap_ec2 './bootstrap.sh $3'"
+      JOB_ID=$1 INSTANCE_POSTFIX=$1 ARCH=$2 exec denoise "bootstrap_ec2 'PARALLELISM=1 ./bootstrap.sh $3'"
     }
     export -f run
     seq 1 ${1:-5} | parallel --termseq 'TERM,10000' --line-buffered --halt now,fail=1  'run $USER-x{}-full amd64 ci-full'
@@ -111,11 +111,11 @@ case "$cmd" in
     prep_vars
     # Spin up ec2 instance and run the merge-queue flow.
     run() {
-      JOB_ID=$1 INSTANCE_POSTFIX=$1 ARCH=$2 exec denoise "bootstrap_ec2 './bootstrap.sh $3'"
+      JOB_ID=$1 INSTANCE_POSTFIX=$1 ARCH=$2 exec denoise "bootstrap_ec2 'PARALLELISM=1 ./bootstrap.sh $3'"
     }
     export -f run
     # We perform two full runs of all tests on x86, and a single fast run on arm64 (allowing use of test cache).
-    parallel --jobs 10 --termseq 'TERM,10000' --tagstring '{= $_=~s/run (\w+).*/$1/; =}' --line-buffered --halt now,fail=1 ::: \
+    parallel --jobs 1 --termseq 'TERM,10000' --tagstring '{= $_=~s/run (\w+).*/$1/; =}' --line-buffered --halt now,fail=1 ::: \
       'run x1-full amd64 ci-full' \
       'run x2-full amd64 ci-full' \
       'run x3-full amd64 ci-full' \
@@ -126,7 +126,7 @@ case "$cmd" in
     prep_vars
     # Spin up ec2 instance and run the nightly flow.
     run() {
-      JOB_ID=$1 INSTANCE_POSTFIX=$1 ARCH=$2 exec denoise "bootstrap_ec2 './bootstrap.sh ci-nightly'"
+      JOB_ID=$1 INSTANCE_POSTFIX=$1 ARCH=$2 exec denoise "bootstrap_ec2 'PARALLELISM=1 ./bootstrap.sh ci-nightly'"
     }
     export -f run
     # We need to run the release flow on both x86 and arm64.
@@ -138,7 +138,7 @@ case "$cmd" in
     prep_vars
     # Spin up ec2 instance and run the release flow.
     run() {
-      JOB_ID=$1 INSTANCE_POSTFIX=$1 ARCH=$2 exec denoise "bootstrap_ec2 './bootstrap.sh ci-release'"
+      JOB_ID=$1 INSTANCE_POSTFIX=$1 ARCH=$2 exec denoise "bootstrap_ec2 'PARALLELISM=1 ./bootstrap.sh ci-release'"
     }
     export -f run
     # We need to run the release flow on both x86 and arm64.
