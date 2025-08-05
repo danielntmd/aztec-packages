@@ -70,7 +70,7 @@ describe('e2e_p2p_reqresp_tx', () => {
       throw new Error('Bootstrap node ENR is not available');
     }
 
-    t.logger.info('Creating nodes');
+    t.logger.info('[REQRESP_TEST] Creating nodes');
     nodes = await createNodes(
       t.ctx.aztecNodeConfig,
       t.ctx.dateProvider,
@@ -81,27 +81,29 @@ describe('e2e_p2p_reqresp_tx', () => {
       DATA_DIR,
       shouldCollectMetrics(),
     );
+    t.logger.info(`[REQRESP_TEST] Created ${nodes.length} nodes successfully`);
 
-    t.logger.info('Sleeping to allow nodes to connect');
+    t.logger.info('[REQRESP_TEST] Sleeping to allow nodes to connect');
     await sleep(4000);
+    t.logger.info('[REQRESP_TEST] Node connection period completed');
 
     await t.setupAccount();
 
-    t.logger.info('Preparing transactions to send');
+    t.logger.info('[REQRESP_TEST] Preparing transactions to send');
     const contexts = await timesAsync(2, () =>
       createPXEServiceAndPrepareTransactions(t.logger, t.ctx.aztecNode, NUM_TXS_PER_NODE, t.fundedAccount),
     );
 
-    t.logger.info('Removing initial node');
+    t.logger.info('[REQRESP_TEST] Removing initial node');
     await t.removeInitialNode();
 
-    t.logger.info('Starting fresh slot');
+    t.logger.info('[REQRESP_TEST] Starting fresh slot');
     const [timestamp] = await t.ctx.cheatCodes.rollup.advanceToNextSlot();
     t.ctx.dateProvider.setTime(Number(timestamp) * 1000);
 
     const { proposerIndexes, nodesToTurnOffTxGossip } = await getProposerIndexes();
-    t.logger.info(`Turning off tx gossip for nodes: ${nodesToTurnOffTxGossip.map(getNodePort)}`);
-    t.logger.info(`Sending txs to proposer nodes: ${proposerIndexes.map(getNodePort)}`);
+    t.logger.info(`[REQRESP_TEST] Turning off tx gossip for nodes: ${nodesToTurnOffTxGossip.map(getNodePort)}`);
+    t.logger.info(`[REQRESP_TEST] Sending txs to proposer nodes: ${proposerIndexes.map(getNodePort)}`);
 
     // Replace the p2p node implementation of some of the nodes with a spy such that it does not store transactions that are gossiped to it
     // Original implementation of `handleGossipedTx` will store received transactions in the tx pool.
@@ -119,7 +121,7 @@ describe('e2e_p2p_reqresp_tx', () => {
 
     // We send the tx to the proposer nodes directly, ignoring the pxe and node in each context
     // We cannot just call tx.send since they were created using a pxe wired to the first node which is now stopped
-    t.logger.info('Sending transactions through proposer nodes');
+    t.logger.info('[REQRESP_TEST] Sending transactions through proposer nodes');
     const sentTxs = contexts.map((c, i) =>
       c.txs.map(tx => {
         const node = nodes[proposerIndexes[i]];
@@ -128,18 +130,21 @@ describe('e2e_p2p_reqresp_tx', () => {
       }),
     );
 
-    t.logger.info('Waiting for all transactions to be mined');
+    t.logger.info(
+      '[REQRESP_TEST] Waiting for all transactions to be mined - this will trigger reqresp when nodes discover missing transactions',
+    );
     await Promise.all(
       sentTxs.flatMap((txs, i) =>
         txs.map(async (tx, j) => {
-          t.logger.info(`Waiting for tx ${i}-${j} ${(await tx.getTxHash()).toString()} to be mined`);
+          const txHash = (await tx.getTxHash()).toString();
+          t.logger.info(`[REQRESP_TEST] Waiting for tx ${i}-${j} ${txHash} to be mined`);
           await tx.wait({ timeout: WAIT_FOR_TX_TIMEOUT * 1.5 }); // more transactions in this test so allow more time
-          t.logger.info(`Tx ${i}-${j} ${(await tx.getTxHash()).toString()} has been mined`);
+          t.logger.info(`[REQRESP_TEST] Transaction ${i}-${j} ${txHash} has been mined successfully`);
         }),
       ),
     );
 
-    t.logger.info('All transactions mined');
+    t.logger.info('[REQRESP_TEST] All transactions mined successfully - reqresp test completed!');
   });
 
   /**

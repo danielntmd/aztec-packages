@@ -215,6 +215,11 @@ export class ReqResp implements ReqRespInterface {
     maxPeers = Math.max(10, Math.ceil(requests.length / 3)),
     maxRetryAttempts = 3,
   ): Promise<InstanceType<SubProtocolMap[SubProtocol]['response']>[]> {
+    this.logger.info(
+      `[REQRESP_TEST] Starting batch request for ${subProtocol} with ${requests.length} requests, pinned: ${pinnedPeer?.toString() || 'none'}, timeout: ${timeoutMs}ms`,
+    );
+    const batchStart = Date.now();
+
     const responseValidator = this.subProtocolValidators[subProtocol];
     const responses: InstanceType<SubProtocolMap[SubProtocol]['response']>[] = new Array(requests.length);
     const requestBuffers = requests.map(req => req.toBuffer());
@@ -347,13 +352,21 @@ export class ReqResp implements ReqRespInterface {
     };
 
     try {
-      return await executeTimeout<InstanceType<SubProtocolMap[SubProtocol]['response']>[]>(
+      const result = await executeTimeout<InstanceType<SubProtocolMap[SubProtocol]['response']>[]>(
         requestFunction,
         timeoutMs,
         () => new CollectiveReqRespTimeoutError(),
       );
+      const batchEnd = Date.now();
+      this.logger.info(
+        `[REQRESP_TEST] Batch request for ${subProtocol} completed successfully in ${batchEnd - batchStart}ms with ${result.length} responses`,
+      );
+      return result;
     } catch (e: any) {
-      this.logger.debug(`${e.message} | subProtocol: ${subProtocol}`);
+      const batchEnd = Date.now();
+      this.logger.warn(
+        `[REQRESP_TEST] Batch request for ${subProtocol} failed after ${batchEnd - batchStart}ms: ${e.message}`,
+      );
       return [];
     }
   }

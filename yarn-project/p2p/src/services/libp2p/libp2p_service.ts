@@ -540,7 +540,21 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
     requests: InstanceType<SubProtocolMap[SubProtocol]['request']>[],
     pinnedPeerId: PeerId | undefined,
   ): Promise<InstanceType<SubProtocolMap[SubProtocol]['response']>[]> {
-    return this.reqresp.sendBatchRequest(protocol, requests, pinnedPeerId);
+    this.logger.info(`[REQRESP_TEST] Starting batch request for ${protocol} with ${requests.length} requests`);
+    const result = this.reqresp.sendBatchRequest(protocol, requests, pinnedPeerId);
+
+    result.then(
+      responses => {
+        this.logger.info(
+          `[REQRESP_TEST] Batch request for ${protocol} completed successfully with ${responses.length} responses`,
+        );
+      },
+      error => {
+        this.logger.warn(`[REQRESP_TEST] Batch request for ${protocol} failed: ${error.message}`);
+      },
+    );
+
+    return result;
   }
 
   /**
@@ -709,6 +723,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
       return;
     }
 
+    this.logger.info(`[REQRESP_TEST] Adding gossiped transaction ${txHashString} to tx pool`);
     await this.mempools.txPool.addTxs([tx]);
   }
 

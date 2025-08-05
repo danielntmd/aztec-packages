@@ -570,10 +570,16 @@ export class P2PClient<T extends P2PClientType = P2PClientType.Full>
    * @returns Empty promise.
    **/
   public async sendTx(tx: Tx): Promise<void> {
+    const txHash = tx.getTxHash().toString();
+    this.logger.info(`[REQRESP_TEST] Received sendTx request for transaction ${txHash}`);
+
     const addedCount = await this.addTxsToPool([tx]);
     const txAddedSuccessfully = addedCount === 1;
     if (txAddedSuccessfully) {
+      this.logger.info(`[REQRESP_TEST] Transaction ${txHash} added to pool, propagating via gossip`);
       await this.p2pService.propagate(tx);
+    } else {
+      this.logger.warn(`[REQRESP_TEST] Transaction ${txHash} was not added to pool, skipping propagation`);
     }
   }
 
