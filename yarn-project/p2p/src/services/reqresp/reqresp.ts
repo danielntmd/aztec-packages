@@ -215,6 +215,11 @@ export class ReqResp implements ReqRespInterface {
     maxPeers = Math.max(10, Math.ceil(requests.length / 3)),
     maxRetryAttempts = 3,
   ): Promise<InstanceType<SubProtocolMap[SubProtocol]['response']>[]> {
+    this.logger.info(
+      `[REQRESP_TEST] Starting batch request for ${subProtocol} with ${requests.length} requests, pinned: ${pinnedPeer?.toString() || 'none'}, timeout: ${timeoutMs}ms`,
+    );
+    const batchStart = Date.now();
+
     const responseValidator = this.subProtocolValidators[subProtocol];
     const responses: InstanceType<SubProtocolMap[SubProtocol]['response']>[] = new Array(requests.length);
     const requestBuffers = requests.map(req => req.toBuffer());
@@ -285,8 +290,13 @@ export class ReqResp implements ReqRespInterface {
         // Peer Id 0 will send requests 0, 1, 2, 3 in serial
         // while simultaneously Peer Id 1 will send requests 4, 5, 6, 7 in serial
 
+        this.logger.info(
+          `[REQRESP_TEST] Sending batch to ${requestBatches.size} peers for ${pendingRequestIndices.size} pending requests`,
+        );
+
         const batchResults = await Promise.all(
           Array.from(requestBatches.entries()).map(async ([peerAsString, { peerId: peer, indices }]) => {
+            this.logger.info(`[REQRESP_TEST] Starting ${indices.length} requests to peer ${peerAsString}`);
             try {
               // Requests all going to the same peer are sent synchronously
               const peerResults: { index: number; response: InstanceType<SubProtocolMap[SubProtocol]['response']> }[] =
@@ -317,9 +327,10 @@ export class ReqResp implements ReqRespInterface {
                 }
               }
 
+              this.logger.info(`[REQRESP_TEST] Peer ${peerAsString} returned ${peerResults.length} responses`);
               return { peer, results: peerResults };
-            } catch (error) {
-              this.logger.debug(`Failed batch request to peer ${peerAsString}:`, error);
+            } catch (error: any) {
+              this.logger.info(`[REQRESP_TEST] Failed batch request to peer ${peerAsString}: ${error.message}`);
               batchSampler.removePeerAndReplace(peer);
               return { peer, results: [] };
             }
@@ -327,14 +338,20 @@ export class ReqResp implements ReqRespInterface {
         );
 
         // Process results
+        let totalResponsesReceived = 0;
         for (const { results } of batchResults) {
           for (const { index, response } of results) {
             if (response) {
               responses[index] = response;
               pendingRequestIndices.delete(index);
+              totalResponsesReceived++;
             }
           }
         }
+
+        this.logger.info(
+          `[REQRESP_TEST] Batch round completed: ${totalResponsesReceived} responses received, ${pendingRequestIndices.size} requests still pending`,
+        );
 
         retryAttempts++;
       }
@@ -347,13 +364,21 @@ export class ReqResp implements ReqRespInterface {
     };
 
     try {
-      return await executeTimeout<InstanceType<SubProtocolMap[SubProtocol]['response']>[]>(
+      const result = await executeTimeout<InstanceType<SubProtocolMap[SubProtocol]['response']>[]>(
         requestFunction,
         timeoutMs,
         () => new CollectiveReqRespTimeoutError(),
       );
+      const batchEnd = Date.now();
+      this.logger.info(
+        `[REQRESP_TEST] Batch request for ${subProtocol} completed successfully in ${batchEnd - batchStart}ms with ${result.length} responses`,
+      );
+      return result;
     } catch (e: any) {
-      this.logger.debug(`${e.message} | subProtocol: ${subProtocol}`);
+      const batchEnd = Date.now();
+      this.logger.warn(
+        `[REQRESP_TEST] Batch request for ${subProtocol} failed after ${batchEnd - batchStart}ms: ${e.message}`,
+      );
       return [];
     }
   }

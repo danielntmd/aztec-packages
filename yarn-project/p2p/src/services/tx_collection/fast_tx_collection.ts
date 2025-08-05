@@ -250,14 +250,15 @@ export class FastTxCollection {
       return;
     }
 
-    this.log.debug(
-      `Starting fast reqresp for ${request.missingTxHashes.size} txs for ${request.type} at slot ${blockInfo.slotNumber}`,
+    this.log.info(
+      `[REQRESP_TEST] Starting fast reqresp for ${request.missingTxHashes.size} txs for ${request.type} at slot ${blockInfo.slotNumber}`,
       { ...blockInfo, timeoutMs, pinnedPeer },
     );
 
     try {
       await this.txCollectionSink.collect(
         async txHashes => {
+          this.log.info(`[REQRESP_TEST] Sending batch request for ${txHashes.length} transaction hashes via reqresp`);
           const txs = await this.reqResp.sendBatchRequest<ReqRespSubProtocol.TX>(
             ReqRespSubProtocol.TX,
             chunkTxHashesRequest(txHashes),
@@ -272,8 +273,9 @@ export class FastTxCollection {
         Array.from(request.missingTxHashes).map(txHash => TxHash.fromString(txHash)),
         { description: `reqresp for slot ${slotNumber}`, method: 'fast-req-resp', ...opts, ...request.blockInfo },
       );
+      this.log.info(`[REQRESP_TEST] Fast reqresp collection completed for ${request.type} at slot ${slotNumber}`);
     } catch (err) {
-      this.log.error(`Error sending fast reqresp request for txs`, err, {
+      this.log.error(`[REQRESP_TEST] Error sending fast reqresp request for txs`, err, {
         txs: [...request.missingTxHashes],
         ...blockInfo,
       });
@@ -285,6 +287,10 @@ export class FastTxCollection {
    * Called internally and from the main tx collection manager whenever the tx pool emits a tx-added event.
    */
   public foundTxs(txs: Tx[]) {
+    if (txs.length > 0) {
+      this.log.info(`[REQRESP_TEST] Found ${txs.length} transactions, checking against pending requests`);
+    }
+
     for (const request of this.requests) {
       for (const tx of txs) {
         const txHash = tx.txHash.toString();

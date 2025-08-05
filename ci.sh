@@ -87,7 +87,7 @@ case "$cmd" in
   "full")
     # Spin up ec2 instance and run the full flow.
     export JOB_ID="x1-full"
-    exec bootstrap_ec2 "./bootstrap.sh ci-full"
+    exec bootstrap_ec2 "E2E_ONLY=1 ./bootstrap.sh ci-full"
     ;;
   "docs")
     # Spin up ec2 instance and run docs-only CI.

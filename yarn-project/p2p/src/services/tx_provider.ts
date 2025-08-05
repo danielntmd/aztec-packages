@@ -124,15 +124,27 @@ export class TxProvider implements ITxProvider {
       return {};
     }
 
+    this.log.info(`[REQRESP_TEST] Checking for ${txHashes.length} transactions in mempool for ${request.type}`, {
+      ...blockInfo,
+      requestedTxHashes: txHashes.map(h => h.toString()),
+    });
+
     // First go to our tx pool and fetch whatever txs we have there
     // We go to the mempool first since those txs are already validated
     const txsFromMempool = compactArray(await this.txPool.getTxsByHash(txHashes));
     txsFromMempool.forEach(tx => missingTxHashes.delete(tx.getTxHash().toString()));
     this.instrumentation.incTxsFromMempool(txsFromMempool.length);
-    this.log.debug(
-      `Retrieved ${txsFromMempool.length} txs from mempool for block proposal (${missingTxHashes.size} pending)`,
-      { ...blockInfo, missingTxHashes: [...missingTxHashes] },
-    );
+
+    if (txsFromMempool.length > 0) {
+      this.log.info(
+        `[REQRESP_TEST] Retrieved ${txsFromMempool.length} txs from mempool for ${request.type} (${missingTxHashes.size} still missing)`,
+        { ...blockInfo, foundTxs: txsFromMempool.map(tx => tx.getTxHash().toString()) },
+      );
+    } else {
+      this.log.info(
+        `[REQRESP_TEST] No transactions found in mempool for ${request.type}, all ${missingTxHashes.size} need to be collected`,
+      );
+    }
 
     if (missingTxHashes.size === 0) {
       return { txsFromMempool };
@@ -157,6 +169,13 @@ export class TxProvider implements ITxProvider {
     }
 
     // Start tx collection from the network if needed, while we validate the txs taken from the proposal in parallel
+    if (missingTxHashes.size > 0) {
+      this.log.info(`[REQRESP_TEST] Starting network collection for ${missingTxHashes.size} missing transactions`, {
+        ...blockInfo,
+        missingTxHashes: [...missingTxHashes],
+      });
+    }
+
     const [txsFromNetwork] = await Promise.all([
       this.txCollection.collectFastFor(request, [...missingTxHashes], opts),
       this.processProposalTxs(txsFromProposal),

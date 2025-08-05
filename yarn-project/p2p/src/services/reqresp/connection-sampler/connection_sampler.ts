@@ -68,7 +68,15 @@ export class ConnectionSampler {
   getPeer(excluding?: Map<string, boolean>): PeerId | undefined {
     // In libp2p getPeers performs a shallow copy, so this array can be sliced from safetly
     const peers = this.libp2p.getPeers();
+    this.logger.info(
+      `[REQRESP_TEST] Selecting peer from ${peers.length} available peers, excluding ${excluding?.size || 0} peers`,
+    );
     const { peer } = this.getPeerFromList(peers, excluding);
+    if (peer) {
+      this.logger.info(`[REQRESP_TEST] Selected peer ${peer.toString()}`);
+    } else {
+      this.logger.info(`[REQRESP_TEST] No suitable peer found from ${peers.length} available peers`);
+    }
     return peer;
   }
 
@@ -188,29 +196,45 @@ export class ConnectionSampler {
   async dialProtocol(peerId: PeerId, protocol: string, timeout?: number): Promise<Stream> {
     // Dialling at the same time can cause race conditions where two different streams
     // end up with the same id, hence a serial queue
-    this.logger.debug(`Dial queue length: ${this.dialQueue.length()}`);
-
-    const stream = await this.dialQueue.put(() =>
-      this.libp2p.dialProtocol(peerId, protocol, {
-        signal: AbortSignal.any(
-          timeout ? [this.abortOnStop.signal, AbortSignal.timeout(timeout!)] : [this.abortOnStop.signal],
-        ),
-        negotiateFully: !this.opts.p2pOptimisticNegotiation,
-      }),
+    this.logger.info(
+      `[REQRESP_TEST] Starting dial to peer ${peerId.toString()} for protocol ${protocol} (queue length: ${this.dialQueue.length()})`,
     );
-    stream.metadata.peerId = peerId;
-    this.streams.add(stream);
+    const dialStart = Date.now();
 
-    const updatedActiveConnectionsCount = (this.activeConnectionsCount.get(peerId) ?? 0) + 1;
-    this.activeConnectionsCount.set(peerId, updatedActiveConnectionsCount);
+    try {
+      const stream = await this.dialQueue.put(() =>
+        this.libp2p.dialProtocol(peerId, protocol, {
+          signal: AbortSignal.any(
+            timeout ? [this.abortOnStop.signal, AbortSignal.timeout(timeout!)] : [this.abortOnStop.signal],
+          ),
+          negotiateFully: !this.opts.p2pOptimisticNegotiation,
+        }),
+      );
 
-    this.logger.trace('Dialed protocol', {
-      streamId: stream.id,
-      protocol,
-      peerId: peerId.toString(),
-      activeConnectionsCount: updatedActiveConnectionsCount,
-    });
-    return stream;
+      const dialEnd = Date.now();
+      this.logger.info(`[REQRESP_TEST] Successfully dialed peer ${peerId.toString()} in ${dialEnd - dialStart}ms`);
+      stream.metadata.peerId = peerId;
+      this.streams.add(stream);
+
+      const updatedActiveConnectionsCount = (this.activeConnectionsCount.get(peerId) ?? 0) + 1;
+      this.activeConnectionsCount.set(peerId, updatedActiveConnectionsCount);
+
+      this.logger.trace('Dialed protocol', {
+        streamId: stream.id,
+        protocol,
+        peerId: peerId.toString(),
+        activeConnectionsCount: updatedActiveConnectionsCount,
+        totalStreams: this.streams.size,
+      });
+
+      return stream;
+    } catch (error: any) {
+      const dialEnd = Date.now();
+      this.logger.info(
+        `[REQRESP_TEST] Failed to dial peer ${peerId.toString()} after ${dialEnd - dialStart}ms: ${error.message}`,
+      );
+      throw error;
+    }
   }
 
   /**
@@ -224,10 +248,13 @@ export class ConnectionSampler {
       let updatedActiveConnectionsCount = undefined;
 
       if (!peerId) {
-        this.logger.warn(`Stream ${stream.id} does not have a peerId set`);
+        this.logger.info(`[REQRESP_TEST] Stream ${stream.id} does not have a peerId set`);
       } else {
         updatedActiveConnectionsCount = (this.activeConnectionsCount.get(peerId) ?? 1) - 1;
         this.activeConnectionsCount.set(peerId, updatedActiveConnectionsCount);
+        this.logger.info(
+          `[REQRESP_TEST] Closing connection to peer ${peerId.toString()}, ${updatedActiveConnectionsCount} connections remaining`,
+        );
       }
 
       this.logger.trace('Closing connection', {
