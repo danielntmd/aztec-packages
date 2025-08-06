@@ -52,6 +52,7 @@ cid=$(docker run -d \
   --memory=$MEM \
   --user $(id -u):$(id -g) \
   -v$HOME:$HOME \
+  -v$PWD:$PWD \
   --mount type=tmpfs,target=/tmp,tmpfs-size=1g \
   --workdir $PWD \
   -e HOME \
