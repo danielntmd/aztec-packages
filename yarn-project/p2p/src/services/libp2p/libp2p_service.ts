@@ -902,21 +902,43 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
   protected async handleGossipedTx(payloadData: Buffer, msgId: string, source: PeerId) {
     const validationFunc: () => Promise<ReceivedMessageValidationResult<Tx>> = async () => {
       const tx = Tx.fromBuffer(payloadData);
+
+      // Step 1: Gossip-level validation (proof, expiration, etc.)
       const isValid = await this.validatePropagatedTx(tx, source);
-      const exists = isValid && (await this.mempools.txPool.hasTxs([tx.getTxHash()]))[0];
+      if (!isValid) {
+        this.logger.trace(`Rejecting invalid propagated tx`, {
+          [Attributes.P2P_ID]: source.toString(),
+        });
+        return { result: TopicValidatorResult.Reject };
+      }
+
+      // Step 2: Check for debug drop (testing feature)
+      const txHash = tx.getTxHash();
+      const txHashString = txHash.toString();
+      if (this.config.dropTransactions && randomInt(1000) < this.config.dropTransactionsProbability * 1000) {
+        this.logger.warn(`Intentionally dropping tx ${txHashString} (probability rule)`);
+        return { result: TopicValidatorResult.Ignore, obj: tx };
+      }
+
+      // Step 3: Try to add to pool - propagation decision based on pool acceptance
+      const addResult = await this.mempools.txPool.addPendingTxs([tx], { source: 'gossip' });
+
+      const wasAccepted = addResult.accepted.some(h => h.equals(txHash));
+      const wasIgnored = addResult.ignored.some(h => h.equals(txHash));
 
       this.logger.trace(`Validate propagated tx`, {
         isValid,
-        exists,
+        wasAccepted,
+        wasIgnored,
         [Attributes.P2P_ID]: source.toString(),
       });
 
-      if (!isValid) {
-        return { result: TopicValidatorResult.Reject };
-      } else if (exists) {
+      if (wasAccepted) {
+        return { result: TopicValidatorResult.Accept, obj: tx };
+      } else if (wasIgnored) {
         return { result: TopicValidatorResult.Ignore, obj: tx };
       } else {
-        return { result: TopicValidatorResult.Accept, obj: tx };
+        return { result: TopicValidatorResult.Reject };
       }
     };
 
@@ -925,6 +947,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
       return;
     }
 
+    // Tx was accepted into pool and will be propagated - just log and record metrics
     const txHash = tx.getTxHash();
     const txHashString = txHash.toString();
     this.logger.verbose(`Received tx ${txHashString} from external peer ${source.toString()} via gossip`, {
@@ -932,13 +955,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
       txHash: txHashString,
     });
 
-    if (this.config.dropTransactions && randomInt(1000) < this.config.dropTransactionsProbability * 1000) {
-      this.logger.warn(`Intentionally dropping tx ${txHashString} (probability rule)`);
-      return;
-    }
-
     this.instrumentation.incrementTxReceived(1);
-    await this.mempools.txPool.addPendingTxs([tx]);
   }
 
   /**
@@ -1534,7 +1551,7 @@ export class LibP2PService<T extends P2PClientType = P2PClientType.Full> extends
   @trackSpan('Libp2pService.validatePropagatedTx', tx => ({
     [Attributes.TX_HASH]: tx.getTxHash().toString(),
   }))
-  private async validatePropagatedTx(tx: Tx, peerId: PeerId): Promise<boolean> {
+  protected async validatePropagatedTx(tx: Tx, peerId: PeerId): Promise<boolean> {
     const currentBlockNumber = await this.archiver.getBlockNumber();
 
     // We accept transactions if they are not expired by the next slot (checked based on the IncludeByTimestamp field)
