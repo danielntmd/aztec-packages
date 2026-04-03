@@ -253,8 +253,11 @@ where
 
 #[no_predicates]
 pub fn poseidon2_hash_bytes<let N: u32>(inputs: [u8; N]) -> Field {
-    let mut fields = [0; (N + 30) / 31];
-    let mut field_index = 0;
+    // Prepend byte-level input length to prevent collisions between inputs that
+    // differ only in trailing zeros within the same 31-byte chunk boundary.
+    let mut fields = [0; 1 + (N + 30) / 31];
+    fields[0] = N as Field;
+    let mut field_index = 1;
     let mut current_field = [0; 31];
     for i in 0..inputs.len() {
         let index = i % 31;

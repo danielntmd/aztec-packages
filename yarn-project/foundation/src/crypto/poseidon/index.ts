@@ -69,7 +69,9 @@ export async function poseidon2Permutation(input: Fieldable[]): Promise<Fr[]> {
 }
 
 export function poseidon2HashBytes(input: Buffer): Promise<Fr> {
-  const inputFields = [];
+  // Prepend byte-level input length to prevent collisions between inputs that
+  // differ only in trailing zeros within the same 31-byte chunk boundary.
+  const inputFields = [new Fr(input.length)];
   for (let i = 0; i < input.length; i += 31) {
     const fieldBytes = Buffer.alloc(32, 0);
     input.slice(i, i + 31).copy(fieldBytes);
