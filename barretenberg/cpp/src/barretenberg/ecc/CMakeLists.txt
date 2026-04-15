@@ -6,6 +6,22 @@ if(DISABLE_ADX)
     target_compile_definitions(ecc PRIVATE -DDISABLE_ADX)
 endif()
 
+# GPU MSM adapter (scalar_multiplication/gpu_msm.cpp) is picked up by the
+# barretenberg_module glob of *.cpp. The file is guarded internally by
+# `#ifdef BB_GPU_ICICLE` so it compiles to an empty translation unit when
+# GPU_BACKEND=none (cost: one extra empty compile).
+#
+# When GPU_BACKEND=icicle, link against the actual ICICLE targets emitted by
+# its CMake: the runtime plus the BN254 field/curve libraries.
+if(GPU_BACKEND STREQUAL "icicle")
+    foreach(icicle_target icicle_device icicle_field icicle_curve)
+        if(NOT TARGET ${icicle_target})
+            message(FATAL_ERROR "Expected ICICLE target '${icicle_target}' when GPU_BACKEND=icicle")
+        endif()
+    endforeach()
+    target_link_libraries(ecc PUBLIC icicle_device icicle_field icicle_curve)
+endif()
+
 target_precompile_headers(
     ecc
     PUBLIC

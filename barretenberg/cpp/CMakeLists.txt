@@ -46,6 +46,7 @@ option(SYNTAX_ONLY "only check syntax (-fsyntax-only)" OFF)
 option(ENABLE_WASM_BENCH "Enable BB_BENCH benchmarking support in WASM builds (dev only, not for releases)" OFF)
 option(AVM "enable building of vm2 module and bb-avm" ON)
 option(BB_LITE "Exclude server-side subsystems: lmdb, world_state, ipc, nodejs_module" OFF)
+set(GPU_BACKEND "none" CACHE STRING "GPU acceleration backend: none (default) or icicle")
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
     message(STATUS "Compiling for ARM.")
@@ -54,6 +55,28 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "a
     set(DISABLE_ADX ON)
     set(RUN_HAVE_STD_REGEX 0)
     set(RUN_HAVE_POSIX_REGEX 0)
+endif()
+
+# GPU acceleration backend selection. Default is "none" (CPU-only), preserving
+# existing build behavior. Set -DGPU_BACKEND=icicle to enable ICICLE (CUDA)
+# acceleration for BN254 MSM. Guarded to non-WASM, non-ARM builds.
+if(GPU_BACKEND STREQUAL "icicle")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "wasm32")
+        message(FATAL_ERROR "GPU_BACKEND=icicle is incompatible with WASM builds")
+    endif()
+    if(ARM)
+        message(FATAL_ERROR "GPU_BACKEND=icicle is not supported on ARM builds (no CUDA)")
+    endif()
+    message(STATUS "GPU backend: ICICLE (CUDA)")
+    # CUDA 12.0 does not support clang >=15 as host compiler (cudafe++ breaks),
+    # so nvcc defaults to gcc here. All clang-specific C++ flags in this tree
+    # MUST therefore be scoped to $<COMPILE_LANGUAGE:C,CXX> so they don't leak
+    # into nvcc's host-compiler forward, which goes to gcc.
+    enable_language(CUDA)
+    add_definitions(-DBB_GPU_ICICLE=1)
+    include(cmake/icicle.cmake)
+elseif(NOT GPU_BACKEND STREQUAL "none")
+    message(FATAL_ERROR "Unknown GPU_BACKEND='${GPU_BACKEND}'. Expected 'none' or 'icicle'.")
 endif()
 
 if(ENABLE_STACKTRACES)
@@ -127,7 +150,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 set(CMAKE_CXX_EXTENSIONS ON)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-fbracket-depth=1024)
+    # Scoped to C/C++ so it doesn't leak into nvcc's host-compiler forwarding
+    # when GPU_BACKEND=icicle (nvcc uses gcc as host, which rejects this flag).
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-fbracket-depth=1024>)
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14")
         message(WARNING "Clang <14 is not supported")
     endif()

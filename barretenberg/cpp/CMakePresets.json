@@ -33,6 +33,16 @@
       }
     },
     {
+      "name": "gpu-icicle",
+      "displayName": "Build with ICICLE GPU backend (CUDA)",
+      "description": "Release build that fetches ICICLE and enables GPU MSM for BN254 commitments",
+      "inherits": "default",
+      "binaryDir": "build-gpu-icicle",
+      "cacheVariables": {
+        "GPU_BACKEND": "icicle"
+      }
+    },
+    {
       "name": "clang20",
       "displayName": "Build with Zig (glibc 2.35 on Linux)",
       "description": "Build with Zig-wrapped Clang. On Linux, pins glibc 2.35 (Ubuntu 22.04+). On macOS, uses native target.",
@@ -635,6 +645,11 @@
       "name": "homebrew",
       "inherits": "default",
       "configurePreset": "homebrew"
+    },
+    {
+      "name": "gpu-icicle",
+      "inherits": "default",
+      "configurePreset": "gpu-icicle"
     },
     {
       "name": "clang20",

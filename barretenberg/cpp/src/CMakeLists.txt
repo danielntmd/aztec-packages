@@ -13,15 +13,24 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # Specifying `-Wno-${ERROR_NAME}` will silence the error completely.
 # To preserve the warning, but prevent them from causing the build to fail,
 # use the flag `-Wno-error=${ERROR_NAME}`
-add_compile_options(-Werror -Wall -Wextra -Wconversion -Wsign-conversion -Wfatal-errors)
+#
+# These flags are clang/gcc style and are scoped to C and C++ sources so they
+# don't leak into CUDA compilation when GPU_BACKEND=icicle (nvcc rejects them).
+add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Werror>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wall>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wextra>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wconversion>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wsign-conversion>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wfatal-errors>)
 # Needed until https://github.com/codeinred/tuplet/issues/37 is solved.
-add_compile_options(-Wno-missing-braces)
+add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-missing-braces>)
 
 # For MessagePack.
 add_definitions(-DMSGPACK_NO_BOOST -DMSGPACK_USE_STD_VARIANT_ADAPTOR)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-fcolor-diagnostics -fconstexpr-steps=100000000)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-fcolor-diagnostics>
+                        $<$<COMPILE_LANGUAGE:C,CXX>:-fconstexpr-steps=100000000>)
 
     if(MEMORY_CHECKS)
         message(STATUS "Compiling with memory checks.")
@@ -29,17 +38,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     endif()
 
     # These flags are needed for all Clang variants (Apple Clang, Zig-wrapped Clang, etc.)
-    add_compile_options(-Wno-missing-field-initializers)
-    add_compile_options(-Wno-deprecated-declarations)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-missing-field-initializers>)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-deprecated-declarations>)
 
     if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 18)
         # We target clang20 and need this, eventually warning should be fixed or this will be unconditional.
-        add_compile_options(-Wno-vla-cxx-extension)
+        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-vla-cxx-extension>)
     endif()
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    add_compile_options(-fconstexpr-ops-limit=100000000 -Wno-psabi)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-fconstexpr-ops-limit=100000000>
+                        $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-psabi>)
 endif()
 
 # We enable -O1 level optimsations, even when compiling debug wasm, otherwise we get "local count too large" at runtime.
@@ -57,6 +67,11 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${MSGPACK_INCLUDE} ${TRACY_INCLU
 # Add avm-transpiler include path when library is provided
 if(AVM_TRANSPILER_LIB)
     include_directories(${AVM_TRANSPILER_INCLUDE})
+endif()
+
+# ICICLE include path when GPU backend is enabled
+if(GPU_BACKEND STREQUAL "icicle" AND ICICLE_INCLUDE)
+    include_directories(${ICICLE_INCLUDE})
 endif()
 
 # I feel this should be limited to ecc, however it's currently used in headers that go across libraries,
