@@ -53,32 +53,43 @@
 
 #include "barretenberg/ecc/scalar_multiplication/gpu_msm.hpp"
 #include "barretenberg/common/assert.hpp"
+#include "barretenberg/common/bb_bench.hpp"
+#include "barretenberg/common/throw_or_abort.hpp"
+#include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
 #endif
+#include "icicle/api/bn254.h"
 #include "icicle/curves/affine.h"
 #include "icicle/curves/projective.h"
+#include "icicle/device.h"
 #include "icicle/fields/snark_fields/bn254_base.h"
 #include "icicle/fields/snark_fields/bn254_scalar.h"
+#include "icicle/runtime.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <type_traits>
+#include <vector>
 
 namespace bb::scalar_multiplication::gpu {
 
 namespace {
 using BbScalar = curve::BN254::ScalarField;
+using BbBaseField = curve::BN254::BaseField;
 using BbAffine = curve::BN254::AffineElement;
 using BbProjective = curve::BN254::Element;
 
-struct IcicleBn254G1Tag;
-using IciclePointField = ::Field<::bn254::fq_config>;
 using IcicleScalar = ::bn254::scalar_t;
-using IcicleAffine = ::Affine<IciclePointField>;
-using IcicleProjective = ::Projective<IciclePointField, IcicleScalar, IcicleBn254G1Tag>;
+using IciclePointField = ::bn254::point_field_t;
+using IcicleAffine = ::bn254::affine_t;
+using IcicleProjective = ::bn254::projective_t;
+
+constexpr size_t GPU_MSM_FALLBACK_THRESHOLD = 1UL << 14;
 
 static_assert(std::is_standard_layout_v<BbScalar>);
 static_assert(std::is_standard_layout_v<BbAffine>);
@@ -104,21 +115,136 @@ static_assert(offsetof(BbProjective, z) == offsetof(IcicleProjective, z), "BB/IC
 #pragma clang diagnostic pop
 #endif
 
-[[noreturn]] void not_implemented(const char* fn)
+eIcicleError& backend_load_status()
 {
-    // Intentional abort: the GPU backend was compiled in but the ICICLE
-    // integration has not been wired up yet. This matches the CPU fallback
-    // contract — the caller must not silently accept a wrong commitment.
-    std::fprintf(stderr,
-                 "bb::scalar_multiplication::gpu::%s is not implemented yet. "
-                 "Build with -DGPU_BACKEND=none, or finish the ICICLE integration.\n",
-                 fn);
-    std::abort();
+    static eIcicleError status = eIcicleError::SUCCESS;
+    return status;
 }
+
+void ensure_backend_loaded()
+{
+    static std::once_flag once;
+    std::call_once(once, []() {
+        // Try env var / default (/opt/icicle/backend) first — this is what
+        // production operators will set.
+        auto err = icicle_load_backend_from_env_or_default();
+#ifdef BB_ICICLE_BUILD_BACKEND_DIR
+        // Fall back to the build-tree location baked in by CMake. This lets
+        // tests and benchmarks work out-of-the-box without setting env vars.
+        if (err != eIcicleError::SUCCESS) {
+            err = icicle_load_backend(BB_ICICLE_BUILD_BACKEND_DIR, /*is_recursive=*/true);
+        }
+#endif
+        backend_load_status() = err;
+    });
+
+    if (backend_load_status() != eIcicleError::SUCCESS) {
+        throw_or_abort(format("ICICLE backend load failed: ", get_error_string(backend_load_status())));
+    }
+}
+
+void ensure_cuda_device_selected()
+{
+    ensure_backend_loaded();
+
+    const auto status = icicle_set_device(icicle::Device("CUDA", 0));
+    if (status != eIcicleError::SUCCESS) {
+        throw_or_abort(format("Failed to select ICICLE CUDA device: ", get_error_string(status)));
+    }
+}
+
+BbProjective icicle_to_bb(const IcicleProjective& point)
+{
+    if (IcicleProjective::is_zero(point)) {
+        return BbProjective::infinity();
+    }
+
+    // Two format mismatches to cross between ICICLE and BB:
+    //
+    // 1. Field representation. ICICLE stores field elements in STANDARD
+    //    (non-Montgomery) form internally — see e.g. bn254::G1::gen_x = {1,0,...}
+    //    rather than {R mod p, 0, ...}. BB stores them in Montgomery form. We
+    //    convert each coordinate from standard → Montgomery on the way back.
+    //
+    // 2. Projective coordinate system. ICICLE's Projective is STANDARD
+    //    projective: (x, y, z) represents affine (x/z, y/z). BB's Element is
+    //    JACOBIAN: (x, y, z) represents affine (x/z^2, y/z^3). We can't just
+    //    reinterpret the triple — we normalize to affine in ICICLE first, then
+    //    build a BB Jacobian with z = 1.
+    const IcicleAffine icicle_affine = IcicleProjective::to_affine(point);
+
+    const auto to_bb_field = [](const IciclePointField& field) {
+        BbBaseField out(static_cast<uint64_t>(field.limbs_storage.limbs64[0]),
+                        static_cast<uint64_t>(field.limbs_storage.limbs64[1]),
+                        static_cast<uint64_t>(field.limbs_storage.limbs64[2]),
+                        static_cast<uint64_t>(field.limbs_storage.limbs64[3]));
+        out.self_to_montgomery_form();
+        return out;
+    };
+
+    // Construct the BB Jacobian equivalent of the affine point: (x, y, 1).
+    return BbProjective(to_bb_field(icicle_affine.x), to_bb_field(icicle_affine.y), BbBaseField::one());
+}
+
+template <typename T, typename U> std::vector<T> copy_as_vector(std::span<const U> input)
+{
+    static_assert(sizeof(T) == sizeof(U), "layout copy requires equal-sized elements");
+    std::vector<T> out(input.size());
+    if (!input.empty()) {
+        std::memcpy(out.data(), input.data(), input.size_bytes());
+    }
+    return out;
+}
+
+BbProjective run_icicle_msm(std::span<const BbScalar> scalars, std::span<const BbAffine> points)
+{
+    BB_BENCH_NAME("gpu::run_icicle_msm");
+    BB_ASSERT_EQ(points.size(), scalars.size());
+    ensure_cuda_device_selected();
+
+    std::vector<IcicleScalar> icicle_scalars;
+    std::vector<IcicleAffine> icicle_points;
+    {
+        BB_BENCH_NAME("gpu::run_icicle_msm/copy_scalars");
+        icicle_scalars = copy_as_vector<IcicleScalar>(scalars);
+    }
+    {
+        BB_BENCH_NAME("gpu::run_icicle_msm/copy_points");
+        icicle_points = copy_as_vector<IcicleAffine>(points);
+    }
+    IcicleProjective icicle_result{};
+
+    auto config = default_msm_config();
+    config.batch_size = 1;
+    config.are_points_shared_in_batch = true;
+    config.are_scalars_on_device = false;
+    config.are_scalars_montgomery_form = true;
+    config.are_points_on_device = false;
+    config.are_points_montgomery_form = true;
+    config.are_results_on_device = false;
+    config.is_async = false;
+
+    {
+        BB_BENCH_NAME("gpu::run_icicle_msm/bn254_msm");
+        const auto status = bn254_msm(
+            icicle_scalars.data(), icicle_points.data(), static_cast<int>(scalars.size()), &config, &icicle_result);
+        if (status != eIcicleError::SUCCESS) {
+            throw_or_abort(format("ICICLE BN254 MSM failed: ", get_error_string(status)));
+        }
+    }
+
+    {
+        BB_BENCH_NAME("gpu::run_icicle_msm/result_to_bb");
+        return icicle_to_bb(icicle_result);
+    }
+}
+
 } // namespace
 
 void init(std::span<const curve::BN254::AffineElement> srs_points)
 {
+    ensure_backend_loaded();
+
     // ICICLE's affine zero is (0, 0); BB's G1 infinity sentinel is distinct.
     // Catch accidental sentinel propagation before any future reinterpret-cast
     // or upload path can hand malformed points to ICICLE.
@@ -131,17 +257,55 @@ void init(std::span<const curve::BN254::AffineElement> srs_points)
     // the SRS to device memory here and cache the upload size.
 }
 
-curve::BN254::Element msm(PolynomialSpan<const curve::BN254::ScalarField> /*scalars*/,
-                          std::span<const curve::BN254::AffineElement> /*points*/)
+curve::BN254::Element msm(PolynomialSpan<const curve::BN254::ScalarField> scalars,
+                          std::span<const curve::BN254::AffineElement> points)
 {
-    not_implemented("msm");
+    if (scalars.size() == 0) {
+        return curve::BN254::Group::point_at_infinity;
+    }
+
+    const size_t num_scalars = scalars.size();
+    BB_ASSERT_GTE(points.size(), scalars.start_index + num_scalars);
+
+    if (num_scalars < GPU_MSM_FALLBACK_THRESHOLD) {
+        return scalar_multiplication::pippenger_unsafe<curve::BN254>(scalars, points);
+    }
+
+    const auto scalar_slice = std::span<const curve::BN254::ScalarField>(scalars.span.data(), num_scalars);
+    const auto point_slice = points.subspan(scalars.start_index, num_scalars);
+    return run_icicle_msm(scalar_slice, point_slice);
 }
 
-std::vector<curve::BN254::AffineElement> batch_msm(std::span<std::span<const curve::BN254::AffineElement>> /*points*/,
-                                                   std::span<std::span<curve::BN254::ScalarField>> /*scalars*/,
-                                                   bool /*handle_edge_cases*/)
+std::vector<curve::BN254::AffineElement> batch_msm(std::span<std::span<const curve::BN254::AffineElement>> points,
+                                                   std::span<std::span<curve::BN254::ScalarField>> scalars,
+                                                   bool handle_edge_cases)
 {
-    not_implemented("batch_msm");
+    BB_ASSERT(!handle_edge_cases, "GPU batch_msm currently supports only handle_edge_cases=false");
+
+    std::vector<curve::BN254::AffineElement> results;
+    results.reserve(points.size());
+
+    for (size_t i = 0; i < points.size(); ++i) {
+        const auto point_span = points[i];
+        const auto scalar_span = std::span<const curve::BN254::ScalarField>(scalars[i].data(), scalars[i].size());
+        BB_ASSERT_GTE(point_span.size(), scalar_span.size());
+
+        if (scalar_span.empty()) {
+            results.emplace_back(curve::BN254::Group::affine_point_at_infinity);
+            continue;
+        }
+
+        const auto trimmed_points = point_span.first(scalar_span.size());
+        if (scalar_span.size() < GPU_MSM_FALLBACK_THRESHOLD) {
+            const PolynomialSpan<const curve::BN254::ScalarField> poly(0, scalar_span);
+            results.emplace_back(scalar_multiplication::pippenger_unsafe<curve::BN254>(poly, trimmed_points));
+            continue;
+        }
+
+        results.emplace_back(run_icicle_msm(scalar_span, trimmed_points));
+    }
+
+    return results;
 }
 
 void shutdown()

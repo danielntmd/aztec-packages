@@ -20,6 +20,13 @@ if(GPU_BACKEND STREQUAL "icicle")
         endif()
     endforeach()
     target_link_libraries(ecc PUBLIC icicle_device icicle_field icicle_curve)
+
+    # Bake the ICICLE backend library directory into the binary so the runtime
+    # loader can find it without requiring ICICLE_BACKEND_INSTALL_DIR to be set.
+    # The env var still takes precedence when present (checked first by ICICLE).
+    get_target_property(_icicle_device_dir icicle_device BINARY_DIR)
+    target_compile_definitions(ecc_objects PRIVATE
+        BB_ICICLE_BUILD_BACKEND_DIR="${_icicle_device_dir}")
 endif()
 
 target_precompile_headers(
