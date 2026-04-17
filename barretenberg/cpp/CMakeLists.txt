@@ -72,6 +72,17 @@ if(GPU_BACKEND STREQUAL "icicle")
     # so nvcc defaults to gcc here. All clang-specific C++ flags in this tree
     # MUST therefore be scoped to $<COMPILE_LANGUAGE:C,CXX> so they don't leak
     # into nvcc's host-compiler forward, which goes to gcc.
+    #
+    # CUDA 12.0 also does not support gcc >=13. If gcc-12 is available on the
+    # system PATH, point nvcc at it explicitly; fall back to whatever nvcc
+    # defaults to otherwise.
+    if(NOT CMAKE_CUDA_HOST_COMPILER)
+        find_program(GCC_12 gcc-12)
+        if(GCC_12)
+            set(CMAKE_CUDA_HOST_COMPILER "${GCC_12}" CACHE FILEPATH "Host C compiler used by nvcc")
+            message(STATUS "nvcc host compiler: ${GCC_12}")
+        endif()
+    endif()
     enable_language(CUDA)
     add_definitions(-DBB_GPU_ICICLE=1)
     include(cmake/icicle.cmake)

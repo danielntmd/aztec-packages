@@ -25,16 +25,10 @@ include(FetchContent)
 # FetchContent_MakeAvailable so ICICLE picks it up during configure.
 set(CURVE "bn254" CACHE STRING "ICICLE primary curve (BN254 used by Honk commitments)")
 
-# Disable ICICLE features we don't use to minimize build time. We only need
-# MSM for now; NTT/Poseidon/Sumcheck are future Phase 3 concerns.
-set(NTT OFF CACHE BOOL "")
-set(ECNTT OFF CACHE BOOL "")
-set(G2 OFF CACHE BOOL "")
-set(EXT_FIELD OFF CACHE BOOL "")
-set(HASH OFF CACHE BOOL "")
-set(POSEIDON OFF CACHE BOOL "")
-set(POSEIDON2 OFF CACHE BOOL "")
-set(SUMCHECK OFF CACHE BOOL "")
+# Leave ICICLE features at their defaults (most ON). The precompiled CUDA
+# backend binaries reference symbols from HASH/POSEIDON even when we only
+# call MSM, so disabling them in the frontend breaks dynamic loading.
+# We do skip ICICLE's own tests to save build time.
 set(BUILD_TESTS OFF CACHE BOOL "")
 # MSM stays ON (default).
 # CPU_BACKEND stays ON (default) — provides fallback when CUDA_BACKEND is absent.
