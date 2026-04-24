@@ -6,6 +6,19 @@ if(DISABLE_ADX)
     target_compile_definitions(ecc PRIVATE -DDISABLE_ADX)
 endif()
 
+# GPU MSM adapter (scalar_multiplication/gpu_msm.cpp) is picked up by the
+# barretenberg_module glob of *.cpp. The file is guarded internally by
+# `#ifdef BB_GPU_NATIVE` so it compiles to an empty translation unit when
+# GPU_BACKEND=none (cost: one extra empty compile).
+#
+# When native CUDA kernel sources (.cu) are added, list them explicitly here
+# since the barretenberg_module glob picks up .cpp only.
+if(GPU_BACKEND STREQUAL "native")
+    # Placeholder: uncomment and extend once .cu kernels land.
+    # target_sources(ecc_objects PRIVATE
+    #     scalar_multiplication/gpu_msm_kernels.cu)
+endif()
+
 target_precompile_headers(
     ecc
     PUBLIC

@@ -20,6 +20,13 @@
 
 #include <algorithm>
 #include <array>
+
+#ifdef BB_GPU_NATIVE
+#include "barretenberg/ecc/curves/bn254/bn254.hpp"
+#include "barretenberg/ecc/scalar_multiplication/gpu_msm.hpp"
+#include <type_traits>
+#endif
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -57,7 +64,13 @@ template <class Curve> class CommitmentKey {
     CommitmentKey(const size_t num_points)
         : srs(srs::get_crs_factory<Curve>()->get_crs(num_points))
         , srs_size(num_points)
-    {}
+    {
+#ifdef BB_GPU_NATIVE
+        if constexpr (std::is_same_v<Curve, curve::BN254>) {
+            scalar_multiplication::gpu::init(get_monomial_points());
+        }
+#endif
+    }
     /**
      * @brief Checks the commitment key is properly initialized.
      *
@@ -85,6 +98,11 @@ template <class Curve> class CommitmentKey {
                                   " points with an SRS of size ",
                                   get_monomial_size()));
         }
+#ifdef BB_GPU_NATIVE
+        if constexpr (std::is_same_v<Curve, curve::BN254>) {
+            return scalar_multiplication::gpu::msm(polynomial, point_table);
+        }
+#endif
         return scalar_multiplication::pippenger_unsafe<Curve>(polynomial, point_table, has_duplicates_hint);
     };
     /**
@@ -115,6 +133,26 @@ template <class Curve> class CommitmentKey {
             }
             scalar_spans.emplace_back(polynomial.start_index(), polynomial.coeffs());
         }
+
+#ifdef BB_GPU_NATIVE
+        if constexpr (std::is_same_v<Curve, curve::BN254>) {
+            const bool has_dedup_hints = std::any_of(
+                has_duplicates_hints.begin(), has_duplicates_hints.end(), [](uint8_t hint) { return hint != 0; });
+            if (!has_dedup_hints) {
+                std::vector<std::span<const Commitment>> points_spans;
+                std::vector<std::span<Fr>> raw_scalar_spans;
+                points_spans.reserve(polynomials.size());
+                raw_scalar_spans.reserve(polynomials.size());
+
+                for (auto& polynomial : polynomials) {
+                    points_spans.emplace_back(get_monomial_points().subspan(polynomial.start_index()));
+                    raw_scalar_spans.emplace_back(polynomial.coeffs());
+                }
+
+                return scalar_multiplication::gpu::batch_msm(points_spans, raw_scalar_spans, false);
+            }
+        }
+#endif
 
         auto results = scalar_multiplication::MSM<Curve>::batch_multi_scalar_mul(
             get_monomial_points(), scalar_spans, /*handle_edge_cases=*/false, has_duplicates_hints);
