@@ -619,6 +619,16 @@
         "HAVE_STD_REGEX": "ON",
         "BB_LITE": "ON"
       }
+    },
+    {
+      "name": "gpu-native",
+      "displayName": "Build with native CUDA GPU backend",
+      "description": "Release build that enables native CUDA MSM for BN254 commitments",
+      "inherits": "default",
+      "binaryDir": "build-gpu-native",
+      "cacheVariables": {
+        "GPU_BACKEND": "native"
+      }
     }
   ],
   "buildPresets": [
@@ -627,6 +637,11 @@
       "configurePreset": "default",
       "inheritConfigureEnvironment": true,
       "jobs": 0
+    },
+    {
+      "name": "gpu-native",
+      "inherits": "default",
+      "configurePreset": "gpu-native"
     },
     {
       "name": "homebrew",
