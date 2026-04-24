@@ -13,9 +13,16 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # Specifying `-Wno-${ERROR_NAME}` will silence the error completely.
 # To preserve the warning, but prevent them from causing the build to fail,
 # use the flag `-Wno-error=${ERROR_NAME}`
-add_compile_options(-Werror -Wall -Wextra -Wconversion -Wsign-conversion -Wfatal-errors)
+# These flags are clang/gcc style and are scoped to C and C++ sources so they
+# don't leak into CUDA compilation when GPU_BACKEND=native (nvcc rejects them).
+add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Werror>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wall>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wextra>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wconversion>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wsign-conversion>
+                    $<$<COMPILE_LANGUAGE:C,CXX>:-Wfatal-errors>)
 # Needed until https://github.com/codeinred/tuplet/issues/37 is solved.
-add_compile_options(-Wno-missing-braces)
+add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-missing-braces>)
 
 # For MessagePack.
 add_definitions(-DMSGPACK_NO_BOOST -DMSGPACK_USE_STD_VARIANT_ADAPTOR)

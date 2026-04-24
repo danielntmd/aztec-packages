@@ -17,6 +17,12 @@
 #include "barretenberg/srs/factories/crs_factory.hpp"
 #include "barretenberg/srs/global_crs.hpp"
 
+#ifdef BB_GPU_NATIVE
+#include "barretenberg/ecc/curves/bn254/bn254.hpp"
+#include "barretenberg/ecc/scalar_multiplication/gpu_msm.hpp"
+#include <type_traits>
+#endif
+
 #include <cstddef>
 #include <cstdlib>
 #include <limits>
@@ -53,7 +59,13 @@ template <class Curve> class CommitmentKey {
     CommitmentKey(const size_t num_points)
         : srs(srs::get_crs_factory<Curve>()->get_crs(num_points))
         , srs_size(num_points)
-    {}
+    {
+#ifdef BB_GPU_NATIVE
+        if constexpr (std::is_same_v<Curve, curve::BN254>) {
+            scalar_multiplication::gpu::init(get_monomial_points());
+        }
+#endif
+    }
     /**
      * @brief Checks the commitment key is properly initialized.
      *
@@ -81,6 +93,11 @@ template <class Curve> class CommitmentKey {
                                   " points with an SRS of size ",
                                   get_monomial_size()));
         }
+#ifdef BB_GPU_NATIVE
+        if constexpr (std::is_same_v<Curve, curve::BN254>) {
+            return scalar_multiplication::gpu::msm(polynomial, point_table);
+        }
+#endif
         return scalar_multiplication::pippenger_unsafe<Curve>(polynomial, point_table);
     };
     /**
@@ -124,7 +141,15 @@ template <class Curve> class CommitmentKey {
             }
 
             // Perform batch MSM
-            auto results = scalar_multiplication::MSM<Curve>::batch_multi_scalar_mul(points_spans, scalar_spans, false);
+            std::vector<Commitment> results;
+#ifdef BB_GPU_NATIVE
+            if constexpr (std::is_same_v<Curve, curve::BN254>) {
+                results = scalar_multiplication::gpu::batch_msm(points_spans, scalar_spans, false);
+            } else
+#endif
+            {
+                results = scalar_multiplication::MSM<Curve>::batch_multi_scalar_mul(points_spans, scalar_spans, false);
+            }
             for (const auto& result : results) {
                 commitments.emplace_back(result);
             }
