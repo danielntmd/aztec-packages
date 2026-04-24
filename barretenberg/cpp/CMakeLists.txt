@@ -39,6 +39,7 @@ option(SYNTAX_ONLY "only check syntax (-fsyntax-only)" OFF)
 option(ENABLE_WASM_BENCH "Enable BB_BENCH benchmarking support in WASM builds (dev only, not for releases)" OFF)
 option(AVM "enable building of vm2 module and bb-avm" ON)
 option(MOBILE "Build for mobile (excludes lmdb, world_state, vm2, nodejs_module)" OFF)
+set(GPU_BACKEND "none" CACHE STRING "GPU acceleration backend: none (default) or native (CUDA)")
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
     message(STATUS "Compiling for ARM.")
@@ -47,6 +48,43 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "a
     set(DISABLE_ADX ON)
     set(RUN_HAVE_STD_REGEX 0)
     set(RUN_HAVE_POSIX_REGEX 0)
+endif()
+
+# GPU acceleration backend selection. Default is "none" (CPU-only), preserving
+# existing build behavior. Set -DGPU_BACKEND=native to enable native CUDA MSM
+# for BN254 commitments. Guarded to non-WASM, non-ARM builds.
+if(GPU_BACKEND STREQUAL "native")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "wasm32")
+        message(FATAL_ERROR "GPU_BACKEND=native is incompatible with WASM builds")
+    endif()
+    if(ARM)
+        message(FATAL_ERROR "GPU_BACKEND=native is not supported on ARM builds (no CUDA)")
+    endif()
+    message(STATUS "GPU backend: native CUDA")
+    # CUDA 12.x does not support clang >=15 as host compiler (cudafe++ breaks),
+    # so nvcc defaults to gcc here. All clang-specific C++ flags in this tree
+    # MUST therefore be scoped to $<COMPILE_LANGUAGE:C,CXX> so they don't leak
+    # into nvcc's host-compiler forward, which goes to gcc.
+    #
+    # CUDA 12.x also does not support gcc >=13. If gcc-12 is available on the
+    # system PATH, point nvcc at it explicitly; fall back to whatever nvcc
+    # defaults to otherwise.
+    if(NOT CMAKE_CUDA_HOST_COMPILER)
+        find_program(GCC_12 gcc-12)
+        if(GCC_12)
+            set(CMAKE_CUDA_HOST_COMPILER "${GCC_12}" CACHE FILEPATH "Host C compiler used by nvcc")
+            message(STATUS "nvcc host compiler: ${GCC_12}")
+        endif()
+    endif()
+    enable_language(CUDA)
+    # Target a reasonable set of modern server/workstation architectures.
+    # sm_80 = A100, sm_86 = RTX 30xx/40xx + L40, sm_89 = L40/4090, sm_90 = H100.
+    if(NOT CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90" CACHE STRING "CUDA architectures")
+    endif()
+    add_definitions(-DBB_GPU_NATIVE=1)
+elseif(NOT GPU_BACKEND STREQUAL "none")
+    message(FATAL_ERROR "Unknown GPU_BACKEND='${GPU_BACKEND}'. Expected 'none' or 'native'.")
 endif()
 
 if(ENABLE_STACKTRACES)

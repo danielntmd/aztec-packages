@@ -17,11 +17,18 @@
 #include "barretenberg/srs/factories/crs_factory.hpp"
 #include "barretenberg/srs/global_crs.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdlib>
 #include <limits>
 #include <memory>
 #include <string_view>
+
+#ifdef BB_GPU_NATIVE
+#include "barretenberg/ecc/curves/bn254/bn254.hpp"
+#include "barretenberg/ecc/scalar_multiplication/gpu_msm.hpp"
+#include <type_traits>
+#endif
 
 namespace bb {
 /**
@@ -53,7 +60,13 @@ template <class Curve> class CommitmentKey {
     CommitmentKey(const size_t num_points)
         : srs(srs::get_crs_factory<Curve>()->get_crs(num_points))
         , srs_size(num_points)
-    {}
+    {
+#ifdef BB_GPU_NATIVE
+        if constexpr (std::is_same_v<Curve, curve::BN254>) {
+            scalar_multiplication::gpu::init(get_monomial_points());
+        }
+#endif
+    }
     /**
      * @brief Checks the commitment key is properly initialized.
      *
@@ -81,6 +94,11 @@ template <class Curve> class CommitmentKey {
                                   " points with an SRS of size ",
                                   get_monomial_size()));
         }
+#ifdef BB_GPU_NATIVE
+        if constexpr (std::is_same_v<Curve, curve::BN254>) {
+            return scalar_multiplication::gpu::msm(polynomial, point_table);
+        }
+#endif
         return scalar_multiplication::pippenger_unsafe<Curve>(polynomial, point_table);
     };
     /**
@@ -96,19 +114,16 @@ template <class Curve> class CommitmentKey {
     {
         BB_BENCH_NAME("CommitmentKey::batch_commit");
 
-        // We can only commit max_batch_size at a time
-        // This is to prevent excessive memory usage in the pippenger algorithm
-        // First batch, create the commitments vector
         std::vector<Commitment> commitments;
 
         for (size_t i = 0; i < polynomials.size();) {
-            // Note: have to be careful how we compute this to not overlow e.g. max_batch_size + 1 would
             size_t batch_size = std::min(max_batch_size, polynomials.size() - i);
             size_t batch_end = i + batch_size;
 
-            // Prepare spans for batch MSM
             std::vector<std::span<const Commitment>> points_spans;
             std::vector<std::span<Fr>> scalar_spans;
+            points_spans.reserve(batch_size);
+            scalar_spans.reserve(batch_size);
 
             for (auto& polynomial : polynomials.subspan(i, batch_end - i)) {
                 std::span<const Commitment> point_table = get_monomial_points().subspan(polynomial.start_index());
@@ -123,10 +138,16 @@ template <class Curve> class CommitmentKey {
                 points_spans.emplace_back(point_table);
             }
 
-            // Perform batch MSM
-            auto results = scalar_multiplication::MSM<Curve>::batch_multi_scalar_mul(points_spans, scalar_spans, false);
-            for (const auto& result : results) {
-                commitments.emplace_back(result);
+#ifdef BB_GPU_NATIVE
+            if constexpr (std::is_same_v<Curve, curve::BN254>) {
+                auto results = scalar_multiplication::gpu::batch_msm(points_spans, scalar_spans, false);
+                commitments.insert(commitments.end(), results.begin(), results.end());
+            } else
+#endif
+            {
+                auto results =
+                    scalar_multiplication::MSM<Curve>::batch_multi_scalar_mul(points_spans, scalar_spans, false);
+                commitments.insert(commitments.end(), results.begin(), results.end());
             }
             i += batch_size;
         }
