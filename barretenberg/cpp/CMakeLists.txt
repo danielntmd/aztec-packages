@@ -47,6 +47,7 @@ option(ENABLE_WASM_BENCH "Enable BB_BENCH benchmarking support in WASM builds (d
 option(AVM "enable building of vm2 module and bb-avm" ON)
 option(BB_LITE "Exclude server-side subsystems: lmdb, world_state, ipc, nodejs_module" OFF)
 set(GPU_BACKEND "none" CACHE STRING "GPU acceleration backend: none (default) or native (CUDA)")
+set(BB_CXX_STANDARD 20)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
     message(STATUS "Compiling for ARM.")
@@ -73,17 +74,22 @@ if(GPU_BACKEND STREQUAL "native")
     # MUST therefore be scoped to $<COMPILE_LANGUAGE:C,CXX> so they don't leak
     # into nvcc's host-compiler forward, which goes to gcc.
     #
-    # CUDA 12.x also does not support gcc >=13. If gcc-12 is available on the
+    # CUDA 12.x also does not support gcc >=13. If g++-12 is available on the
     # system PATH, point nvcc at it explicitly; fall back to whatever nvcc
     # defaults to otherwise.
     if(NOT CMAKE_CUDA_HOST_COMPILER)
-        find_program(GCC_12 gcc-12)
-        if(GCC_12)
-            set(CMAKE_CUDA_HOST_COMPILER "${GCC_12}" CACHE FILEPATH "Host C compiler used by nvcc")
-            message(STATUS "nvcc host compiler: ${GCC_12}")
+        find_program(GXX_12 g++-12)
+        if(GXX_12)
+            set(CMAKE_CUDA_HOST_COMPILER "${GXX_12}" CACHE FILEPATH "Host C++ compiler used by nvcc")
+            message(STATUS "nvcc host compiler: ${GXX_12}")
         endif()
     endif()
     enable_language(CUDA)
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS "12.8" OR CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.9")
+        message(FATAL_ERROR "GPU_BACKEND=native requires CUDA toolkit 12.8.x, found ${CMAKE_CUDA_COMPILER_VERSION}")
+    endif()
+    set(CMAKE_CUDA_STANDARD ${BB_CXX_STANDARD})
+    set(CMAKE_CUDA_STANDARD_REQUIRED TRUE)
     # Target a reasonable set of modern server/workstation architectures.
     # sm_80 = A100, sm_86 = RTX 30xx/40xx + L40, sm_89 = L40/4090, sm_90 = H100.
     if(NOT CMAKE_CUDA_ARCHITECTURES)
@@ -160,12 +166,12 @@ endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_EXTENSIONS ON)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD ${BB_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 set(CMAKE_CXX_EXTENSIONS ON)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-fbracket-depth=1024)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-fbracket-depth=1024>)
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14")
         message(WARNING "Clang <14 is not supported")
     endif()
@@ -215,7 +221,15 @@ endif()
 
 include(cmake/backward-cpp.cmake)
 
+if(GPU_BACKEND STREQUAL "native")
+    include_directories("${CMAKE_SOURCE_DIR}/../gpu/include")
+endif()
+
 add_subdirectory(src)
+
+if(GPU_BACKEND STREQUAL "native")
+    add_subdirectory("${CMAKE_SOURCE_DIR}/../gpu" "${CMAKE_BINARY_DIR}/gpu")
+endif()
 
 # Generate fuzzer manifest after all modules have been processed
 if(FUZZING)

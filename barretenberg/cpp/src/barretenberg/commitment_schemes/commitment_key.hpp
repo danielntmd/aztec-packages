@@ -22,9 +22,7 @@
 #include <array>
 
 #ifdef BB_GPU_NATIVE
-#include "barretenberg/ecc/curves/bn254/bn254.hpp"
-#include "barretenberg/ecc/scalar_multiplication/gpu_msm.hpp"
-#include <type_traits>
+#include "barretenberg/gpu/commitment_schemes/commitment_key_msm.hpp"
 #endif
 
 #include <cstddef>
@@ -66,9 +64,7 @@ template <class Curve> class CommitmentKey {
         , srs_size(num_points)
     {
 #ifdef BB_GPU_NATIVE
-        if constexpr (std::is_same_v<Curve, curve::BN254>) {
-            scalar_multiplication::gpu::init(get_monomial_points());
-        }
+        gpu::init_commitment_key_srs<Curve>(get_monomial_points());
 #endif
     }
     /**
@@ -99,8 +95,8 @@ template <class Curve> class CommitmentKey {
                                   get_monomial_size()));
         }
 #ifdef BB_GPU_NATIVE
-        if constexpr (std::is_same_v<Curve, curve::BN254>) {
-            return scalar_multiplication::gpu::msm(polynomial, point_table);
+        if constexpr (gpu::commitment_key_msm_available<Curve>) {
+            return gpu::commitment_key_msm<Curve>(polynomial, point_table);
         }
 #endif
         return scalar_multiplication::pippenger_unsafe<Curve>(polynomial, point_table, has_duplicates_hint);
@@ -135,7 +131,7 @@ template <class Curve> class CommitmentKey {
         }
 
 #ifdef BB_GPU_NATIVE
-        if constexpr (std::is_same_v<Curve, curve::BN254>) {
+        if constexpr (gpu::commitment_key_msm_available<Curve>) {
             const bool has_dedup_hints = std::any_of(
                 has_duplicates_hints.begin(), has_duplicates_hints.end(), [](uint8_t hint) { return hint != 0; });
             if (!has_dedup_hints) {
@@ -149,7 +145,7 @@ template <class Curve> class CommitmentKey {
                     raw_scalar_spans.emplace_back(polynomial.coeffs());
                 }
 
-                return scalar_multiplication::gpu::batch_msm(points_spans, raw_scalar_spans, false);
+                return gpu::commitment_key_batch_msm<Curve>(points_spans, raw_scalar_spans, false);
             }
         }
 #endif
