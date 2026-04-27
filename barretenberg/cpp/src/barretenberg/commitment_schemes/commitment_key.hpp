@@ -25,9 +25,7 @@
 #include <string_view>
 
 #ifdef BB_GPU_NATIVE
-#include "barretenberg/ecc/curves/bn254/bn254.hpp"
-#include "barretenberg/ecc/scalar_multiplication/gpu_msm.hpp"
-#include <type_traits>
+#include "barretenberg/gpu/commitment_schemes/commitment_key_msm.hpp"
 #endif
 
 namespace bb {
@@ -62,9 +60,7 @@ template <class Curve> class CommitmentKey {
         , srs_size(num_points)
     {
 #ifdef BB_GPU_NATIVE
-        if constexpr (std::is_same_v<Curve, curve::BN254>) {
-            scalar_multiplication::gpu::init(get_monomial_points());
-        }
+        gpu::init_commitment_key_srs<Curve>(get_monomial_points());
 #endif
     }
     /**
@@ -95,8 +91,8 @@ template <class Curve> class CommitmentKey {
                                   get_monomial_size()));
         }
 #ifdef BB_GPU_NATIVE
-        if constexpr (std::is_same_v<Curve, curve::BN254>) {
-            return scalar_multiplication::gpu::msm(polynomial, point_table);
+        if constexpr (gpu::commitment_key_msm_available<Curve>) {
+            return gpu::commitment_key_msm<Curve>(polynomial, point_table);
         }
 #endif
         return scalar_multiplication::pippenger_unsafe<Curve>(polynomial, point_table);
@@ -139,8 +135,8 @@ template <class Curve> class CommitmentKey {
             }
 
 #ifdef BB_GPU_NATIVE
-            if constexpr (std::is_same_v<Curve, curve::BN254>) {
-                auto results = scalar_multiplication::gpu::batch_msm(points_spans, scalar_spans, false);
+            if constexpr (gpu::commitment_key_msm_available<Curve>) {
+                auto results = gpu::commitment_key_batch_msm<Curve>(points_spans, scalar_spans, false);
                 commitments.insert(commitments.end(), results.begin(), results.end());
             } else
 #endif

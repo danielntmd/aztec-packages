@@ -7,21 +7,16 @@
  * scalar_multiplication.hpp, specialized for BN254. It is only compiled when
  * -DBB_GPU_NATIVE=1 is defined (via the GPU_BACKEND=native CMake option).
  *
- * Dispatch happens in CommitmentKey (commitment_schemes/commitment_key.hpp):
- *
- *     #ifdef BB_GPU_NATIVE
- *       if constexpr (std::is_same_v<Curve, curve::BN254>) {
- *         return scalar_multiplication::gpu::msm(polynomial, point_table);
- *       }
- *     #endif
- *     return scalar_multiplication::pippenger_unsafe<Curve>(polynomial, point_table);
+ * CommitmentKey integration is owned by
+ * gpu/commitment_schemes/commitment_key_msm.hpp, keeping the C++ commitment
+ * interface independent from BN254-specific GPU internals.
  *
  * Grumpkin MSMs (IPA/ECCVM) remain on CPU for now. Batch and single MSM
  * signatures mirror the CPU public API (pippenger_unsafe<BN254> and
  * MSM<BN254>::batch_multi_scalar_mul).
  *
  * Current state: stub. Functions are declared so CommitmentKey dispatch links,
- * but the implementations in gpu_msm.cpp abort at runtime until the native
+ * but the implementations in gpu/msm/msm.cpp abort at runtime until the native
  * CUDA kernels land.
  */
 
@@ -33,7 +28,7 @@
 #include <span>
 #include <vector>
 
-namespace bb::scalar_multiplication::gpu {
+namespace bb::gpu::bn254 {
 
 /**
  * @brief One-time GPU initialization hook, called from `CommitmentKey<BN254>`.
@@ -42,8 +37,7 @@ namespace bb::scalar_multiplication::gpu {
  * Must be idempotent — on repeated `CommitmentKey` construction it should
  * detect the SRS is already uploaded (or a subset) and skip the upload.
  *
- * Stub: currently a no-op until the device context and SRS cache submodules
- * exist.
+ * Current implementation uploads the SRS into the CUDA device context.
  */
 void init(std::span<const curve::BN254::AffineElement> srs_points);
 
@@ -84,6 +78,6 @@ std::vector<curve::BN254::AffineElement> batch_msm(std::span<std::span<const cur
  */
 void shutdown();
 
-} // namespace bb::scalar_multiplication::gpu
+} // namespace bb::gpu::bn254
 
 #endif // BB_GPU_NATIVE

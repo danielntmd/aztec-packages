@@ -28,30 +28,32 @@ add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-missing-braces>)
 add_definitions(-DMSGPACK_NO_BOOST -DMSGPACK_USE_STD_VARIANT_ADAPTOR)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-fcolor-diagnostics -fconstexpr-steps=100000000)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-fcolor-diagnostics>
+                        $<$<COMPILE_LANGUAGE:C,CXX>:-fconstexpr-steps=100000000>)
 
     if(MEMORY_CHECKS)
         message(STATUS "Compiling with memory checks.")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
     endif()
 
+    # These flags are needed for all Clang variants (Apple Clang, Zig-wrapped Clang, etc.)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-missing-field-initializers>)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-deprecated-declarations>)
+
     if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 18)
         # We target clang20 and need this, eventually warning should be fixed or this will be unconditional.
-        add_compile_options(-Wno-vla-cxx-extension)
-        # This gets in the way of a partial object initialization (i.e. MyClass my_class{ .my_member = init_value })
-        add_compile_options(-Wno-missing-field-initializers)
-        # CLI11.hpp
-        add_compile_options(-Wno-deprecated-declarations)
+        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-vla-cxx-extension>)
     endif()
     if(MOBILE)
         # iOS builds use Apple Clang which has stricter defaults but doesn't support -Wno-vla-cxx-extension
-        add_compile_options(-Wno-missing-field-initializers)
-        add_compile_options(-Wno-deprecated-declarations)
+        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-missing-field-initializers>)
+        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-deprecated-declarations>)
     endif()
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    add_compile_options(-fconstexpr-ops-limit=100000000 -Wno-psabi)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-fconstexpr-ops-limit=100000000>
+                        $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-psabi>)
 endif()
 
 # We enable -O1 level optimsations, even when compiling debug wasm, otherwise we get "local count too large" at runtime.
