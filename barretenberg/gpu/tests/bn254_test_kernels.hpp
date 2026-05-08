@@ -36,6 +36,7 @@ struct g1_ops_output {
 void run_fq_ops(const fq_t& lhs, const fq_t& rhs, fq_ops_output& output);
 void run_fr_ops(const fr_t& scalar, size_t round, size_t slice_size, fr_ops_output& output);
 void run_g1_ops(const affine_g1_t& lhs, const affine_g1_t& rhs, g1_ops_output& output);
+void run_g1_chained_mixed_add(const affine_g1_t* points, size_t num_points, affine_g1_t& output);
 const char* cuda_device_status();
 
 } // namespace bb::gpu::bn254::testing
