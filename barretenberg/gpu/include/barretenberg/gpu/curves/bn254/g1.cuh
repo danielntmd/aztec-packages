@@ -5,6 +5,9 @@
 #include "barretenberg/gpu/curves/bn254/fq.cuh"
 #include "barretenberg/gpu/curves/bn254/fr.cuh"
 
+#include <cstddef>
+#include <cstdint>
+
 namespace bb::gpu::bn254 {
 
 struct alignas(64) affine_g1_t {
@@ -140,6 +143,120 @@ BB_GPU_HD inline void mixed_add(jacobian_g1_t& lhs, const affine_g1_t& rhs)
     t1 = t1 + t1;
     t3 = t2 * t3;
     lhs.y = t3 - t1;
+}
+
+BB_GPU_HD inline void mixed_add_z1_equals_one(jacobian_g1_t& lhs, const affine_g1_t& rhs)
+{
+    if (is_infinity(rhs)) {
+        return;
+    }
+    if (lhs.infinity) {
+        lhs = to_jacobian(rhs);
+        return;
+    }
+
+    const fq_t h = rhs.x - lhs.x;
+    fq_t r = rhs.y - lhs.y;
+    if (h.is_zero()) {
+        if (r.is_zero()) {
+            self_double(lhs);
+        } else {
+            lhs = jacobian_infinity();
+        }
+        return;
+    }
+
+    const fq_t hh = h.sqr();
+    const fq_t two_hh = hh + hh;
+    const fq_t i = two_hh + two_hh;
+    const fq_t j = h * i;
+    r = r + r;
+    const fq_t v = lhs.x * i;
+    const fq_t two_v = v + v;
+    lhs.x = r.sqr() - j - two_v;
+    fq_t two_y1_j = lhs.y * j;
+    two_y1_j = two_y1_j + two_y1_j;
+    lhs.y = (r * (v - lhs.x)) - two_y1_j;
+    lhs.z = h + h;
+}
+
+BB_GPU_HD inline jacobian_g1_t chained_mixed_add(const affine_g1_t* points, const size_t num_points)
+{
+    size_t offset = 0;
+    while (offset < num_points && is_infinity(points[offset])) {
+        ++offset;
+    }
+    if (offset == num_points) {
+        return jacobian_infinity();
+    }
+
+    jacobian_g1_t accumulator = to_jacobian(points[offset]);
+    ++offset;
+    while (offset < num_points && is_infinity(points[offset])) {
+        ++offset;
+    }
+    if (offset < num_points) {
+        mixed_add_z1_equals_one(accumulator, points[offset]);
+        ++offset;
+    }
+    for (; offset < num_points; ++offset) {
+        mixed_add(accumulator, points[offset]);
+    }
+    return accumulator;
+}
+
+BB_GPU_HD inline jacobian_g1_t chained_mixed_add_indexed(const affine_g1_t* points,
+                                                         const uint32_t* point_indices,
+                                                         const int start,
+                                                         const int count,
+                                                         const int first_offset = 0,
+                                                         const int step = 1)
+{
+    int offset = first_offset;
+    while (offset < count && is_infinity(points[point_indices[start + offset]])) {
+        offset += step;
+    }
+    if (offset >= count) {
+        return jacobian_infinity();
+    }
+
+    jacobian_g1_t accumulator = to_jacobian(points[point_indices[start + offset]]);
+    offset += step;
+    while (offset < count && is_infinity(points[point_indices[start + offset]])) {
+        offset += step;
+    }
+    if (offset < count) {
+        mixed_add_z1_equals_one(accumulator, points[point_indices[start + offset]]);
+        offset += step;
+    }
+    for (; offset < count; offset += step) {
+        mixed_add(accumulator, points[point_indices[start + offset]]);
+    }
+    return accumulator;
+}
+
+BB_GPU_HD inline jacobian_g1_t chained_mixed_add_indexed_nonzero(const affine_g1_t* points,
+                                                                 const uint32_t* point_indices,
+                                                                 const int start,
+                                                                 const int count,
+                                                                 const int first_offset = 0,
+                                                                 const int step = 1)
+{
+    if (first_offset >= count) {
+        return jacobian_infinity();
+    }
+
+    int offset = first_offset;
+    jacobian_g1_t accumulator = to_jacobian(points[point_indices[start + offset]]);
+    offset += step;
+    if (offset < count) {
+        mixed_add_z1_equals_one(accumulator, points[point_indices[start + offset]]);
+        offset += step;
+    }
+    for (; offset < count; offset += step) {
+        mixed_add(accumulator, points[point_indices[start + offset]]);
+    }
+    return accumulator;
 }
 
 BB_GPU_HD inline jacobian_g1_t jacobian_add(jacobian_g1_t lhs, const jacobian_g1_t& rhs)

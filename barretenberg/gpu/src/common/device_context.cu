@@ -2,29 +2,13 @@
 
 #include "barretenberg/gpu/common/device_context.hpp"
 
+#include "barretenberg/gpu/common/cuda_error.cuh"
+
 #include <cuda_runtime.h>
 
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 namespace bb::gpu {
-namespace {
-
-void check_cuda(const cudaError_t status, const char* operation)
-{
-    if (status != cudaSuccess) {
-        std::fprintf(stderr, "%s failed: %s\n", operation, cudaGetErrorString(status));
-        std::abort();
-    }
-}
-
-cudaStream_t as_cuda_stream(void* stream)
-{
-    return reinterpret_cast<cudaStream_t>(stream);
-}
-
-} // namespace
 
 void* device_malloc_bytes(const size_t bytes)
 {

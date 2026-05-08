@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <vector>
@@ -78,6 +79,66 @@ void expect_same_field(const fq_t& actual, const fq& expected)
 void expect_same_point(const affine_g1_t& actual, const curve::BN254::AffineElement& expected)
 {
     EXPECT_EQ(to_cpu(actual), expected);
+}
+
+curve::BN254::Element reduce_window_buckets_reference(std::vector<curve::BN254::Element>& buckets,
+                                                      const std::vector<bool>& bucket_exists)
+{
+    curve::BN254::Element running_sum = curve::BN254::Group::point_at_infinity;
+    curve::BN254::Element sum = curve::BN254::Group::point_at_infinity;
+    for (size_t i = buckets.size() - 1; i > 0; --i) {
+        if (bucket_exists[i]) {
+            running_sum += buckets[i];
+        }
+        sum += running_sum;
+    }
+    return sum;
+}
+
+curve::BN254::AffineElement reference_msm_with_explicit_window(
+    std::span<const curve::BN254::AffineElement> points,
+    PolynomialSpan<const curve::BN254::ScalarField> scalars,
+    const uint32_t bits_per_slice)
+{
+    constexpr size_t NUM_BITS_IN_FIELD = scalar_multiplication::MSM<curve::BN254>::NUM_BITS_IN_FIELD;
+    const size_t num_windows = (NUM_BITS_IN_FIELD + bits_per_slice - 1) / bits_per_slice;
+    const size_t num_buckets = size_t{ 1 } << bits_per_slice;
+    const size_t remainder = NUM_BITS_IN_FIELD % bits_per_slice;
+
+    std::vector<fr> standard_scalars;
+    standard_scalars.reserve(scalars.size());
+    for (size_t i = 0; i < scalars.size(); ++i) {
+        standard_scalars.emplace_back(scalars.span[i].from_montgomery_form_reduced());
+    }
+
+    curve::BN254::Element result = curve::BN254::Group::point_at_infinity;
+    std::vector<curve::BN254::Element> buckets(num_buckets);
+    std::vector<bool> bucket_exists(num_buckets);
+    for (size_t round = 0; round < num_windows; ++round) {
+        std::fill(bucket_exists.begin(), bucket_exists.end(), false);
+        for (size_t i = 0; i < standard_scalars.size(); ++i) {
+            const uint32_t bucket =
+                scalar_multiplication::MSM<curve::BN254>::get_scalar_slice(standard_scalars[i], round, bits_per_slice);
+            if (bucket == 0) {
+                continue;
+            }
+            const auto& point = points[scalars.start_index + i];
+            if (bucket_exists[bucket]) {
+                buckets[bucket] += point;
+            } else {
+                buckets[bucket] = point;
+                bucket_exists[bucket] = true;
+            }
+        }
+
+        const curve::BN254::Element window_result = reduce_window_buckets_reference(buckets, bucket_exists);
+        const size_t num_doublings = (round == num_windows - 1 && remainder != 0) ? remainder : bits_per_slice;
+        for (size_t i = 0; i < num_doublings; ++i) {
+            result.self_dbl();
+        }
+        result += window_result;
+    }
+    return curve::BN254::AffineElement(result);
 }
 
 } // namespace
@@ -181,6 +242,147 @@ TEST(GpuBn254, G1EdgeCasesMatchCpu)
     expect_same_point(output.jacobian_add, generator);
     EXPECT_TRUE(output.on_curve_lhs);
     EXPECT_TRUE(output.on_curve_rhs);
+}
+
+TEST(GpuBn254, G1ChainedMixedAddMatchesCpu)
+{
+    BB_REQUIRE_CUDA_DEVICE();
+
+    auto& engine = numeric::get_debug_randomness();
+    const curve::BN254::AffineElement lhs = curve::BN254::AffineElement::random_element(&engine);
+    const curve::BN254::AffineElement rhs = curve::BN254::AffineElement::random_element(&engine);
+    const curve::BN254::AffineElement tail = curve::BN254::AffineElement::random_element(&engine);
+    const curve::BN254::AffineElement infinity = curve::BN254::AffineElement::infinity();
+
+    const std::vector<std::vector<curve::BN254::AffineElement>> cases = {
+        { lhs, rhs, tail, curve::BN254::AffineElement::random_element(&engine) },
+        { lhs, lhs, tail },
+        { lhs, -lhs, tail },
+        { infinity, lhs, rhs, tail },
+    };
+
+    for (const auto& points : cases) {
+        std::vector<affine_g1_t> gpu_points;
+        gpu_points.reserve(points.size());
+        for (const auto& point : points) {
+            gpu_points.emplace_back(to_gpu(point));
+        }
+
+        affine_g1_t output{};
+        gpu_testing::run_g1_chained_mixed_add(gpu_points.data(), gpu_points.size(), output);
+
+        curve::BN254::Element expected = curve::BN254::Group::point_at_infinity;
+        for (const auto& point : points) {
+            expected += point;
+        }
+        expect_same_point(output, curve::BN254::AffineElement(expected));
+    }
+}
+
+TEST(GpuBn254, MsmAllZeroAndEmptyReturnInfinity)
+{
+    BB_REQUIRE_CUDA_DEVICE();
+
+    std::vector<curve::BN254::AffineElement> points(4, curve::BN254::Group::affine_one);
+    std::vector<fr> empty_scalars;
+    EXPECT_EQ(bb::gpu::bn254::msm({ 0, std::span<const fr>(empty_scalars.data(), empty_scalars.size()) }, points, 4),
+              curve::BN254::AffineElement::infinity());
+
+    std::vector<fr> zero_scalars(4, fr::zero());
+    EXPECT_EQ(bb::gpu::bn254::msm({ 0, std::span<const fr>(zero_scalars.data(), zero_scalars.size()) }, points, 4),
+              curve::BN254::AffineElement::infinity());
+}
+
+TEST(GpuBn254, MsmExplicitWindowsMatchCpu)
+{
+    BB_REQUIRE_CUDA_DEVICE();
+
+    auto& engine = numeric::get_debug_randomness();
+    std::vector<curve::BN254::AffineElement> points;
+    std::vector<fr> scalars;
+    for (size_t i = 0; i < 18; ++i) {
+        points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+        scalars.emplace_back(i % 5 == 0 ? fr::zero() : fr::random_element(&engine));
+    }
+
+    for (uint32_t bits_per_slice : { 1U, 4U, 8U, 13U }) {
+        auto scalar_span = PolynomialSpan<const fr>{ 0, std::span<const fr>(scalars.data(), scalars.size()) };
+        const auto expected = reference_msm_with_explicit_window(points, scalar_span, bits_per_slice);
+        const auto actual = bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
+        EXPECT_EQ(actual, expected) << "bits_per_slice=" << bits_per_slice;
+    }
+}
+
+TEST(GpuBn254, MsmStartIndexMatchesCpu)
+{
+    BB_REQUIRE_CUDA_DEVICE();
+
+    auto& engine = numeric::get_debug_randomness();
+    std::vector<curve::BN254::AffineElement> points;
+    for (size_t i = 0; i < 10; ++i) {
+        points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    }
+    std::vector<fr> scalars = { fr::random_element(&engine), fr::zero(), fr::random_element(&engine), fr(17) };
+    auto scalar_span = PolynomialSpan<const fr>{ 3, std::span<const fr>(scalars.data(), scalars.size()) };
+
+    const auto expected = reference_msm_with_explicit_window(points, scalar_span, 5);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 5);
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(GpuBn254, MsmSameBucketNormalAccumulationAndReductionMatchCpu)
+{
+    BB_REQUIRE_CUDA_DEVICE();
+
+    auto& engine = numeric::get_debug_randomness();
+    std::vector<curve::BN254::AffineElement> points;
+    std::vector<fr> scalars;
+    for (size_t i = 0; i < 6; ++i) {
+        points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+        scalars.emplace_back(fr(5));
+    }
+    auto scalar_span = PolynomialSpan<const fr>{ 0, std::span<const fr>(scalars.data(), scalars.size()) };
+
+    const auto expected = reference_msm_with_explicit_window(points, scalar_span, 4);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(GpuBn254, MsmLargeBucketAccumulationMatchesCpu)
+{
+    BB_REQUIRE_CUDA_DEVICE();
+
+    auto& engine = numeric::get_debug_randomness();
+    std::vector<curve::BN254::AffineElement> points;
+    std::vector<fr> scalars;
+    for (size_t i = 0; i < 600; ++i) {
+        points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+        scalars.emplace_back(fr(5));
+    }
+    auto scalar_span = PolynomialSpan<const fr>{ 0, std::span<const fr>(scalars.data(), scalars.size()) };
+
+    const auto expected = reference_msm_with_explicit_window(points, scalar_span, 4);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(GpuBn254, MsmAutoWindowMatchesCpuSafePippenger)
+{
+    BB_REQUIRE_CUDA_DEVICE();
+
+    auto& engine = numeric::get_debug_randomness();
+    std::vector<curve::BN254::AffineElement> points;
+    std::vector<fr> scalars;
+    for (size_t i = 0; i < 32; ++i) {
+        points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+        scalars.emplace_back(i % 7 == 0 ? fr::zero() : fr::random_element(&engine));
+    }
+
+    auto scalar_span = PolynomialSpan<const fr>{ 0, std::span<const fr>(scalars.data(), scalars.size()) };
+    const auto expected = curve::BN254::AffineElement(
+        scalar_multiplication::pippenger<curve::BN254>(scalar_span, points, /*handle_edge_cases=*/true));
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points);
+    EXPECT_EQ(actual, expected);
 }
 
 TEST(GpuBn254, DeviceBufferCopiesRoundTrip)
