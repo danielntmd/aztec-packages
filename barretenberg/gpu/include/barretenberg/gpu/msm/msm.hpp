@@ -15,9 +15,8 @@
  * signatures mirror the CPU public API (pippenger_unsafe<BN254> and
  * MSM<BN254>::batch_multi_scalar_mul).
  *
- * Current state: stub. Functions are declared so CommitmentKey dispatch links,
- * but the implementations in gpu/msm/msm.cpp abort at runtime until the native
- * CUDA kernels land.
+ * The single-MSM path is implemented by the native CUDA adapter. Batch MSM is
+ * currently a correctness-first serial wrapper over the single-MSM path.
  */
 
 #ifdef BB_GPU_NATIVE
@@ -50,10 +49,12 @@ void init(std::span<const curve::BN254::AffineElement> srs_points);
  * Below an internal size threshold, the implementation should fall back to
  * CPU Pippenger because PCIe transfer overhead dominates for small inputs.
  *
- * Stub: aborts at runtime.
+ * @param bits_per_slice Optional Pippenger window size. `0` selects the
+ *        adapter's current auto window heuristic.
  */
 curve::BN254::AffineElement msm(PolynomialSpan<const curve::BN254::ScalarField> scalars,
-                                std::span<const curve::BN254::AffineElement> points);
+                                std::span<const curve::BN254::AffineElement> points,
+                                uint32_t bits_per_slice = 0);
 
 /**
  * @brief GPU equivalent of `MSM<BN254>::batch_multi_scalar_mul`.
@@ -67,7 +68,7 @@ curve::BN254::AffineElement msm(PolynomialSpan<const curve::BN254::ScalarField> 
  * The parameter type keeps a non-const span for signature compatibility with
  * the CPU API.
  *
- * Stub: aborts at runtime.
+ * Current implementation is a serial wrapper over `msm`.
  */
 std::vector<curve::BN254::AffineElement> batch_msm(std::span<std::span<const curve::BN254::AffineElement>> points,
                                                    std::span<std::span<curve::BN254::ScalarField>> scalars,

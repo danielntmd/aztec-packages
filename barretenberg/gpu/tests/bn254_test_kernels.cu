@@ -2,21 +2,12 @@
 
 #include "bn254_test_kernels.hpp"
 
-#include <cuda_runtime.h>
+#include "barretenberg/gpu/common/cuda_error.cuh"
 
-#include <cstdio>
-#include <cstdlib>
+#include <cuda_runtime.h>
 
 namespace bb::gpu::bn254::testing {
 namespace {
-
-void check_cuda(const cudaError_t status, const char* operation)
-{
-    if (status != cudaSuccess) {
-        std::fprintf(stderr, "%s failed: %s\n", operation, cudaGetErrorString(status));
-        std::abort();
-    }
-}
 
 __global__ void fq_ops_kernel(fq_t lhs, fq_t rhs, fq_ops_output* output)
 {
@@ -52,6 +43,11 @@ __global__ void g1_ops_kernel(affine_g1_t lhs, affine_g1_t rhs, g1_ops_output* o
     output->on_curve_rhs = on_curve(rhs);
 }
 
+__global__ void g1_chained_mixed_add_kernel(const affine_g1_t* points, size_t num_points, affine_g1_t* output)
+{
+    *output = to_affine(chained_mixed_add(points, num_points));
+}
+
 template <typename Output, typename Launch> void run_one(Output& output, Launch&& launch)
 {
     Output* device_output = nullptr;
@@ -83,6 +79,20 @@ void run_g1_ops(const affine_g1_t& lhs, const affine_g1_t& rhs, g1_ops_output& o
     run_one(output, [&](g1_ops_output* device_output) {
         g1_ops_kernel<<<1, 1>>>(lhs, rhs, device_output);
     });
+}
+
+void run_g1_chained_mixed_add(const affine_g1_t* points, const size_t num_points, affine_g1_t& output)
+{
+    affine_g1_t* device_points = nullptr;
+    affine_g1_t* device_output = nullptr;
+    check_cuda(cudaMalloc(&device_points, sizeof(affine_g1_t) * num_points), "cudaMalloc points");
+    check_cuda(cudaMalloc(&device_output, sizeof(affine_g1_t)), "cudaMalloc output");
+    check_cuda(cudaMemcpy(device_points, points, sizeof(affine_g1_t) * num_points, cudaMemcpyHostToDevice), "cudaMemcpy H2D");
+    g1_chained_mixed_add_kernel<<<1, 1>>>(device_points, num_points, device_output);
+    check_cuda(cudaGetLastError(), "g1_chained_mixed_add_kernel launch");
+    check_cuda(cudaMemcpy(&output, device_output, sizeof(affine_g1_t), cudaMemcpyDeviceToHost), "cudaMemcpy D2H");
+    check_cuda(cudaFree(device_output), "cudaFree output");
+    check_cuda(cudaFree(device_points), "cudaFree points");
 }
 
 const char* cuda_device_status()
