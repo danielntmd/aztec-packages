@@ -9,13 +9,12 @@
 
 namespace bb::gpu::bn254 {
 
-void msm_raw(const fr_t* scalars,
-             size_t num_scalars,
-             const affine_g1_t* points,
-             size_t num_points,
-             size_t point_start_index,
-             uint32_t bits_per_slice,
-             affine_g1_t* result);
+// Raw MSM entry point for callers that have already uploaded an SRS into the
+// default device context. point_start_index is an offset into that cached SRS.
+void msm_raw(const fr_t *scalars, size_t num_scalars, size_t point_start_index,
+             uint32_t bits_per_slice, affine_g1_t *result);
+
+void set_scalar_split_first_chunk_percent(uint32_t percent);
 
 } // namespace bb::gpu::bn254
 

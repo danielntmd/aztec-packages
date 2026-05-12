@@ -37,6 +37,8 @@ namespace bb::gpu::bn254 {
  * detect the SRS is already uploaded (or a subset) and skip the upload.
  *
  * Current implementation uploads the SRS into the CUDA device context.
+ * Direct calls to `msm` must use points backed by the cached SRS. The
+ * CommitmentKey integration calls this during construction.
  */
 void init(std::span<const curve::BN254::AffineElement> srs_points);
 
@@ -52,9 +54,10 @@ void init(std::span<const curve::BN254::AffineElement> srs_points);
  * @param bits_per_slice Optional Pippenger window size. `0` selects the
  *        adapter's current auto window heuristic.
  */
-curve::BN254::AffineElement msm(PolynomialSpan<const curve::BN254::ScalarField> scalars,
-                                std::span<const curve::BN254::AffineElement> points,
-                                uint32_t bits_per_slice = 0);
+curve::BN254::AffineElement
+msm(PolynomialSpan<const curve::BN254::ScalarField> scalars,
+    std::span<const curve::BN254::AffineElement> points,
+    uint32_t bits_per_slice = 0);
 
 /**
  * @brief GPU equivalent of `MSM<BN254>::batch_multi_scalar_mul`.
@@ -70,9 +73,10 @@ curve::BN254::AffineElement msm(PolynomialSpan<const curve::BN254::ScalarField> 
  *
  * Current implementation is a serial wrapper over `msm`.
  */
-std::vector<curve::BN254::AffineElement> batch_msm(std::span<std::span<const curve::BN254::AffineElement>> points,
-                                                   std::span<std::span<curve::BN254::ScalarField>> scalars,
-                                                   bool handle_edge_cases);
+std::vector<curve::BN254::AffineElement>
+batch_msm(std::span<std::span<const curve::BN254::AffineElement>> points,
+          std::span<std::span<curve::BN254::ScalarField>> scalars,
+          bool handle_edge_cases);
 
 /**
  * @brief Release adapter-owned GPU resources. Stub: no-op.
