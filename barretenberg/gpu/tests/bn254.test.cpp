@@ -5,6 +5,7 @@
 #include "barretenberg/ecc/curves/bn254/bn254.hpp"
 #include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
 #include "barretenberg/gpu/common/device_context.hpp"
+#include "barretenberg/gpu/msm/msm_raw.cuh"
 #include "barretenberg/numeric/random/engine.hpp"
 #include "bn254_test_kernels.hpp"
 
@@ -29,6 +30,21 @@ namespace gpu_testing = bb::gpu::bn254::testing;
                    << device_status;                                           \
     }                                                                          \
   } while (false)
+
+class ScopedMsmDigitMode {
+public:
+  explicit ScopedMsmDigitMode(const bb::gpu::bn254::msm_digit_mode mode) {
+    bb::gpu::bn254::set_msm_digit_mode(mode);
+  }
+
+  ScopedMsmDigitMode(const ScopedMsmDigitMode &) = delete;
+  ScopedMsmDigitMode &operator=(const ScopedMsmDigitMode &) = delete;
+
+  ~ScopedMsmDigitMode() {
+    bb::gpu::bn254::set_msm_digit_mode(
+        bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  }
+};
 
 fq_t to_gpu(const fq &value) {
   return fq_t::raw(value.data[0], value.data[1], value.data[2], value.data[3]);
@@ -331,6 +347,39 @@ TEST(GpuBn254, MsmExplicitWindowsMatchCpu) {
   upload_test_srs(points);
 
   for (uint32_t bits_per_slice : {1U, 4U, 8U, 13U}) {
+    auto scalar_span = PolynomialSpan<const fr>{
+        0, std::span<const fr>(scalars.data(), scalars.size())};
+    const auto expected =
+        reference_msm_with_explicit_window(points, scalar_span, bits_per_slice);
+    const auto actual =
+        bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
+    EXPECT_EQ(actual, expected) << "bits_per_slice=" << bits_per_slice;
+  }
+}
+
+TEST(GpuBn254, MsmSignedDigitsExplicitWindowsMatchCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 40; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    if (i % 6 == 0) {
+      scalars.emplace_back(fr::zero());
+    } else if (i % 6 == 1) {
+      scalars.emplace_back(-fr(static_cast<uint64_t>(i + 5)));
+    } else if (i % 6 == 2) {
+      scalars.emplace_back(fr((uint64_t{1} << 17) - 1));
+    } else {
+      scalars.emplace_back(fr::random_element(&engine));
+    }
+  }
+  upload_test_srs(points);
+
+  const ScopedMsmDigitMode scoped_digit_mode(
+      bb::gpu::bn254::msm_digit_mode::SIGNED);
+  for (uint32_t bits_per_slice : {1U, 2U, 13U, 17U}) {
     auto scalar_span = PolynomialSpan<const fr>{
         0, std::span<const fr>(scalars.data(), scalars.size())};
     const auto expected =

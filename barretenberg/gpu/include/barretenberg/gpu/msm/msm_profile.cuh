@@ -2,12 +2,14 @@
 
 #ifdef BB_GPU_NATIVE
 
-#include "barretenberg/gpu/curves/bn254/bn254.cuh"
+#include "barretenberg/gpu/msm/msm_raw.cuh"
 
 #include <cstddef>
 #include <cstdint>
 
 namespace bb::gpu::bn254 {
+
+constexpr size_t MSM_BUCKET_HISTOGRAM_BINS = 10;
 
 struct msm_profile {
   float h2d_points_ms = 0.0F;
@@ -39,6 +41,13 @@ struct msm_profile {
   uint32_t zero_bucket_offset = 0;
   uint32_t large_bucket_threshold = 0;
   uint32_t scalar_split_first_chunk_percent = 0;
+  uint32_t digit_mode = 0;
+  uint64_t normal_bucket_count = 0;
+  uint64_t large_bucket_count = 0;
+  uint64_t normal_bucket_point_count = 0;
+  uint64_t large_bucket_point_count = 0;
+  uint64_t max_bucket_size = 0;
+  uint64_t bucket_size_histogram[MSM_BUCKET_HISTOGRAM_BINS] = {};
 };
 
 // Profiled raw MSM entry point for callers that have already uploaded an SRS

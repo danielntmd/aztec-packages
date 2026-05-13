@@ -32,6 +32,21 @@ constexpr std::array<int, 8> AGGREGATE_LOG_NUM_POINTS = {10, 12, 14, 16,
 constexpr size_t MAX_BENCH_NUM_POINTS = size_t{1} << MAX_LOG_NUM_POINTS;
 constexpr uint32_t DEFAULT_SCALAR_SPLIT_FIRST_CHUNK_PERCENT = 75;
 
+class ScopedMsmDigitMode {
+public:
+  explicit ScopedMsmDigitMode(const bb::gpu::bn254::msm_digit_mode mode) {
+    bb::gpu::bn254::set_msm_digit_mode(mode);
+  }
+
+  ScopedMsmDigitMode(const ScopedMsmDigitMode &) = delete;
+  ScopedMsmDigitMode &operator=(const ScopedMsmDigitMode &) = delete;
+
+  ~ScopedMsmDigitMode() {
+    bb::gpu::bn254::set_msm_digit_mode(
+        bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  }
+};
+
 bool cuda_available() {
   int device_count = 0;
   return cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0;
@@ -165,6 +180,8 @@ void add_profile_counters(benchmark::State &state,
       totals.scalar_chunk1_split_ms / iterations;
   state.counters["first_chunk_pct"] =
       benchmark::Counter(totals.scalar_split_first_chunk_percent / iterations);
+  state.counters["digit_mode"] =
+      benchmark::Counter(totals.digit_mode / iterations);
   state.counters["split_ms"] = totals.split_scalars_ms / iterations;
   state.counters["sort_records_ms"] = totals.sort_records_ms / iterations;
   state.counters["rle_ms"] = totals.encode_buckets_ms / iterations;
@@ -189,6 +206,46 @@ void add_profile_counters(benchmark::State &state,
       benchmark::Counter(totals.encoded_buckets / iterations);
   state.counters["bucket_threshold"] =
       benchmark::Counter(totals.large_bucket_threshold / iterations);
+  state.counters["normal_bucket_count"] =
+      benchmark::Counter(totals.normal_bucket_count / iterations);
+  state.counters["large_bucket_count"] =
+      benchmark::Counter(totals.large_bucket_count / iterations);
+  state.counters["normal_bucket_points"] =
+      benchmark::Counter(totals.normal_bucket_point_count / iterations);
+  state.counters["large_bucket_points"] =
+      benchmark::Counter(totals.large_bucket_point_count / iterations);
+  state.counters["max_bucket_size"] =
+      benchmark::Counter(totals.max_bucket_size / iterations);
+  state.counters["avg_normal_bucket_size"] =
+      totals.normal_bucket_count == 0
+          ? 0.0
+          : static_cast<double>(totals.normal_bucket_point_count) /
+                static_cast<double>(totals.normal_bucket_count);
+  state.counters["avg_large_bucket_size"] =
+      totals.large_bucket_count == 0
+          ? 0.0
+          : static_cast<double>(totals.large_bucket_point_count) /
+                static_cast<double>(totals.large_bucket_count);
+  state.counters["hist_1"] =
+      benchmark::Counter(totals.bucket_size_histogram[0] / iterations);
+  state.counters["hist_2_3"] =
+      benchmark::Counter(totals.bucket_size_histogram[1] / iterations);
+  state.counters["hist_4_7"] =
+      benchmark::Counter(totals.bucket_size_histogram[2] / iterations);
+  state.counters["hist_8_15"] =
+      benchmark::Counter(totals.bucket_size_histogram[3] / iterations);
+  state.counters["hist_16_31"] =
+      benchmark::Counter(totals.bucket_size_histogram[4] / iterations);
+  state.counters["hist_32_63"] =
+      benchmark::Counter(totals.bucket_size_histogram[5] / iterations);
+  state.counters["hist_64_127"] =
+      benchmark::Counter(totals.bucket_size_histogram[6] / iterations);
+  state.counters["hist_128_255"] =
+      benchmark::Counter(totals.bucket_size_histogram[7] / iterations);
+  state.counters["hist_256_511"] =
+      benchmark::Counter(totals.bucket_size_histogram[8] / iterations);
+  state.counters["hist_512_plus"] =
+      benchmark::Counter(totals.bucket_size_histogram[9] / iterations);
 }
 
 void add_profile(bb::gpu::bn254::msm_profile &totals,
@@ -223,6 +280,15 @@ void add_profile(bb::gpu::bn254::msm_profile &totals,
   totals.large_bucket_threshold += profile.large_bucket_threshold;
   totals.scalar_split_first_chunk_percent +=
       profile.scalar_split_first_chunk_percent;
+  totals.digit_mode += profile.digit_mode;
+  totals.normal_bucket_count += profile.normal_bucket_count;
+  totals.large_bucket_count += profile.large_bucket_count;
+  totals.normal_bucket_point_count += profile.normal_bucket_point_count;
+  totals.large_bucket_point_count += profile.large_bucket_point_count;
+  totals.max_bucket_size += profile.max_bucket_size;
+  for (size_t i = 0; i < bb::gpu::bn254::MSM_BUCKET_HISTOGRAM_BINS; ++i) {
+    totals.bucket_size_histogram[i] += profile.bucket_size_histogram[i];
+  }
 }
 
 template <typename Fn> double elapsed_ms(Fn &&fn) {
@@ -315,6 +381,32 @@ void bench_gpu_single_msm_profiled_split_percent(benchmark::State &state) {
   }
   bb::gpu::bn254::set_scalar_split_first_chunk_percent(
       DEFAULT_SCALAR_SPLIT_FIRST_CHUNK_PERCENT);
+
+  add_profile_counters(state, totals);
+  assert_correctness(*input, bits_per_slice, static_cast<int>(state.range(0)));
+}
+
+void bench_gpu_single_msm_profiled_digit_mode(benchmark::State &state) {
+  if (!cuda_available()) {
+    state.SkipWithError("No CUDA-capable device is available");
+    return;
+  }
+
+  const size_t num_points = size_t{1} << state.range(0);
+  const auto digit_mode =
+      static_cast<bb::gpu::bn254::msm_digit_mode>(state.range(1));
+  auto input = make_input(num_points);
+  const uint32_t bits_per_slice = auto_bits_per_slice(num_points);
+
+  const ScopedMsmDigitMode scoped_digit_mode(digit_mode);
+  bb::gpu::bn254::msm_profile totals{};
+  for (auto _ : state) {
+    bb::gpu::bn254::msm_profile profile{};
+    auto result = gpu_profiled_msm(*input, bits_per_slice, &profile);
+    benchmark::DoNotOptimize(result);
+
+    add_profile(totals, profile);
+  }
 
   add_profile_counters(state, totals);
   assert_correctness(*input, bits_per_slice, static_cast<int>(state.range(0)));
@@ -453,6 +545,15 @@ BENCHMARK(bench_gpu_single_msm_profiled_split_percent)
     ->Args({24, 25})
     ->Args({24, 50})
     ->Args({24, 75})
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(bench_gpu_single_msm_profiled_digit_mode)
+    ->Name("BN254/GPU/single_msm_profiled_digit_mode")
+    ->Args({20, 0})
+    ->Args({20, 1})
+    ->Args({22, 0})
+    ->Args({22, 1})
+    ->Args({24, 0})
+    ->Args({24, 1})
     ->Unit(benchmark::kMillisecond);
 BENCHMARK(bench_gpu_all_sizes_profiled)
     ->Name("BN254/GPU/all_sizes_profiled")
