@@ -23,6 +23,10 @@ using namespace bb::gpu;
 using namespace bb::gpu::bn254;
 namespace gpu_testing = bb::gpu::bn254::testing;
 
+constexpr std::array<bb::gpu::bn254::msm_coordinate_mode, 2>
+    MSM_COORDINATE_MODES = {bb::gpu::bn254::msm_coordinate_mode::JACOBIAN,
+                            bb::gpu::bn254::msm_coordinate_mode::XYZZ};
+
 #define BB_REQUIRE_CUDA_DEVICE()                                               \
   do {                                                                         \
     if (const char *device_status = gpu_testing::cuda_device_status()) {       \
@@ -43,6 +47,22 @@ public:
   ~ScopedMsmDigitMode() {
     bb::gpu::bn254::set_msm_digit_mode(
         bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  }
+};
+
+class ScopedMsmCoordinateMode {
+public:
+  explicit ScopedMsmCoordinateMode(
+      const bb::gpu::bn254::msm_coordinate_mode mode) {
+    bb::gpu::bn254::set_msm_coordinate_mode(mode);
+  }
+
+  ScopedMsmCoordinateMode(const ScopedMsmCoordinateMode &) = delete;
+  ScopedMsmCoordinateMode &operator=(const ScopedMsmCoordinateMode &) = delete;
+
+  ~ScopedMsmCoordinateMode() {
+    bb::gpu::bn254::set_msm_coordinate_mode(
+        bb::gpu::bn254::msm_coordinate_mode::JACOBIAN);
   }
 };
 
@@ -241,9 +261,15 @@ TEST(GpuBn254, G1OpsMatchCpu) {
 
   expect_same_point(output.mixed_add,
                     curve::BN254::AffineElement(lhs_element + rhs));
+  expect_same_point(output.xyzz_mixed_add,
+                    curve::BN254::AffineElement(lhs_element + rhs));
   expect_same_point(output.jacobian_add,
                     curve::BN254::AffineElement(lhs_element + rhs_element));
+  expect_same_point(output.xyzz_add,
+                    curve::BN254::AffineElement(lhs_element + rhs_element));
   expect_same_point(output.dbl, curve::BN254::AffineElement(lhs_element.dbl()));
+  expect_same_point(output.xyzz_dbl,
+                    curve::BN254::AffineElement(lhs_element.dbl()));
   expect_same_point(output.neg, -lhs);
   EXPECT_TRUE(output.on_curve_lhs);
   EXPECT_TRUE(output.on_curve_rhs);
@@ -262,16 +288,29 @@ TEST(GpuBn254, G1EdgeCasesMatchCpu) {
       output.mixed_add,
       curve::BN254::AffineElement(curve::BN254::Element(generator).dbl()));
   expect_same_point(
+      output.xyzz_mixed_add,
+      curve::BN254::AffineElement(curve::BN254::Element(generator).dbl()));
+  expect_same_point(
       output.jacobian_add,
+      curve::BN254::AffineElement(curve::BN254::Element(generator).dbl()));
+  expect_same_point(
+      output.xyzz_add,
+      curve::BN254::AffineElement(curve::BN254::Element(generator).dbl()));
+  expect_same_point(
+      output.xyzz_dbl,
       curve::BN254::AffineElement(curve::BN254::Element(generator).dbl()));
 
   gpu_testing::run_g1_ops(to_gpu(generator), to_gpu(-generator), output);
   expect_same_point(output.mixed_add, infinity);
+  expect_same_point(output.xyzz_mixed_add, infinity);
   expect_same_point(output.jacobian_add, infinity);
+  expect_same_point(output.xyzz_add, infinity);
 
   gpu_testing::run_g1_ops(to_gpu(infinity), to_gpu(generator), output);
   expect_same_point(output.mixed_add, generator);
+  expect_same_point(output.xyzz_mixed_add, generator);
   expect_same_point(output.jacobian_add, generator);
+  expect_same_point(output.xyzz_add, generator);
   EXPECT_TRUE(output.on_curve_lhs);
   EXPECT_TRUE(output.on_curve_rhs);
 }
@@ -306,12 +345,16 @@ TEST(GpuBn254, G1ChainedMixedAddMatchesCpu) {
     affine_g1_t output{};
     gpu_testing::run_g1_chained_mixed_add(gpu_points.data(), gpu_points.size(),
                                           output);
+    affine_g1_t xyzz_output{};
+    gpu_testing::run_g1_chained_xyzz_mixed_add(gpu_points.data(),
+                                               gpu_points.size(), xyzz_output);
 
     curve::BN254::Element expected = curve::BN254::Group::point_at_infinity;
     for (const auto &point : points) {
       expected += point;
     }
     expect_same_point(output, curve::BN254::AffineElement(expected));
+    expect_same_point(xyzz_output, curve::BN254::AffineElement(expected));
   }
 }
 
@@ -322,16 +365,23 @@ TEST(GpuBn254, MsmAllZeroAndEmptyReturnInfinity) {
       4, curve::BN254::Group::affine_one);
   upload_test_srs(points);
   std::vector<fr> empty_scalars;
-  EXPECT_EQ(bb::gpu::bn254::msm({0, std::span<const fr>(empty_scalars.data(),
-                                                        empty_scalars.size())},
-                                points, 4),
-            curve::BN254::AffineElement::infinity());
+  for (const auto coordinate_mode : MSM_COORDINATE_MODES) {
+    const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+    EXPECT_EQ(
+        bb::gpu::bn254::msm({0, std::span<const fr>(empty_scalars.data(),
+                                                    empty_scalars.size())},
+                            points, 4),
+        curve::BN254::AffineElement::infinity());
+  }
 
   std::vector<fr> zero_scalars(4, fr::zero());
-  EXPECT_EQ(bb::gpu::bn254::msm({0, std::span<const fr>(zero_scalars.data(),
-                                                        zero_scalars.size())},
-                                points, 4),
-            curve::BN254::AffineElement::infinity());
+  for (const auto coordinate_mode : MSM_COORDINATE_MODES) {
+    const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+    EXPECT_EQ(bb::gpu::bn254::msm({0, std::span<const fr>(zero_scalars.data(),
+                                                          zero_scalars.size())},
+                                  points, 4),
+              curve::BN254::AffineElement::infinity());
+  }
 }
 
 TEST(GpuBn254, MsmExplicitWindowsMatchCpu) {
@@ -351,9 +401,14 @@ TEST(GpuBn254, MsmExplicitWindowsMatchCpu) {
         0, std::span<const fr>(scalars.data(), scalars.size())};
     const auto expected =
         reference_msm_with_explicit_window(points, scalar_span, bits_per_slice);
-    const auto actual =
-        bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
-    EXPECT_EQ(actual, expected) << "bits_per_slice=" << bits_per_slice;
+    for (const auto coordinate_mode : MSM_COORDINATE_MODES) {
+      const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+      const auto actual =
+          bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
+      EXPECT_EQ(actual, expected)
+          << "bits_per_slice=" << bits_per_slice
+          << " coordinate_mode=" << static_cast<uint32_t>(coordinate_mode);
+    }
   }
 }
 
@@ -384,9 +439,14 @@ TEST(GpuBn254, MsmSignedDigitsExplicitWindowsMatchCpu) {
         0, std::span<const fr>(scalars.data(), scalars.size())};
     const auto expected =
         reference_msm_with_explicit_window(points, scalar_span, bits_per_slice);
-    const auto actual =
-        bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
-    EXPECT_EQ(actual, expected) << "bits_per_slice=" << bits_per_slice;
+    for (const auto coordinate_mode : MSM_COORDINATE_MODES) {
+      const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+      const auto actual =
+          bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
+      EXPECT_EQ(actual, expected)
+          << "bits_per_slice=" << bits_per_slice
+          << " coordinate_mode=" << static_cast<uint32_t>(coordinate_mode);
+    }
   }
 }
 
@@ -406,8 +466,12 @@ TEST(GpuBn254, MsmStartIndexMatchesCpu) {
 
   const auto expected =
       reference_msm_with_explicit_window(points, scalar_span, 5);
-  const auto actual = bb::gpu::bn254::msm(scalar_span, points, 5);
-  EXPECT_EQ(actual, expected);
+  for (const auto coordinate_mode : MSM_COORDINATE_MODES) {
+    const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 5);
+    EXPECT_EQ(actual, expected)
+        << "coordinate_mode=" << static_cast<uint32_t>(coordinate_mode);
+  }
 }
 
 TEST(GpuBn254, MsmSameBucketNormalAccumulationAndReductionMatchCpu) {
@@ -426,8 +490,12 @@ TEST(GpuBn254, MsmSameBucketNormalAccumulationAndReductionMatchCpu) {
 
   const auto expected =
       reference_msm_with_explicit_window(points, scalar_span, 4);
-  const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
-  EXPECT_EQ(actual, expected);
+  for (const auto coordinate_mode : MSM_COORDINATE_MODES) {
+    const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
+    EXPECT_EQ(actual, expected)
+        << "coordinate_mode=" << static_cast<uint32_t>(coordinate_mode);
+  }
 }
 
 TEST(GpuBn254, MsmLargeBucketAccumulationMatchesCpu) {
@@ -446,8 +514,12 @@ TEST(GpuBn254, MsmLargeBucketAccumulationMatchesCpu) {
 
   const auto expected =
       reference_msm_with_explicit_window(points, scalar_span, 4);
-  const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
-  EXPECT_EQ(actual, expected);
+  for (const auto coordinate_mode : MSM_COORDINATE_MODES) {
+    const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
+    EXPECT_EQ(actual, expected)
+        << "coordinate_mode=" << static_cast<uint32_t>(coordinate_mode);
+  }
 }
 
 TEST(GpuBn254, MsmAutoWindowMatchesCpuSafePippenger) {
@@ -467,8 +539,12 @@ TEST(GpuBn254, MsmAutoWindowMatchesCpuSafePippenger) {
   const auto expected = curve::BN254::AffineElement(
       scalar_multiplication::pippenger<curve::BN254>(
           scalar_span, points, /*handle_edge_cases=*/true));
-  const auto actual = bb::gpu::bn254::msm(scalar_span, points);
-  EXPECT_EQ(actual, expected);
+  for (const auto coordinate_mode : MSM_COORDINATE_MODES) {
+    const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points);
+    EXPECT_EQ(actual, expected)
+        << "coordinate_mode=" << static_cast<uint32_t>(coordinate_mode);
+  }
 }
 
 TEST(GpuBn254, DeviceBufferCopiesRoundTrip) {

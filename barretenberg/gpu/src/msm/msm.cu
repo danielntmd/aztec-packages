@@ -73,6 +73,7 @@ public:
   void set_scalar_chunk_profile(size_t, float, float) {}
   void set_scalar_split_first_chunk_percent(uint32_t) {}
   void set_digit_mode(msm_digit_mode) {}
+  void set_coordinate_mode(msm_coordinate_mode) {}
   void set_bucket_distribution(const uint64_t *) {}
 
   template <typename Stage> void time(msm_stage, Stage &&stage) {
@@ -180,6 +181,12 @@ public:
   void set_digit_mode(const msm_digit_mode mode) {
     if (profile_ != nullptr) {
       profile_->digit_mode = static_cast<uint32_t>(mode);
+    }
+  }
+
+  void set_coordinate_mode(const msm_coordinate_mode mode) {
+    if (profile_ != nullptr) {
+      profile_->coordinate_mode = static_cast<uint32_t>(mode);
     }
   }
 
@@ -462,6 +469,14 @@ __global__ void init_bucket_storage_kernel(jacobian_g1_t *buckets,
   }
 }
 
+__global__ void init_xyzz_bucket_storage_kernel(xyzz_g1_t *buckets,
+                                                const size_t num_buckets) {
+  const size_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx < num_buckets) {
+    buckets[idx] = xyzz_infinity();
+  }
+}
+
 __global__ void accumulate_normal_buckets_kernel(
     const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
     const int *bucket_sizes, const int *bucket_offsets,
@@ -482,6 +497,29 @@ __global__ void accumulate_normal_buckets_kernel(
   const int start = bucket_offsets[run_idx];
   buckets[unique_bucket_indices[run_idx]] = chained_mixed_add_indexed_nonzero(
       points, sorted_point_indices, start, count);
+}
+
+__global__ void accumulate_normal_buckets_xyzz_kernel(
+    const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *bucket_sizes, const int *bucket_offsets,
+    const uint32_t *sorted_point_indices, const affine_g1_t *points,
+    xyzz_g1_t *buckets, const int num_active_buckets,
+    const int large_bucket_threshold) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  const int count = bucket_sizes[run_idx];
+  if (count > large_bucket_threshold) {
+    return;
+  }
+
+  const int start = bucket_offsets[run_idx];
+  buckets[unique_bucket_indices[run_idx]] =
+      chained_xyzz_mixed_add_indexed_nonzero(points, sorted_point_indices,
+                                             start, count);
 }
 
 __device__ affine_g1_t load_signed_indexed_point(const affine_g1_t *points,
@@ -519,6 +557,30 @@ __device__ jacobian_g1_t chained_mixed_add_indexed_signed_nonzero(
   return accumulator;
 }
 
+__device__ xyzz_g1_t chained_xyzz_mixed_add_indexed_signed_nonzero(
+    const affine_g1_t *points, const uint32_t *point_indices, const int start,
+    const int count, const int first_offset = 0, const int step = 1) {
+  if (first_offset >= count) {
+    return xyzz_infinity();
+  }
+
+  int offset = first_offset;
+  xyzz_g1_t accumulator =
+      to_xyzz(load_signed_indexed_point(points, point_indices, start + offset));
+  offset += step;
+  if (offset < count) {
+    xyzz_mixed_add_zz1_equals_one(
+        accumulator,
+        load_signed_indexed_point(points, point_indices, start + offset));
+    offset += step;
+  }
+  for (; offset < count; offset += step) {
+    xyzz_mixed_add(accumulator, load_signed_indexed_point(points, point_indices,
+                                                          start + offset));
+  }
+  return accumulator;
+}
+
 __global__ void accumulate_normal_buckets_signed_kernel(
     const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
     const int *bucket_sizes, const int *bucket_offsets,
@@ -540,6 +602,29 @@ __global__ void accumulate_normal_buckets_signed_kernel(
   buckets[unique_bucket_indices[run_idx] - 1] =
       chained_mixed_add_indexed_signed_nonzero(points, sorted_point_indices,
                                                start, count);
+}
+
+__global__ void accumulate_normal_buckets_signed_xyzz_kernel(
+    const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *bucket_sizes, const int *bucket_offsets,
+    const uint32_t *sorted_point_indices, const affine_g1_t *points,
+    xyzz_g1_t *buckets, const int num_active_buckets,
+    const int large_bucket_threshold) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  const int count = bucket_sizes[run_idx];
+  if (count > large_bucket_threshold) {
+    return;
+  }
+
+  const int start = bucket_offsets[run_idx];
+  buckets[unique_bucket_indices[run_idx] - 1] =
+      chained_xyzz_mixed_add_indexed_signed_nonzero(
+          points, sorted_point_indices, start, count);
 }
 
 __global__ void accumulate_large_buckets_kernel(
@@ -575,6 +660,48 @@ __global__ void accumulate_large_buckets_kernel(
     if (lane_idx < stride) {
       partials[threadIdx.x] =
           jacobian_add(partials[threadIdx.x], partials[threadIdx.x + stride]);
+    }
+    __syncwarp();
+  }
+
+  if (lane_idx == 0) {
+    buckets[unique_bucket_indices[run_idx]] = partials[threadIdx.x];
+  }
+}
+
+__global__ void accumulate_large_buckets_xyzz_kernel(
+    const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *bucket_sizes, const int *bucket_offsets,
+    const uint32_t *sorted_point_indices, const affine_g1_t *points,
+    xyzz_g1_t *buckets, const int num_active_buckets,
+    const int large_bucket_threshold) {
+  const uint32_t warp_idx = threadIdx.x / WARP_THREADS;
+  const uint32_t lane_idx = threadIdx.x % WARP_THREADS;
+  const int job_idx =
+      static_cast<int>((blockIdx.x * BUCKET_WARPS_PER_BLOCK) + warp_idx);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  const int count = bucket_sizes[run_idx];
+  if (count <= large_bucket_threshold) {
+    return;
+  }
+
+  const int start = bucket_offsets[run_idx];
+  xyzz_g1_t local = chained_xyzz_mixed_add_indexed_nonzero(
+      points, sorted_point_indices, start, count, static_cast<int>(lane_idx),
+      static_cast<int>(WARP_THREADS));
+
+  __shared__ xyzz_g1_t partials[BUCKET_THREADS];
+  partials[threadIdx.x] = local;
+  __syncwarp();
+
+  for (uint32_t stride = WARP_THREADS >> 1; stride > 0; stride >>= 1) {
+    if (lane_idx < stride) {
+      partials[threadIdx.x] =
+          xyzz_add(partials[threadIdx.x], partials[threadIdx.x + stride]);
     }
     __syncwarp();
   }
@@ -626,6 +753,48 @@ __global__ void accumulate_large_buckets_signed_kernel(
   }
 }
 
+__global__ void accumulate_large_buckets_signed_xyzz_kernel(
+    const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *bucket_sizes, const int *bucket_offsets,
+    const uint32_t *sorted_point_indices, const affine_g1_t *points,
+    xyzz_g1_t *buckets, const int num_active_buckets,
+    const int large_bucket_threshold) {
+  const uint32_t warp_idx = threadIdx.x / WARP_THREADS;
+  const uint32_t lane_idx = threadIdx.x % WARP_THREADS;
+  const int job_idx =
+      static_cast<int>((blockIdx.x * BUCKET_WARPS_PER_BLOCK) + warp_idx);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  const int count = bucket_sizes[run_idx];
+  if (count <= large_bucket_threshold) {
+    return;
+  }
+
+  const int start = bucket_offsets[run_idx];
+  xyzz_g1_t local = chained_xyzz_mixed_add_indexed_signed_nonzero(
+      points, sorted_point_indices, start, count, static_cast<int>(lane_idx),
+      static_cast<int>(WARP_THREADS));
+
+  __shared__ xyzz_g1_t partials[BUCKET_THREADS];
+  partials[threadIdx.x] = local;
+  __syncwarp();
+
+  for (uint32_t stride = WARP_THREADS >> 1; stride > 0; stride >>= 1) {
+    if (lane_idx < stride) {
+      partials[threadIdx.x] =
+          xyzz_add(partials[threadIdx.x], partials[threadIdx.x + stride]);
+    }
+    __syncwarp();
+  }
+
+  if (lane_idx == 0) {
+    buckets[unique_bucket_indices[run_idx] - 1] = partials[threadIdx.x];
+  }
+}
+
 __global__ void reduce_bucket_bit_kernel(jacobian_g1_t *buckets,
                                          jacobian_g1_t *bit_sums,
                                          const uint32_t bit,
@@ -668,6 +837,47 @@ __global__ void reduce_bucket_bit_kernel(jacobian_g1_t *buckets,
   }
 }
 
+__global__ void reduce_xyzz_bucket_bit_kernel(xyzz_g1_t *buckets,
+                                              xyzz_g1_t *bit_sums,
+                                              const uint32_t bit,
+                                              const uint32_t bits_per_slice,
+                                              const uint32_t num_windows) {
+  const uint32_t window = blockIdx.x;
+  if (window >= num_windows) {
+    return;
+  }
+
+  const uint32_t bucket_stride = uint32_t{1} << bits_per_slice;
+  const uint32_t half = uint32_t{1} << bit;
+  const uint32_t base = window * bucket_stride;
+
+  xyzz_g1_t local = xyzz_infinity();
+  for (uint32_t i = threadIdx.x; i < half; i += blockDim.x) {
+    local = xyzz_add(local, buckets[base + half + i]);
+  }
+
+  __shared__ xyzz_g1_t partials[REDUCTION_THREADS];
+  partials[threadIdx.x] = local;
+  __syncthreads();
+
+  for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      partials[threadIdx.x] =
+          xyzz_add(partials[threadIdx.x], partials[threadIdx.x + stride]);
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    bit_sums[(window * bits_per_slice) + bit] = partials[0];
+  }
+  __syncthreads();
+
+  for (uint32_t i = threadIdx.x; i < half; i += blockDim.x) {
+    buckets[base + i] = xyzz_add(buckets[base + i], buckets[base + half + i]);
+  }
+}
+
 __global__ void compose_window_sums_kernel(const jacobian_g1_t *bit_sums,
                                            jacobian_g1_t *window_sums,
                                            const uint32_t bits_per_slice,
@@ -681,6 +891,25 @@ __global__ void compose_window_sums_kernel(const jacobian_g1_t *bit_sums,
   for (int bit = static_cast<int>(bits_per_slice) - 1; bit >= 0; --bit) {
     self_double(accumulator);
     accumulator = jacobian_add(
+        accumulator,
+        bit_sums[(window * bits_per_slice) + static_cast<uint32_t>(bit)]);
+  }
+  window_sums[window] = accumulator;
+}
+
+__global__ void compose_xyzz_window_sums_kernel(const xyzz_g1_t *bit_sums,
+                                                xyzz_g1_t *window_sums,
+                                                const uint32_t bits_per_slice,
+                                                const uint32_t num_windows) {
+  const uint32_t window = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (window >= num_windows) {
+    return;
+  }
+
+  xyzz_g1_t accumulator = xyzz_infinity();
+  for (int bit = static_cast<int>(bits_per_slice) - 1; bit >= 0; --bit) {
+    self_double(accumulator);
+    accumulator = xyzz_add(
         accumulator,
         bit_sums[(window * bits_per_slice) + static_cast<uint32_t>(bit)]);
   }
@@ -709,6 +938,27 @@ __global__ void compose_signed_window_sums_kernel(
   window_sums[window] = accumulator;
 }
 
+__global__ void compose_signed_xyzz_window_sums_kernel(
+    const xyzz_g1_t *bit_sums, const xyzz_g1_t *buckets, xyzz_g1_t *window_sums,
+    const uint32_t signed_bucket_bits, const uint32_t num_windows) {
+  const uint32_t window = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (window >= num_windows) {
+    return;
+  }
+
+  xyzz_g1_t accumulator = xyzz_infinity();
+  for (int bit = static_cast<int>(signed_bucket_bits) - 1; bit >= 0; --bit) {
+    self_double(accumulator);
+    accumulator = xyzz_add(
+        accumulator,
+        bit_sums[(window * signed_bucket_bits) + static_cast<uint32_t>(bit)]);
+  }
+
+  const uint32_t bucket_stride = uint32_t{1} << signed_bucket_bits;
+  accumulator = xyzz_add(accumulator, buckets[window * bucket_stride]);
+  window_sums[window] = accumulator;
+}
+
 __global__ void reduce_windows_running_sum_kernel(const jacobian_g1_t *buckets,
                                                   jacobian_g1_t *window_sums,
                                                   const uint32_t bits_per_slice,
@@ -726,6 +976,26 @@ __global__ void reduce_windows_running_sum_kernel(const jacobian_g1_t *buckets,
   for (uint32_t bucket = bucket_stride - 1; bucket > 0; --bucket) {
     running_sum = jacobian_add(running_sum, buckets[base + bucket]);
     window_sum = jacobian_add(window_sum, running_sum);
+  }
+  window_sums[window] = window_sum;
+}
+
+__global__ void reduce_xyzz_windows_running_sum_kernel(
+    const xyzz_g1_t *buckets, xyzz_g1_t *window_sums,
+    const uint32_t bits_per_slice, const uint32_t num_windows) {
+  const uint32_t window = blockIdx.x;
+  if (window >= num_windows || threadIdx.x != 0) {
+    return;
+  }
+
+  const uint32_t bucket_stride = uint32_t{1} << bits_per_slice;
+  const uint32_t base = window * bucket_stride;
+  xyzz_g1_t running_sum = xyzz_infinity();
+  xyzz_g1_t window_sum = xyzz_infinity();
+
+  for (uint32_t bucket = bucket_stride - 1; bucket > 0; --bucket) {
+    running_sum = xyzz_add(running_sum, buckets[base + bucket]);
+    window_sum = xyzz_add(window_sum, running_sum);
   }
   window_sums[window] = window_sum;
 }
@@ -749,6 +1019,29 @@ __global__ void final_accumulation_kernel(const jacobian_g1_t *window_sums,
       self_double(accumulator);
     }
     accumulator = jacobian_add(accumulator, window_sums[window]);
+  }
+  *result = to_affine(accumulator);
+}
+
+__global__ void final_xyzz_accumulation_kernel(const xyzz_g1_t *window_sums,
+                                               affine_g1_t *result,
+                                               const uint32_t bits_per_slice,
+                                               const uint32_t num_windows,
+                                               const uint32_t remainder) {
+  const uint32_t msm_index = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (msm_index > 0) {
+    return;
+  }
+
+  xyzz_g1_t accumulator = xyzz_infinity();
+  for (uint32_t window = 0; window < num_windows; ++window) {
+    const uint32_t num_doublings = (window == num_windows - 1 && remainder != 0)
+                                       ? remainder
+                                       : bits_per_slice;
+    for (uint32_t i = 0; i < num_doublings; ++i) {
+      self_double(accumulator);
+    }
+    accumulator = xyzz_add(accumulator, window_sums[window]);
   }
   *result = to_affine(accumulator);
 }
@@ -806,6 +1099,15 @@ msm_digit_mode &msm_digit_mode_ref() {
 }
 
 msm_digit_mode current_msm_digit_mode() { return msm_digit_mode_ref(); }
+
+msm_coordinate_mode &msm_coordinate_mode_ref() {
+  static msm_coordinate_mode mode = msm_coordinate_mode::JACOBIAN;
+  return mode;
+}
+
+msm_coordinate_mode current_msm_coordinate_mode() {
+  return msm_coordinate_mode_ref();
+}
 
 void copy_and_split_scalar_chunk(
     const fr_t *scalars, fr_t *scalars_device, uint32_t *bucket_indices,
@@ -1015,6 +1317,8 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
   recorder.start(cuda_stream, bits_per_slice);
   const msm_digit_mode digit_mode = current_msm_digit_mode();
   recorder.set_digit_mode(digit_mode);
+  const msm_coordinate_mode coordinate_mode = current_msm_coordinate_mode();
+  recorder.set_coordinate_mode(coordinate_mode);
 
   const uint32_t num_windows =
       (NUM_BITS_IN_FIELD + bits_per_slice - 1) / bits_per_slice;
@@ -1131,23 +1435,11 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
   const uint32_t bucket_stride = uint32_t{1} << bucket_bits;
   const size_t total_dense_buckets =
       static_cast<size_t>(num_windows) * bucket_stride;
-  DeviceBuffer<jacobian_g1_t> dense_buckets;
-  DeviceBuffer<jacobian_g1_t> bit_sums;
-  DeviceBuffer<jacobian_g1_t> window_sums;
   DeviceBuffer<affine_g1_t> result_device;
-  dense_buckets.resize(total_dense_buckets);
-  bit_sums.resize(static_cast<size_t>(num_windows) * bucket_bits);
-  window_sums.resize(num_windows);
   result_device.resize(1);
 
   const uint32_t init_blocks =
       ceil_div_u32(total_dense_buckets, BUCKET_THREADS);
-  recorder.time(msm_stage::init_buckets, [&]() {
-    init_bucket_storage_kernel<<<init_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
-        dense_buckets.data(), total_dense_buckets);
-    check_cuda(cudaGetLastError(), "init_bucket_storage_kernel launch");
-  });
-
   const int average_bucket_size =
       static_cast<int>((num_scalars + static_cast<size_t>(bucket_stride) - 1) /
                        static_cast<size_t>(bucket_stride));
@@ -1162,87 +1454,204 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
       sorted_bucket_run_indices.data(), bucket_sizes.data(), num_active_buckets,
       large_bucket_threshold, bucket_job_blocks, cuda_stream, stream, recorder);
 
-  recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
-    if (digit_mode == msm_digit_mode::SIGNED) {
-      accumulate_normal_buckets_signed_kernel<<<
-          bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
-          sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-          bucket_sizes.data(), bucket_offsets.data(),
-          sorted_point_indices.data(), context.srs_points().data(),
-          dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-    } else {
-      accumulate_normal_buckets_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
-                                         cuda_stream>>>(
-          sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-          bucket_sizes.data(), bucket_offsets.data(),
-          sorted_point_indices.data(), context.srs_points().data(),
-          dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-    }
-    check_cuda(cudaGetLastError(), "accumulate_normal_buckets_kernel launch");
-  });
+  if (coordinate_mode == msm_coordinate_mode::XYZZ) {
+    DeviceBuffer<xyzz_g1_t> dense_buckets;
+    DeviceBuffer<xyzz_g1_t> bit_sums;
+    DeviceBuffer<xyzz_g1_t> window_sums;
+    dense_buckets.resize(total_dense_buckets);
+    bit_sums.resize(static_cast<size_t>(num_windows) * bucket_bits);
+    window_sums.resize(num_windows);
 
-  recorder.time(msm_stage::accumulate_large_buckets, [&]() {
-    const uint32_t large_blocks = ceil_div_u32(
-        static_cast<size_t>(num_active_buckets), BUCKET_WARPS_PER_BLOCK);
-    if (digit_mode == msm_digit_mode::SIGNED) {
-      accumulate_large_buckets_signed_kernel<<<large_blocks, BUCKET_THREADS, 0,
-                                               cuda_stream>>>(
-          sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-          bucket_sizes.data(), bucket_offsets.data(),
-          sorted_point_indices.data(), context.srs_points().data(),
-          dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-    } else {
-      accumulate_large_buckets_kernel<<<large_blocks, BUCKET_THREADS, 0,
-                                        cuda_stream>>>(
-          sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-          bucket_sizes.data(), bucket_offsets.data(),
-          sorted_point_indices.data(), context.srs_points().data(),
-          dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-    }
-    check_cuda(cudaGetLastError(), "accumulate_large_buckets_kernel launch");
-  });
+    recorder.time(msm_stage::init_buckets, [&]() {
+      init_xyzz_bucket_storage_kernel<<<init_blocks, BUCKET_THREADS, 0,
+                                        cuda_stream>>>(dense_buckets.data(),
+                                                       total_dense_buckets);
+      check_cuda(cudaGetLastError(), "init_xyzz_bucket_storage_kernel launch");
+    });
 
-  if (USE_SERIAL_RUNNING_SUM_REDUCTION_FALLBACK) {
-    recorder.time(msm_stage::reduce_buckets, [&]() {
-      reduce_windows_running_sum_kernel<<<num_windows, 1, 0, cuda_stream>>>(
-          dense_buckets.data(), window_sums.data(), bits_per_slice,
-          num_windows);
+    recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
+      if (digit_mode == msm_digit_mode::SIGNED) {
+        accumulate_normal_buckets_signed_xyzz_kernel<<<
+            bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), context.srs_points().data(),
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+      } else {
+        accumulate_normal_buckets_xyzz_kernel<<<
+            bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), context.srs_points().data(),
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+      }
       check_cuda(cudaGetLastError(),
-                 "reduce_windows_running_sum_kernel launch");
+                 "accumulate_normal_buckets_xyzz_kernel launch");
+    });
+
+    recorder.time(msm_stage::accumulate_large_buckets, [&]() {
+      const uint32_t large_blocks = ceil_div_u32(
+          static_cast<size_t>(num_active_buckets), BUCKET_WARPS_PER_BLOCK);
+      if (digit_mode == msm_digit_mode::SIGNED) {
+        accumulate_large_buckets_signed_xyzz_kernel<<<
+            large_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), context.srs_points().data(),
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+      } else {
+        accumulate_large_buckets_xyzz_kernel<<<large_blocks, BUCKET_THREADS, 0,
+                                               cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), context.srs_points().data(),
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+      }
+      check_cuda(cudaGetLastError(),
+                 "accumulate_large_buckets_xyzz_kernel launch");
+    });
+
+    if (USE_SERIAL_RUNNING_SUM_REDUCTION_FALLBACK) {
+      recorder.time(msm_stage::reduce_buckets, [&]() {
+        reduce_xyzz_windows_running_sum_kernel<<<num_windows, 1, 0,
+                                                 cuda_stream>>>(
+            dense_buckets.data(), window_sums.data(), bits_per_slice,
+            num_windows);
+        check_cuda(cudaGetLastError(),
+                   "reduce_xyzz_windows_running_sum_kernel launch");
+      });
+    } else {
+      recorder.time(msm_stage::reduce_buckets, [&]() {
+        for (int bit = static_cast<int>(bucket_bits) - 1; bit >= 0; --bit) {
+          reduce_xyzz_bucket_bit_kernel<<<num_windows, REDUCTION_THREADS, 0,
+                                          cuda_stream>>>(
+              dense_buckets.data(), bit_sums.data(), static_cast<uint32_t>(bit),
+              bucket_bits, num_windows);
+          check_cuda(cudaGetLastError(),
+                     "reduce_xyzz_bucket_bit_kernel launch");
+        }
+      });
+
+      const uint32_t window_blocks = ceil_div_u32(num_windows, BUCKET_THREADS);
+      recorder.time(msm_stage::compose_windows, [&]() {
+        if (digit_mode == msm_digit_mode::SIGNED) {
+          compose_signed_xyzz_window_sums_kernel<<<
+              window_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+              bit_sums.data(), dense_buckets.data(), window_sums.data(),
+              bucket_bits, num_windows);
+        } else {
+          compose_xyzz_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
+                                            cuda_stream>>>(
+              bit_sums.data(), window_sums.data(), bits_per_slice, num_windows);
+        }
+        check_cuda(cudaGetLastError(),
+                   "compose_xyzz_window_sums_kernel launch");
+      });
+    }
+
+    recorder.time(msm_stage::final_accumulation, [&]() {
+      final_xyzz_accumulation_kernel<<<1, 32, 0, cuda_stream>>>(
+          window_sums.data(), result_device.data(), bits_per_slice, num_windows,
+          remainder);
+      check_cuda(cudaGetLastError(), "final_xyzz_accumulation_kernel launch");
     });
   } else {
-    recorder.time(msm_stage::reduce_buckets, [&]() {
-      for (int bit = static_cast<int>(bucket_bits) - 1; bit >= 0; --bit) {
-        reduce_bucket_bit_kernel<<<num_windows, REDUCTION_THREADS, 0,
-                                   cuda_stream>>>(
-            dense_buckets.data(), bit_sums.data(), static_cast<uint32_t>(bit),
-            bucket_bits, num_windows);
-        check_cuda(cudaGetLastError(), "reduce_bucket_bit_kernel launch");
-      }
+    DeviceBuffer<jacobian_g1_t> dense_buckets;
+    DeviceBuffer<jacobian_g1_t> bit_sums;
+    DeviceBuffer<jacobian_g1_t> window_sums;
+    dense_buckets.resize(total_dense_buckets);
+    bit_sums.resize(static_cast<size_t>(num_windows) * bucket_bits);
+    window_sums.resize(num_windows);
+
+    recorder.time(msm_stage::init_buckets, [&]() {
+      init_bucket_storage_kernel<<<init_blocks, BUCKET_THREADS, 0,
+                                   cuda_stream>>>(dense_buckets.data(),
+                                                  total_dense_buckets);
+      check_cuda(cudaGetLastError(), "init_bucket_storage_kernel launch");
     });
 
-    const uint32_t window_blocks = ceil_div_u32(num_windows, BUCKET_THREADS);
-    recorder.time(msm_stage::compose_windows, [&]() {
+    recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
       if (digit_mode == msm_digit_mode::SIGNED) {
-        compose_signed_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
-                                            cuda_stream>>>(
-            bit_sums.data(), dense_buckets.data(), window_sums.data(),
-            bucket_bits, num_windows);
+        accumulate_normal_buckets_signed_kernel<<<
+            bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), context.srs_points().data(),
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
       } else {
-        compose_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
-                                     cuda_stream>>>(
-            bit_sums.data(), window_sums.data(), bits_per_slice, num_windows);
+        accumulate_normal_buckets_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
+                                           cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), context.srs_points().data(),
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
       }
-      check_cuda(cudaGetLastError(), "compose_window_sums_kernel launch");
+      check_cuda(cudaGetLastError(), "accumulate_normal_buckets_kernel launch");
+    });
+
+    recorder.time(msm_stage::accumulate_large_buckets, [&]() {
+      const uint32_t large_blocks = ceil_div_u32(
+          static_cast<size_t>(num_active_buckets), BUCKET_WARPS_PER_BLOCK);
+      if (digit_mode == msm_digit_mode::SIGNED) {
+        accumulate_large_buckets_signed_kernel<<<large_blocks, BUCKET_THREADS,
+                                                 0, cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), context.srs_points().data(),
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+      } else {
+        accumulate_large_buckets_kernel<<<large_blocks, BUCKET_THREADS, 0,
+                                          cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), context.srs_points().data(),
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+      }
+      check_cuda(cudaGetLastError(), "accumulate_large_buckets_kernel launch");
+    });
+
+    if (USE_SERIAL_RUNNING_SUM_REDUCTION_FALLBACK) {
+      recorder.time(msm_stage::reduce_buckets, [&]() {
+        reduce_windows_running_sum_kernel<<<num_windows, 1, 0, cuda_stream>>>(
+            dense_buckets.data(), window_sums.data(), bits_per_slice,
+            num_windows);
+        check_cuda(cudaGetLastError(),
+                   "reduce_windows_running_sum_kernel launch");
+      });
+    } else {
+      recorder.time(msm_stage::reduce_buckets, [&]() {
+        for (int bit = static_cast<int>(bucket_bits) - 1; bit >= 0; --bit) {
+          reduce_bucket_bit_kernel<<<num_windows, REDUCTION_THREADS, 0,
+                                     cuda_stream>>>(
+              dense_buckets.data(), bit_sums.data(), static_cast<uint32_t>(bit),
+              bucket_bits, num_windows);
+          check_cuda(cudaGetLastError(), "reduce_bucket_bit_kernel launch");
+        }
+      });
+
+      const uint32_t window_blocks = ceil_div_u32(num_windows, BUCKET_THREADS);
+      recorder.time(msm_stage::compose_windows, [&]() {
+        if (digit_mode == msm_digit_mode::SIGNED) {
+          compose_signed_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
+                                              cuda_stream>>>(
+              bit_sums.data(), dense_buckets.data(), window_sums.data(),
+              bucket_bits, num_windows);
+        } else {
+          compose_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
+                                       cuda_stream>>>(
+              bit_sums.data(), window_sums.data(), bits_per_slice, num_windows);
+        }
+        check_cuda(cudaGetLastError(), "compose_window_sums_kernel launch");
+      });
+    }
+
+    recorder.time(msm_stage::final_accumulation, [&]() {
+      final_accumulation_kernel<<<1, 32, 0, cuda_stream>>>(
+          window_sums.data(), result_device.data(), bits_per_slice, num_windows,
+          remainder);
+      check_cuda(cudaGetLastError(), "final_accumulation_kernel launch");
     });
   }
-
-  recorder.time(msm_stage::final_accumulation, [&]() {
-    final_accumulation_kernel<<<1, 32, 0, cuda_stream>>>(
-        window_sums.data(), result_device.data(), bits_per_slice, num_windows,
-        remainder);
-    check_cuda(cudaGetLastError(), "final_accumulation_kernel launch");
-  });
 
   recorder.time(msm_stage::d2h_result, [&]() {
     copy_device_to_host(result_host, result_device.data(), sizeof(affine_g1_t),
@@ -1314,6 +1723,13 @@ void set_msm_digit_mode(const msm_digit_mode mode) {
                       mode == msm_digit_mode::SIGNED,
                   "bb::gpu::bn254::msm: invalid digit mode");
   msm_digit_mode_ref() = mode;
+}
+
+void set_msm_coordinate_mode(const msm_coordinate_mode mode) {
+  check_condition(mode == msm_coordinate_mode::JACOBIAN ||
+                      mode == msm_coordinate_mode::XYZZ,
+                  "bb::gpu::bn254::msm: invalid coordinate mode");
+  msm_coordinate_mode_ref() = mode;
 }
 
 } // namespace bb::gpu::bn254

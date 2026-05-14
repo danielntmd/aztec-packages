@@ -47,6 +47,22 @@ public:
   }
 };
 
+class ScopedMsmCoordinateMode {
+public:
+  explicit ScopedMsmCoordinateMode(
+      const bb::gpu::bn254::msm_coordinate_mode mode) {
+    bb::gpu::bn254::set_msm_coordinate_mode(mode);
+  }
+
+  ScopedMsmCoordinateMode(const ScopedMsmCoordinateMode &) = delete;
+  ScopedMsmCoordinateMode &operator=(const ScopedMsmCoordinateMode &) = delete;
+
+  ~ScopedMsmCoordinateMode() {
+    bb::gpu::bn254::set_msm_coordinate_mode(
+        bb::gpu::bn254::msm_coordinate_mode::JACOBIAN);
+  }
+};
+
 bool cuda_available() {
   int device_count = 0;
   return cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0;
@@ -182,6 +198,8 @@ void add_profile_counters(benchmark::State &state,
       benchmark::Counter(totals.scalar_split_first_chunk_percent / iterations);
   state.counters["digit_mode"] =
       benchmark::Counter(totals.digit_mode / iterations);
+  state.counters["coord_mode"] =
+      benchmark::Counter(totals.coordinate_mode / iterations);
   state.counters["split_ms"] = totals.split_scalars_ms / iterations;
   state.counters["sort_records_ms"] = totals.sort_records_ms / iterations;
   state.counters["rle_ms"] = totals.encode_buckets_ms / iterations;
@@ -281,6 +299,7 @@ void add_profile(bb::gpu::bn254::msm_profile &totals,
   totals.scalar_split_first_chunk_percent +=
       profile.scalar_split_first_chunk_percent;
   totals.digit_mode += profile.digit_mode;
+  totals.coordinate_mode += profile.coordinate_mode;
   totals.normal_bucket_count += profile.normal_bucket_count;
   totals.large_bucket_count += profile.large_bucket_count;
   totals.normal_bucket_point_count += profile.normal_bucket_point_count;
@@ -412,6 +431,32 @@ void bench_gpu_single_msm_profiled_digit_mode(benchmark::State &state) {
   assert_correctness(*input, bits_per_slice, static_cast<int>(state.range(0)));
 }
 
+void bench_gpu_single_msm_profiled_coordinate_mode(benchmark::State &state) {
+  if (!cuda_available()) {
+    state.SkipWithError("No CUDA-capable device is available");
+    return;
+  }
+
+  const size_t num_points = size_t{1} << state.range(0);
+  const auto coordinate_mode =
+      static_cast<bb::gpu::bn254::msm_coordinate_mode>(state.range(1));
+  auto input = make_input(num_points);
+  const uint32_t bits_per_slice = auto_bits_per_slice(num_points);
+
+  const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+  bb::gpu::bn254::msm_profile totals{};
+  for (auto _ : state) {
+    bb::gpu::bn254::msm_profile profile{};
+    auto result = gpu_profiled_msm(*input, bits_per_slice, &profile);
+    benchmark::DoNotOptimize(result);
+
+    add_profile(totals, profile);
+  }
+
+  add_profile_counters(state, totals);
+  assert_correctness(*input, bits_per_slice, static_cast<int>(state.range(0)));
+}
+
 void bench_gpu_all_sizes_profiled(benchmark::State &state) {
   if (!cuda_available()) {
     state.SkipWithError("No CUDA-capable device is available");
@@ -492,6 +537,8 @@ void bench_gpu_all_sizes_profiled(benchmark::State &state) {
         counter_average(gpu_totals[i].d2h_result_ms, iterations);
     state.counters[prefix + "active_buckets"] =
         benchmark::Counter(gpu_totals[i].active_buckets / iterations);
+    state.counters[prefix + "coord_mode"] =
+        benchmark::Counter(gpu_totals[i].coordinate_mode / iterations);
 
     total_cpu_ms += cpu_ms;
     total_gpu_ms += gpu_ms;
@@ -548,6 +595,15 @@ BENCHMARK(bench_gpu_single_msm_profiled_split_percent)
     ->Unit(benchmark::kMillisecond);
 BENCHMARK(bench_gpu_single_msm_profiled_digit_mode)
     ->Name("BN254/GPU/single_msm_profiled_digit_mode")
+    ->Args({20, 0})
+    ->Args({20, 1})
+    ->Args({22, 0})
+    ->Args({22, 1})
+    ->Args({24, 0})
+    ->Args({24, 1})
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(bench_gpu_single_msm_profiled_coordinate_mode)
+    ->Name("BN254/GPU/single_msm_profiled_coordinate_mode")
     ->Args({20, 0})
     ->Args({20, 1})
     ->Args({22, 0})

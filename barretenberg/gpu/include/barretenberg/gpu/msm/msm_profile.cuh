@@ -42,6 +42,7 @@ struct msm_profile {
   uint32_t large_bucket_threshold = 0;
   uint32_t scalar_split_first_chunk_percent = 0;
   uint32_t digit_mode = 0;
+  uint32_t coordinate_mode = 0;
   uint64_t normal_bucket_count = 0;
   uint64_t large_bucket_count = 0;
   uint64_t normal_bucket_point_count = 0;
