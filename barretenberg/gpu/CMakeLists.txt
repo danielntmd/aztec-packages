@@ -2,6 +2,11 @@ find_package(CUDAToolkit REQUIRED)
 
 set(BB_GPU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(BB_GPU_CPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cpp/src")
+set(ICICLE_V28_ROOT "" CACHE PATH "Optional Icicle v2.8 install/build root for GPU MSM baseline benchmarks")
+set(ICICLE_V28_LIBRARIES "" CACHE STRING "Optional semicolon-separated Icicle v2.8 libraries for GPU MSM baseline benchmarks")
+set(ICICLE_V4_ROOT "" CACHE PATH "Optional Icicle v4 install/build root for GPU MSM baseline benchmarks")
+set(ICICLE_V4_LIBRARIES "" CACHE STRING "Optional semicolon-separated Icicle v4 frontend libraries for GPU MSM baseline benchmarks")
+set(ICICLE_V4_BACKEND_DIR "" CACHE PATH "Optional Icicle v4 CUDA backend directory loaded by the baseline benchmark")
 
 set(BB_GPU_HEADERS
     include/barretenberg/gpu/common/cuda_defines.cuh
@@ -133,6 +138,100 @@ if(NOT FUZZING)
             ${BB_GPU_STDCXX_LIBRARY})
     if(TARGET msgpack-c)
         add_dependencies(gpu_msm_bench msgpack-c)
+    endif()
+
+    set(BB_GPU_BENCHMARK_COMMON_SOURCES
+        benchmark/msm_benchmark_common.cpp)
+
+    function(bb_gpu_configure_benchmark_target target_name)
+        target_include_directories(${target_name}
+            PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/benchmark"
+                "${BB_GPU_INCLUDE_DIR}"
+                "${BB_GPU_CPP_SOURCE_DIR}"
+                ${MSGPACK_INCLUDE}
+                ${TRACY_INCLUDE}
+                ${LMDB_INCLUDE}
+                ${LIBDEFLATE_INCLUDE}
+                ${HTTPLIB_INCLUDE}
+                ${BACKWARD_INCLUDE}
+                ${NLOHMANN_JSON_INCLUDE})
+        target_link_libraries(${target_name}
+            PRIVATE
+                commitment_schemes
+                benchmark::benchmark
+                CUDA::cudart
+                ${BB_GPU_STDCXX_LIBRARY})
+        if(TARGET msgpack-c)
+            add_dependencies(${target_name} msgpack-c)
+        endif()
+    endfunction()
+
+    function(bb_gpu_collect_icicle_libraries root cache_libraries out_libraries)
+        if(cache_libraries)
+            set(${out_libraries} ${cache_libraries} PARENT_SCOPE)
+            return()
+        endif()
+
+        file(GLOB discovered_icicle_libraries CONFIGURE_DEPENDS
+            "${root}/lib/*.so"
+            "${root}/lib/*.a"
+            "${root}/lib64/*.so"
+            "${root}/lib64/*.a"
+            "${root}/build/lib/*.so"
+            "${root}/build/lib/*.a"
+            "${root}/build/lib64/*.so"
+            "${root}/build/lib64/*.a")
+        set(${out_libraries} ${discovered_icicle_libraries} PARENT_SCOPE)
+    endfunction()
+
+    add_executable(gpu_msm_baseline_bench
+        ${BB_GPU_BENCHMARK_COMMON_SOURCES}
+        benchmark/msm_baseline_bb.bench.cpp)
+    bb_gpu_configure_benchmark_target(gpu_msm_baseline_bench)
+    target_link_libraries(gpu_msm_baseline_bench PRIVATE gpu)
+
+    if(ICICLE_V28_ROOT)
+        bb_gpu_collect_icicle_libraries("${ICICLE_V28_ROOT}" "${ICICLE_V28_LIBRARIES}" ICICLE_V28_LINK_LIBRARIES)
+        if(ICICLE_V28_LINK_LIBRARIES)
+            add_executable(gpu_msm_baseline_icicle_v28_bench
+                ${BB_GPU_BENCHMARK_COMMON_SOURCES}
+                benchmark/msm_baseline_icicle_v28.bench.cpp
+                benchmark/msm_baseline_icicle_v28_adapter.cu)
+            bb_gpu_configure_benchmark_target(gpu_msm_baseline_icicle_v28_bench)
+            target_include_directories(gpu_msm_baseline_icicle_v28_bench
+                PRIVATE
+                    "${ICICLE_V28_ROOT}/include"
+                    "${ICICLE_V28_ROOT}/icicle/include")
+            target_link_libraries(gpu_msm_baseline_icicle_v28_bench PRIVATE ${ICICLE_V28_LINK_LIBRARIES})
+            set_target_properties(gpu_msm_baseline_icicle_v28_bench PROPERTIES
+                BUILD_RPATH "${ICICLE_V28_ROOT}/lib;${ICICLE_V28_ROOT}/lib64;${ICICLE_V28_ROOT}/build/lib;${ICICLE_V28_ROOT}/build/lib64")
+        else()
+            message(WARNING "ICICLE_V28_ROOT is set, but no Icicle v2.8 libraries were found. Set ICICLE_V28_LIBRARIES to build gpu_msm_baseline_icicle_v28_bench.")
+        endif()
+    endif()
+
+    if(ICICLE_V4_ROOT)
+        bb_gpu_collect_icicle_libraries("${ICICLE_V4_ROOT}" "${ICICLE_V4_LIBRARIES}" ICICLE_V4_LINK_LIBRARIES)
+        if(ICICLE_V4_LINK_LIBRARIES)
+            add_executable(gpu_msm_baseline_icicle_v4_bench
+                ${BB_GPU_BENCHMARK_COMMON_SOURCES}
+                benchmark/msm_baseline_icicle_v4.bench.cpp)
+            bb_gpu_configure_benchmark_target(gpu_msm_baseline_icicle_v4_bench)
+            target_include_directories(gpu_msm_baseline_icicle_v4_bench
+                PRIVATE
+                    "${ICICLE_V4_ROOT}/include")
+            target_link_libraries(gpu_msm_baseline_icicle_v4_bench PRIVATE ${ICICLE_V4_LINK_LIBRARIES})
+            set_target_properties(gpu_msm_baseline_icicle_v4_bench PROPERTIES
+                BUILD_RPATH "${ICICLE_V4_ROOT}/lib;${ICICLE_V4_ROOT}/lib64")
+            if(ICICLE_V4_BACKEND_DIR)
+                target_compile_definitions(gpu_msm_baseline_icicle_v4_bench
+                    PRIVATE
+                        BB_GPU_ICICLE_V4_BACKEND_DIR="${ICICLE_V4_BACKEND_DIR}")
+            endif()
+        else()
+            message(WARNING "ICICLE_V4_ROOT is set, but no Icicle v4 libraries were found. Set ICICLE_V4_LIBRARIES to build gpu_msm_baseline_icicle_v4_bench.")
+        endif()
     endif()
 endif()
 
