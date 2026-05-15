@@ -6,6 +6,7 @@
 #include "barretenberg/gpu/common/cuda_error.cuh"
 #include "barretenberg/gpu/common/device_buffer.hpp"
 #include "barretenberg/gpu/common/device_context.hpp"
+#include "barretenberg/gpu/common/nvtx.hpp"
 #include "barretenberg/gpu/msm/msm_profile.cuh"
 
 #include <cuda_runtime.h>
@@ -13,6 +14,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <utility>
 
 namespace bb::gpu::bn254 {
@@ -58,6 +60,63 @@ enum class msm_stage {
   d2h_result,
 };
 
+const char *total_nvtx_name(const msm_coordinate_mode mode) {
+  return mode == msm_coordinate_mode::XYZZ ? "bb.msm.xyzz" : "bb.msm.jacobian";
+}
+
+const char *scalar_copy_split_nvtx_name(const msm_coordinate_mode mode) {
+  return mode == msm_coordinate_mode::XYZZ
+             ? "bb.msm.xyzz.scalar_copy_split_pipeline"
+             : "bb.msm.jacobian.scalar_copy_split_pipeline";
+}
+
+const char *stage_nvtx_name(const msm_stage stage_name,
+                            const msm_coordinate_mode mode) {
+  const bool xyzz = mode == msm_coordinate_mode::XYZZ;
+  switch (stage_name) {
+  case msm_stage::h2d_points:
+    return xyzz ? "bb.msm.xyzz.h2d_points" : "bb.msm.jacobian.h2d_points";
+  case msm_stage::h2d_scalars:
+    return xyzz ? "bb.msm.xyzz.h2d_scalars" : "bb.msm.jacobian.h2d_scalars";
+  case msm_stage::split_scalars:
+    return xyzz ? "bb.msm.xyzz.split_scalars" : "bb.msm.jacobian.split_scalars";
+  case msm_stage::sort_records:
+    return xyzz ? "bb.msm.xyzz.sort_records" : "bb.msm.jacobian.sort_records";
+  case msm_stage::encode_buckets:
+    return xyzz ? "bb.msm.xyzz.encode_buckets"
+                : "bb.msm.jacobian.encode_buckets";
+  case msm_stage::scan_bucket_offsets:
+    return xyzz ? "bb.msm.xyzz.scan_bucket_offsets"
+                : "bb.msm.jacobian.scan_bucket_offsets";
+  case msm_stage::build_bucket_jobs:
+    return xyzz ? "bb.msm.xyzz.build_bucket_jobs"
+                : "bb.msm.jacobian.build_bucket_jobs";
+  case msm_stage::sort_bucket_jobs:
+    return xyzz ? "bb.msm.xyzz.sort_bucket_jobs"
+                : "bb.msm.jacobian.sort_bucket_jobs";
+  case msm_stage::init_buckets:
+    return xyzz ? "bb.msm.xyzz.init_buckets" : "bb.msm.jacobian.init_buckets";
+  case msm_stage::accumulate_normal_buckets:
+    return xyzz ? "bb.msm.xyzz.accumulate_normal_buckets"
+                : "bb.msm.jacobian.accumulate_normal_buckets";
+  case msm_stage::accumulate_large_buckets:
+    return xyzz ? "bb.msm.xyzz.accumulate_large_buckets"
+                : "bb.msm.jacobian.accumulate_large_buckets";
+  case msm_stage::reduce_buckets:
+    return xyzz ? "bb.msm.xyzz.reduce_buckets"
+                : "bb.msm.jacobian.reduce_buckets";
+  case msm_stage::compose_windows:
+    return xyzz ? "bb.msm.xyzz.compose_windows"
+                : "bb.msm.jacobian.compose_windows";
+  case msm_stage::final_accumulation:
+    return xyzz ? "bb.msm.xyzz.final_accumulation"
+                : "bb.msm.jacobian.final_accumulation";
+  case msm_stage::d2h_result:
+    return xyzz ? "bb.msm.xyzz.d2h_result" : "bb.msm.jacobian.d2h_result";
+  }
+  return xyzz ? "bb.msm.xyzz.unknown_stage" : "bb.msm.jacobian.unknown_stage";
+}
+
 class NoopMsmRecorder {
 public:
   void start(cudaStream_t, uint32_t) {}
@@ -75,6 +134,9 @@ public:
   void set_digit_mode(msm_digit_mode) {}
   void set_coordinate_mode(msm_coordinate_mode) {}
   void set_bucket_distribution(const uint64_t *) {}
+  const char *scalar_copy_split_range_name() const {
+    return "bb.msm.scalar_copy_split_pipeline";
+  }
 
   template <typename Stage> void time(msm_stage, Stage &&stage) {
     std::forward<Stage>(stage)();
@@ -185,8 +247,10 @@ public:
   }
 
   void set_coordinate_mode(const msm_coordinate_mode mode) {
+    coordinate_mode_ = mode;
     if (profile_ != nullptr) {
       profile_->coordinate_mode = static_cast<uint32_t>(mode);
+      total_range_.emplace(total_nvtx_name(mode));
     }
   }
 
@@ -205,6 +269,10 @@ public:
     }
   }
 
+  const char *scalar_copy_split_range_name() const {
+    return scalar_copy_split_nvtx_name(coordinate_mode_);
+  }
+
   template <typename Stage>
   void time(const msm_stage stage_name, Stage &&stage) {
     float *elapsed_ms = stage_slot(stage_name);
@@ -213,6 +281,8 @@ public:
       return;
     }
 
+    bb::gpu::ScopedNvtxRange nvtx_range(
+        stage_nvtx_name(stage_name, coordinate_mode_));
     cudaEvent_t start_event = nullptr;
     cudaEvent_t stop_event = nullptr;
     check_cuda(cudaEventCreate(&start_event), "cudaEventCreate start");
@@ -240,6 +310,7 @@ public:
                "cudaEventElapsedTime total");
     check_cuda(cudaEventDestroy(total_stop_), "cudaEventDestroy total stop");
     check_cuda(cudaEventDestroy(total_start_), "cudaEventDestroy total start");
+    total_range_.reset();
     stopped_ = true;
   }
 
@@ -287,6 +358,8 @@ private:
   cudaStream_t stream_ = nullptr;
   cudaEvent_t total_start_ = nullptr;
   cudaEvent_t total_stop_ = nullptr;
+  msm_coordinate_mode coordinate_mode_ = msm_coordinate_mode::JACOBIAN;
+  std::optional<bb::gpu::ScopedNvtxRange> total_range_;
   bool stopped_ = false;
 };
 
@@ -499,12 +572,13 @@ __global__ void accumulate_normal_buckets_kernel(
       points, sorted_point_indices, start, count);
 }
 
-__global__ void accumulate_normal_buckets_xyzz_kernel(
-    const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
-    const int *bucket_sizes, const int *bucket_offsets,
-    const uint32_t *sorted_point_indices, const affine_g1_t *points,
-    xyzz_g1_t *buckets, const int num_active_buckets,
-    const int large_bucket_threshold) {
+__global__ void __launch_bounds__(BUCKET_THREADS, 2)
+    accumulate_normal_buckets_xyzz_kernel(
+        const int *sorted_bucket_run_indices,
+        const uint32_t *unique_bucket_indices, const int *bucket_sizes,
+        const int *bucket_offsets, const uint32_t *sorted_point_indices,
+        const affine_g1_t *points, xyzz_g1_t *buckets,
+        const int num_active_buckets, const int large_bucket_threshold) {
   const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
   if (job_idx >= num_active_buckets) {
     return;
@@ -517,9 +591,10 @@ __global__ void accumulate_normal_buckets_xyzz_kernel(
   }
 
   const int start = bucket_offsets[run_idx];
-  buckets[unique_bucket_indices[run_idx]] =
-      chained_xyzz_mixed_add_indexed_nonzero(points, sorted_point_indices,
-                                             start, count);
+  xyzz_g1_t accumulator;
+  chained_xyzz_mixed_add_indexed_nonzero(accumulator, points,
+                                         sorted_point_indices, start, count);
+  buckets[unique_bucket_indices[run_idx]] = accumulator;
 }
 
 __device__ affine_g1_t load_signed_indexed_point(const affine_g1_t *points,
@@ -1165,6 +1240,7 @@ void copy_and_split_scalars_pipeline(
     const uint32_t point_start_index, const uint32_t bits_per_slice,
     const uint32_t num_windows, const msm_digit_mode digit_mode,
     const cudaStream_t main_stream, Recorder &recorder) {
+  bb::gpu::ScopedNvtxRange nvtx_range(recorder.scalar_copy_split_range_name());
   const uint32_t first_chunk_percent = scalar_split_first_chunk_percent();
   const size_t first_chunk_size =
       (num_scalars * static_cast<size_t>(first_chunk_percent) + 99) / 100;

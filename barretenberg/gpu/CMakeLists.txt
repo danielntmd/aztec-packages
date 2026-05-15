@@ -14,6 +14,7 @@ set(BB_GPU_HEADERS
     include/barretenberg/gpu/common/cub_helpers.cuh
     include/barretenberg/gpu/common/device_buffer.hpp
     include/barretenberg/gpu/common/device_context.hpp
+    include/barretenberg/gpu/common/nvtx.hpp
     include/barretenberg/gpu/commitment_schemes/commitment_key_msm.hpp
     include/barretenberg/gpu/fields/field.cuh
     include/barretenberg/gpu/curves/bn254/params.cuh

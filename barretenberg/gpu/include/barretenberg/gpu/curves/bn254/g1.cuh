@@ -237,10 +237,10 @@ BB_GPU_HD inline void xyzz_mixed_add(xyzz_g1_t &lhs, const affine_g1_t &rhs) {
     return;
   }
 
-  const fq_t u2 = rhs.x * lhs.zz;
-  const fq_t s2 = rhs.y * lhs.zzz;
-  const fq_t p = u2 - lhs.x;
-  const fq_t r = s2 - lhs.y;
+  fq_t p = rhs.x * lhs.zz;
+  p = p - lhs.x;
+  fq_t r = rhs.y * lhs.zzz;
+  r = r - lhs.y;
 
   if (p.is_zero()) {
     if (r.is_zero()) {
@@ -251,15 +251,20 @@ BB_GPU_HD inline void xyzz_mixed_add(xyzz_g1_t &lhs, const affine_g1_t &rhs) {
     return;
   }
 
-  const fq_t pp = p.sqr();
-  const fq_t ppp = p * pp;
-  const fq_t q = lhs.x * pp;
-  const fq_t two_q = q + q;
-  const fq_t x3 = r.sqr() - ppp - two_q;
-  lhs.y = (r * (q - x3)) - (lhs.y * ppp);
-  lhs.x = x3;
+  fq_t pp = p.sqr();
+  fq_t ppp = p * pp;
   lhs.zz = lhs.zz * pp;
   lhs.zzz = lhs.zzz * ppp;
+  fq_t q = lhs.x * pp;
+  fq_t x3 = r.sqr();
+  x3 = x3 - ppp;
+  pp = q + q;
+  x3 = x3 - pp;
+  q = q - x3;
+  q = r * q;
+  ppp = lhs.y * ppp;
+  lhs.y = q - ppp;
+  lhs.x = x3;
 }
 
 BB_GPU_HD inline void xyzz_mixed_add_zz1_equals_one(xyzz_g1_t &lhs,
@@ -272,8 +277,8 @@ BB_GPU_HD inline void xyzz_mixed_add_zz1_equals_one(xyzz_g1_t &lhs,
     return;
   }
 
-  const fq_t p = rhs.x - lhs.x;
-  const fq_t r = rhs.y - lhs.y;
+  fq_t p = rhs.x - lhs.x;
+  fq_t r = rhs.y - lhs.y;
   if (p.is_zero()) {
     if (r.is_zero()) {
       self_double(lhs);
@@ -283,15 +288,20 @@ BB_GPU_HD inline void xyzz_mixed_add_zz1_equals_one(xyzz_g1_t &lhs,
     return;
   }
 
-  const fq_t pp = p.sqr();
-  const fq_t ppp = p * pp;
-  const fq_t q = lhs.x * pp;
-  const fq_t two_q = q + q;
-  const fq_t x3 = r.sqr() - ppp - two_q;
-  lhs.y = (r * (q - x3)) - (lhs.y * ppp);
-  lhs.x = x3;
+  fq_t pp = p.sqr();
+  fq_t ppp = p * pp;
   lhs.zz = pp;
   lhs.zzz = ppp;
+  fq_t q = lhs.x * pp;
+  fq_t x3 = r.sqr();
+  x3 = x3 - ppp;
+  pp = q + q;
+  x3 = x3 - pp;
+  q = q - x3;
+  q = r * q;
+  ppp = lhs.y * ppp;
+  lhs.y = q - ppp;
+  lhs.x = x3;
 }
 
 BB_GPU_HD inline jacobian_g1_t chained_mixed_add(const affine_g1_t *points,
@@ -392,15 +402,17 @@ BB_GPU_HD inline jacobian_g1_t chained_mixed_add_indexed_nonzero(
   return accumulator;
 }
 
-BB_GPU_HD inline xyzz_g1_t chained_xyzz_mixed_add_indexed_nonzero(
-    const affine_g1_t *points, const uint32_t *point_indices, const int start,
-    const int count, const int first_offset = 0, const int step = 1) {
+BB_GPU_HD inline void chained_xyzz_mixed_add_indexed_nonzero(
+    xyzz_g1_t &accumulator, const affine_g1_t *points,
+    const uint32_t *point_indices, const int start, const int count,
+    const int first_offset = 0, const int step = 1) {
   if (first_offset >= count) {
-    return xyzz_infinity();
+    accumulator = xyzz_infinity();
+    return;
   }
 
   int offset = first_offset;
-  xyzz_g1_t accumulator = to_xyzz(points[point_indices[start + offset]]);
+  accumulator = to_xyzz(points[point_indices[start + offset]]);
   offset += step;
   if (offset < count) {
     xyzz_mixed_add_zz1_equals_one(accumulator,
@@ -410,6 +422,14 @@ BB_GPU_HD inline xyzz_g1_t chained_xyzz_mixed_add_indexed_nonzero(
   for (; offset < count; offset += step) {
     xyzz_mixed_add(accumulator, points[point_indices[start + offset]]);
   }
+}
+
+BB_GPU_HD inline xyzz_g1_t chained_xyzz_mixed_add_indexed_nonzero(
+    const affine_g1_t *points, const uint32_t *point_indices, const int start,
+    const int count, const int first_offset = 0, const int step = 1) {
+  xyzz_g1_t accumulator;
+  chained_xyzz_mixed_add_indexed_nonzero(accumulator, points, point_indices,
+                                         start, count, first_offset, step);
   return accumulator;
 }
 
