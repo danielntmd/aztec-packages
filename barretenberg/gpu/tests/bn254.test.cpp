@@ -70,6 +70,16 @@ fq_t to_gpu(const fq &value) {
   return fq_t::raw(value.data[0], value.data[1], value.data[2], value.data[3]);
 }
 
+experimental::fq32_t to_gpu_fq32_standard(const fq &value) {
+  const fq standard = value.from_montgomery_form_reduced();
+  experimental::fq32_t out{};
+  for (size_t i = 0; i < 4; ++i) {
+    out.limbs[2 * i] = static_cast<uint32_t>(standard.data[i]);
+    out.limbs[2 * i + 1] = static_cast<uint32_t>(standard.data[i] >> 32);
+  }
+  return out;
+}
+
 fr_t to_gpu(const fr &value) {
   return fr_t::raw(value.data[0], value.data[1], value.data[2], value.data[3]);
 }
@@ -111,6 +121,33 @@ void expect_same_raw(const fr_t &actual, const fr &expected) {
 
 void expect_same_field(const fq_t &actual, const fq &expected) {
   EXPECT_EQ(to_cpu(actual), expected);
+}
+
+void expect_same_standard_field(const experimental::fq32_t &actual,
+                                const fq &expected) {
+  const fq standard = expected.from_montgomery_form_reduced();
+  for (size_t i = 0; i < 4; ++i) {
+    EXPECT_EQ(actual.limbs[2 * i], static_cast<uint32_t>(standard.data[i]));
+    EXPECT_EQ(actual.limbs[2 * i + 1],
+              static_cast<uint32_t>(standard.data[i] >> 32));
+  }
+}
+
+void expect_fq32_zero(const experimental::fq32_t &actual) {
+  for (uint32_t limb : actual.limbs) {
+    EXPECT_EQ(limb, 0U);
+  }
+}
+
+fq fq32_chain_reference(fq lhs, fq rhs) {
+  fq accumulator = lhs;
+  fq step = rhs;
+  for (uint64_t i = 0; i < 8; ++i) {
+    accumulator *= step;
+    step += fq(i + 1);
+    accumulator += step;
+  }
+  return accumulator;
 }
 
 void expect_same_point(const affine_g1_t &actual,
@@ -224,6 +261,78 @@ TEST(GpuBn254, FqOpsMatchCpu) {
       expect_same_field(output.inv, lhs_values[i].invert());
     }
   }
+}
+
+TEST(GpuBn254, ExperimentalFq32OpsMatchCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  const std::array<fq, 8> lhs_values = {
+      fq::zero(),
+      fq::one(),
+      fq(2),
+      -fq::one(),
+      fq::random_element(&engine),
+      fq::random_element(&engine),
+      fq::random_element(&engine),
+      fq::random_element(&engine),
+  };
+  const std::array<fq, 8> rhs_values = {
+      fq::one(),
+      fq(3),
+      -fq::one(),
+      fq(5),
+      fq::random_element(&engine),
+      fq::random_element(&engine),
+      fq::random_element(&engine),
+      fq::random_element(&engine),
+  };
+
+  for (size_t i = 0; i < lhs_values.size(); ++i) {
+    gpu_testing::fq32_ops_output output{};
+    gpu_testing::run_fq32_ops(to_gpu_fq32_standard(lhs_values[i]),
+                              to_gpu_fq32_standard(rhs_values[i]), output);
+
+    expect_same_standard_field(output.add, lhs_values[i] + rhs_values[i]);
+    expect_same_standard_field(output.sub, lhs_values[i] - rhs_values[i]);
+    expect_same_standard_field(output.neg, -lhs_values[i]);
+    expect_same_standard_field(output.dbl, lhs_values[i] + lhs_values[i]);
+    expect_same_standard_field(output.mul, lhs_values[i] * rhs_values[i]);
+    expect_same_standard_field(output.sqr, lhs_values[i].sqr());
+    expect_same_standard_field(output.straightline_mul,
+                               lhs_values[i] * rhs_values[i]);
+    expect_same_standard_field(output.straightline_sqr, lhs_values[i].sqr());
+    expect_same_standard_field(output.karatsuba_mul,
+                               lhs_values[i] * rhs_values[i]);
+    expect_same_standard_field(output.normalized_lhs, lhs_values[i]);
+    expect_same_standard_field(
+        output.chain, fq32_chain_reference(lhs_values[i], rhs_values[i]));
+    expect_same_standard_field(
+        output.straightline_chain,
+        fq32_chain_reference(lhs_values[i], rhs_values[i]));
+    expect_same_standard_field(
+        output.karatsuba_chain,
+        fq32_chain_reference(lhs_values[i], rhs_values[i]));
+  }
+}
+
+TEST(GpuBn254, ExperimentalFq32NormalizesModulus) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  experimental::fq32_t modulus{};
+  for (size_t i = 0; i < 8; ++i) {
+    modulus.limbs[i] = experimental::modulus_limb(static_cast<int>(i));
+  }
+  const experimental::fq32_t one = experimental::fq32_t::from_u32(1);
+
+  gpu_testing::fq32_ops_output output{};
+  gpu_testing::run_fq32_ops(modulus, one, output);
+
+  expect_fq32_zero(output.normalized_lhs);
+  expect_same_standard_field(output.add, fq::one());
+  expect_same_standard_field(output.sub, -fq::one());
+  expect_fq32_zero(output.mul);
+  expect_fq32_zero(output.karatsuba_mul);
 }
 
 TEST(GpuBn254, FrMontgomeryAndScalarSliceMatchCpu) {

@@ -19,6 +19,7 @@ set(BB_GPU_HEADERS
     include/barretenberg/gpu/fields/field.cuh
     include/barretenberg/gpu/curves/bn254/params.cuh
     include/barretenberg/gpu/curves/bn254/fq.cuh
+    include/barretenberg/gpu/curves/bn254/fq32.cuh
     include/barretenberg/gpu/curves/bn254/fr.cuh
     include/barretenberg/gpu/curves/bn254/g1.cuh
     include/barretenberg/gpu/curves/bn254/bn254.cuh
@@ -139,6 +140,26 @@ if(NOT FUZZING)
             ${BB_GPU_STDCXX_LIBRARY})
     if(TARGET msgpack-c)
         add_dependencies(gpu_msm_bench msgpack-c)
+    endif()
+
+    add_executable(gpu_field_arithmetic_bench
+        benchmark/field_arithmetic.bench.cpp
+        benchmark/field_arithmetic_kernels.cu)
+    target_include_directories(gpu_field_arithmetic_bench
+        PRIVATE
+            "${BB_GPU_INCLUDE_DIR}"
+            "${BB_GPU_CPP_SOURCE_DIR}")
+    target_link_libraries(gpu_field_arithmetic_bench
+        PRIVATE
+            benchmark::benchmark
+            CUDA::cudart
+            ${BB_GPU_STDCXX_LIBRARY})
+    if(ICICLE_V28_ROOT)
+        target_compile_definitions(gpu_field_arithmetic_bench PRIVATE BB_GPU_HAVE_ICICLE_V28)
+        target_include_directories(gpu_field_arithmetic_bench
+            PRIVATE
+                "${ICICLE_V28_ROOT}/include"
+                "${ICICLE_V28_ROOT}/icicle/include")
     endif()
 
     set(BB_GPU_BENCHMARK_COMMON_SOURCES

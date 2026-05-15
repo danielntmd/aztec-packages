@@ -3,6 +3,7 @@
 #ifdef BB_GPU_NATIVE
 
 #include "barretenberg/gpu/curves/bn254/bn254.cuh"
+#include "barretenberg/gpu/curves/bn254/fq32.cuh"
 
 namespace bb::gpu::bn254::testing {
 
@@ -17,6 +18,22 @@ struct fq_ops_output {
   fq_t from_montgomery;
   bool eq;
   bool is_zero;
+};
+
+struct fq32_ops_output {
+  experimental::fq32_t add;
+  experimental::fq32_t sub;
+  experimental::fq32_t neg;
+  experimental::fq32_t dbl;
+  experimental::fq32_t mul;
+  experimental::fq32_t sqr;
+  experimental::fq32_t normalized_lhs;
+  experimental::fq32_t chain;
+  experimental::fq32_t straightline_mul;
+  experimental::fq32_t straightline_sqr;
+  experimental::fq32_t straightline_chain;
+  experimental::fq32_t karatsuba_mul;
+  experimental::fq32_t karatsuba_chain;
 };
 
 struct fr_ops_output {
@@ -37,6 +54,8 @@ struct g1_ops_output {
 };
 
 void run_fq_ops(const fq_t &lhs, const fq_t &rhs, fq_ops_output &output);
+void run_fq32_ops(const experimental::fq32_t &lhs,
+                  const experimental::fq32_t &rhs, fq32_ops_output &output);
 void run_fr_ops(const fr_t &scalar, size_t round, size_t slice_size,
                 fr_ops_output &output);
 void run_g1_ops(const affine_g1_t &lhs, const affine_g1_t &rhs,

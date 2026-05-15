@@ -22,6 +22,40 @@ __global__ void fq_ops_kernel(fq_t lhs, fq_t rhs, fq_ops_output *output) {
   output->is_zero = lhs.is_zero();
 }
 
+__global__ void fq32_ops_kernel(experimental::fq32_t lhs,
+                                experimental::fq32_t rhs,
+                                fq32_ops_output *output) {
+  output->add = experimental::add(lhs, rhs);
+  output->sub = experimental::sub(lhs, rhs);
+  output->neg = experimental::neg(lhs);
+  output->dbl = experimental::add(lhs, lhs);
+  output->mul = experimental::mul(lhs, rhs);
+  output->sqr = experimental::sqr(lhs);
+  output->straightline_mul = experimental::mul_straightline(lhs, rhs);
+  output->straightline_sqr = experimental::sqr_straightline(lhs);
+  output->karatsuba_mul = experimental::mul_karatsuba(lhs, rhs);
+  output->normalized_lhs = experimental::normalize(lhs);
+  experimental::fq32_t accumulator = lhs;
+  experimental::fq32_t straightline_accumulator = lhs;
+  experimental::fq32_t karatsuba_accumulator = lhs;
+  experimental::fq32_t step = rhs;
+  for (uint32_t i = 0; i < 8; ++i) {
+    accumulator = experimental::mul(accumulator, step);
+    straightline_accumulator =
+        experimental::mul_straightline(straightline_accumulator, step);
+    karatsuba_accumulator =
+        experimental::mul_karatsuba(karatsuba_accumulator, step);
+    step = experimental::add(step, experimental::fq32_t::from_u32(i + 1));
+    accumulator = experimental::add(accumulator, step);
+    straightline_accumulator =
+        experimental::add(straightline_accumulator, step);
+    karatsuba_accumulator = experimental::add(karatsuba_accumulator, step);
+  }
+  output->chain = accumulator;
+  output->straightline_chain = straightline_accumulator;
+  output->karatsuba_chain = karatsuba_accumulator;
+}
+
 __global__ void fr_ops_kernel(fr_t scalar, size_t round, size_t slice_size,
                               fr_ops_output *output) {
   output->from_montgomery = scalar.from_montgomery_form_reduced();
@@ -78,6 +112,13 @@ void run_one(Output &output, Launch &&launch) {
 void run_fq_ops(const fq_t &lhs, const fq_t &rhs, fq_ops_output &output) {
   run_one(output, [&](fq_ops_output *device_output) {
     fq_ops_kernel<<<1, 1>>>(lhs, rhs, device_output);
+  });
+}
+
+void run_fq32_ops(const experimental::fq32_t &lhs,
+                  const experimental::fq32_t &rhs, fq32_ops_output &output) {
+  run_one(output, [&](fq32_ops_output *device_output) {
+    fq32_ops_kernel<<<1, 1>>>(lhs, rhs, device_output);
   });
 }
 
