@@ -12,6 +12,12 @@ namespace {
 constexpr int DEFAULT_LOG_ELEMENTS = 20;
 constexpr int DEFAULT_INNER_ITERS = 64;
 
+void mixed_add_chain_count_sweep(benchmark::internal::Benchmark *benchmark) {
+  for (int log_elements = 4; log_elements <= 24; log_elements += 2) {
+    benchmark->Arg(log_elements);
+  }
+}
+
 enum class bench_case : int {
   BB_ADD = 0,
   BB_MUL = 1,
@@ -80,6 +86,8 @@ void bench_field_case(benchmark::State &state, const bench_case field_case,
   const double elements = static_cast<double>(size_t{1} << log_elements);
   const double operations =
       elements * static_cast<double>(inner_iters) * ops_per_inner_iter;
+  state.counters["parallel_chains"] = benchmark::Counter(elements);
+  state.counters["adds_per_chain"] = benchmark::Counter(inner_iters);
   state.counters["inner_iters"] = benchmark::Counter(inner_iters);
   state.counters["ops"] = benchmark::Counter(
       operations, benchmark::Counter::kIsIterationInvariantRate);
@@ -261,15 +269,15 @@ BENCHMARK(bench_bb_field_sqr)
     ->UseManualTime();
 BENCHMARK(bench_bb_xyzz_mixed_add)
     ->Name("BN254/Field/BB/XYZZMixedAdd")
-    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->Apply(mixed_add_chain_count_sweep)
     ->UseManualTime();
 BENCHMARK(bench_bb_xyzz_mixed_add_unchecked)
     ->Name("BN254/Field/BB/XYZZMixedAddUnchecked")
-    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->Apply(mixed_add_chain_count_sweep)
     ->UseManualTime();
 BENCHMARK(bench_bb_jacobian_mixed_add_unchecked)
     ->Name("BN254/Field/BB/JacobianMixedAddUnchecked")
-    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->Apply(mixed_add_chain_count_sweep)
     ->UseManualTime();
 BENCHMARK(bench_icicle_field_add)
     ->Name("BN254/Field/IcicleV28/Add")
@@ -285,15 +293,15 @@ BENCHMARK(bench_icicle_field_sqr)
     ->UseManualTime();
 BENCHMARK(bench_icicle_projective_mixed_add)
     ->Name("BN254/Field/IcicleV28/ProjectiveMixedAdd")
-    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->Apply(mixed_add_chain_count_sweep)
     ->UseManualTime();
 BENCHMARK(bench_icicle_xyzz_mixed_add_unchecked)
     ->Name("BN254/Field/IcicleV28/XYZZMixedAddUnchecked")
-    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->Apply(mixed_add_chain_count_sweep)
     ->UseManualTime();
 BENCHMARK(bench_icicle_xyzz_mixed_add_checked)
     ->Name("BN254/Field/IcicleV28/XYZZMixedAddChecked")
-    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->Apply(mixed_add_chain_count_sweep)
     ->UseManualTime();
 
 BENCHMARK_MAIN();

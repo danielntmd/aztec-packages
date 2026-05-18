@@ -21,6 +21,10 @@ extern "C" cudaError_t bb_gpu_icicle_v28_msm_projective_with_options(
 extern "C" void
 bb_gpu_icicle_v28_projective_to_affine(const void *projective_result,
                                        void *affine_result);
+extern "C" void bb_gpu_icicle_v28_scalar_to_montgomery(const void *regular,
+                                                       void *montgomery);
+extern "C" void bb_gpu_icicle_v28_affine_to_montgomery(const void *regular,
+                                                       void *montgomery);
 
 namespace {
 
@@ -91,6 +95,14 @@ uint32_t bits_per_slice_for_size(const size_t num_points) {
                  msm_bench::auto_bits_per_slice(num_points));
 }
 
+bool icicle_scalars_montgomery_form() {
+  return env_bool("ICICLE_MSM_SCALARS_MONTGOMERY", false);
+}
+
+bool icicle_points_montgomery_form() {
+  return env_bool("ICICLE_MSM_POINTS_MONTGOMERY", false);
+}
+
 RawField to_raw_field(const msm_bench::Curve::BaseField &field) {
   const bb::numeric::uint256_t value(field);
   return {value.data[0], value.data[1], value.data[2], value.data[3]};
@@ -130,16 +142,47 @@ RawInput make_raw_input(const msm_bench::BenchInput &input) {
   return raw;
 }
 
+void convert_scalars_to_icicle_montgomery(RawInput &raw) {
+  for (auto &scalar : raw.scalars) {
+    RawField converted{};
+    bb_gpu_icicle_v28_scalar_to_montgomery(&scalar, &converted);
+    scalar = converted;
+  }
+}
+
+void convert_points_to_icicle_montgomery(RawInput &raw) {
+  for (auto &point : raw.points) {
+    RawAffine converted{};
+    bb_gpu_icicle_v28_affine_to_montgomery(&point, &converted);
+    point = converted;
+  }
+}
+
+RawInput make_raw_input(const msm_bench::BenchInput &input,
+                        const bool scalars_montgomery_form,
+                        const bool points_montgomery_form) {
+  RawInput raw = make_raw_input(input);
+  if (scalars_montgomery_form) {
+    convert_scalars_to_icicle_montgomery(raw);
+  }
+  if (points_montgomery_form) {
+    convert_points_to_icicle_montgomery(raw);
+  }
+  return raw;
+}
+
 std::array<std::byte, 96>
-icicle_v28_backend_msm(const RawInput &raw, const uint32_t bits_per_slice) {
+icicle_v28_backend_msm(const RawInput &raw, const uint32_t bits_per_slice,
+                       const bool scalars_montgomery_form,
+                       const bool points_montgomery_form) {
   static_assert(sizeof(RawField) == 32);
   static_assert(sizeof(RawAffine) == 64);
   std::array<std::byte, 96> result{};
   const cudaError_t error = bb_gpu_icicle_v28_msm_projective_with_options(
       raw.scalars.data(), raw.points.data(),
       static_cast<int>(raw.scalars.size()), static_cast<int>(raw.points.size()),
-      static_cast<int>(bits_per_slice), false, false, false, false, false,
-      env_bool("ICICLE_MSM_BIG_TRIANGLE", false),
+      static_cast<int>(bits_per_slice), false, scalars_montgomery_form, false,
+      points_montgomery_form, false, env_bool("ICICLE_MSM_BIG_TRIANGLE", false),
       env_int("ICICLE_MSM_LARGE_BUCKET_FACTOR", 10), result.data());
   if (error != cudaSuccess) {
     fail_cuda(error, "MSM");
@@ -157,8 +200,12 @@ finalize_icicle_v28_result(const std::array<std::byte, 96> &projective_result) {
 
 msm_bench::Commitment icicle_v28_msm(const msm_bench::BenchInput &input,
                                      const uint32_t bits_per_slice) {
-  const RawInput raw = make_raw_input(input);
-  const auto projective_result = icicle_v28_backend_msm(raw, bits_per_slice);
+  const bool scalars_montgomery_form = icicle_scalars_montgomery_form();
+  const bool points_montgomery_form = icicle_points_montgomery_form();
+  const RawInput raw =
+      make_raw_input(input, scalars_montgomery_form, points_montgomery_form);
+  const auto projective_result = icicle_v28_backend_msm(
+      raw, bits_per_slice, scalars_montgomery_form, points_montgomery_form);
   return finalize_icicle_v28_result(projective_result);
 }
 
@@ -251,10 +298,13 @@ DeviceRawInput make_device_raw_input(const RawInput &raw, double &h2d_ms) {
 
 void icicle_v28_device_backend_msm(const DeviceRawInput &raw,
                                    const uint32_t bits_per_slice) {
+  const bool scalars_montgomery_form = icicle_scalars_montgomery_form();
+  const bool points_montgomery_form = icicle_points_montgomery_form();
   const cudaError_t error = bb_gpu_icicle_v28_msm_projective_with_options(
       raw.scalars, raw.points, static_cast<int>(raw.count),
       static_cast<int>(raw.count), static_cast<int>(bits_per_slice), true,
-      false, true, false, true, env_bool("ICICLE_MSM_BIG_TRIANGLE", false),
+      scalars_montgomery_form, true, points_montgomery_form, true,
+      env_bool("ICICLE_MSM_BIG_TRIANGLE", false),
       env_int("ICICLE_MSM_LARGE_BUCKET_FACTOR", 10), raw.projective_result);
   if (error != cudaSuccess) {
     fail_cuda(error, "device-resident MSM");
@@ -292,6 +342,8 @@ void bench_icicle_v28_e2e(benchmark::State &state) {
   const size_t num_points = size_t{1} << log_num_points;
   auto input = msm_bench::make_input(num_points);
   const uint32_t bits_per_slice = bits_per_slice_for_size(num_points);
+  const bool scalars_montgomery_form = icicle_scalars_montgomery_form();
+  const bool points_montgomery_form = icicle_points_montgomery_form();
 
   auto warmup = icicle_v28_msm(*input, bits_per_slice);
   benchmark::DoNotOptimize(warmup);
@@ -306,11 +358,14 @@ void bench_icicle_v28_e2e(benchmark::State &state) {
     msm_bench::Commitment result;
     totals.preprocess_ms += elapsed_ms([&]() {
       bb::gpu::ScopedNvtxRange range("icicle.v28.e2e.preprocess");
-      raw = make_raw_input(*input);
+      raw = make_raw_input(*input, scalars_montgomery_form,
+                           points_montgomery_form);
     });
     totals.backend_ms += elapsed_ms([&]() {
       bb::gpu::ScopedNvtxRange range("icicle.v28.e2e.backend");
-      backend_result = icicle_v28_backend_msm(raw, bits_per_slice);
+      backend_result = icicle_v28_backend_msm(
+          raw, bits_per_slice, scalars_montgomery_form,
+          points_montgomery_form);
     });
     totals.postprocess_ms += elapsed_ms([&]() {
       bb::gpu::ScopedNvtxRange range("icicle.v28.e2e.postprocess");
@@ -338,11 +393,16 @@ void bench_icicle_v28_prepared_host(benchmark::State &state) {
   const size_t num_points = size_t{1} << log_num_points;
   auto input = msm_bench::make_input(num_points);
   const uint32_t bits_per_slice = bits_per_slice_for_size(num_points);
-  const RawInput raw = make_raw_input(*input);
+  const bool scalars_montgomery_form = icicle_scalars_montgomery_form();
+  const bool points_montgomery_form = icicle_points_montgomery_form();
+  const RawInput raw =
+      make_raw_input(*input, scalars_montgomery_form, points_montgomery_form);
   const bool skip_correctness = msm_bench::skip_correctness_checks();
 
   auto warmup =
-      finalize_icicle_v28_result(icicle_v28_backend_msm(raw, bits_per_slice));
+      finalize_icicle_v28_result(icicle_v28_backend_msm(
+          raw, bits_per_slice, scalars_montgomery_form,
+          points_montgomery_form));
   benchmark::DoNotOptimize(warmup);
 
   PhaseTotals totals{};
@@ -353,7 +413,9 @@ void bench_icicle_v28_prepared_host(benchmark::State &state) {
     msm_bench::Commitment result;
     totals.backend_ms += elapsed_ms([&]() {
       bb::gpu::ScopedNvtxRange range("icicle.v28.prepared_host.backend");
-      backend_result = icicle_v28_backend_msm(raw, bits_per_slice);
+      backend_result = icicle_v28_backend_msm(
+          raw, bits_per_slice, scalars_montgomery_form,
+          points_montgomery_form);
     });
     totals.postprocess_ms += elapsed_ms([&]() {
       bb::gpu::ScopedNvtxRange range("icicle.v28.prepared_host.postprocess");
@@ -368,7 +430,9 @@ void bench_icicle_v28_prepared_host(benchmark::State &state) {
   }
   const auto expected = msm_bench::cpu_msm(*input);
   const auto actual =
-      finalize_icicle_v28_result(icicle_v28_backend_msm(raw, bits_per_slice));
+      finalize_icicle_v28_result(icicle_v28_backend_msm(
+          raw, bits_per_slice, scalars_montgomery_form,
+          points_montgomery_form));
   msm_bench::assert_equal("Icicle v2.8 prepared host", log_num_points, expected,
                           actual);
 }
@@ -383,7 +447,10 @@ void bench_icicle_v28_device_resident(benchmark::State &state) {
   const size_t num_points = size_t{1} << log_num_points;
   auto input = msm_bench::make_input(num_points);
   const uint32_t bits_per_slice = bits_per_slice_for_size(num_points);
-  const RawInput raw = make_raw_input(*input);
+  const bool scalars_montgomery_form = icicle_scalars_montgomery_form();
+  const bool points_montgomery_form = icicle_points_montgomery_form();
+  const RawInput raw =
+      make_raw_input(*input, scalars_montgomery_form, points_montgomery_form);
   const bool skip_correctness = msm_bench::skip_correctness_checks();
 
   PhaseTotals totals{};

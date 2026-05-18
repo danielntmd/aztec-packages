@@ -758,8 +758,6 @@ __global__ void bb_xyzz_mixed_add_kernel(bb_xyzz_t *out, const size_t count,
   };
   for (int i = 0; i < inner_iters; ++i) {
     bb::gpu::bn254::xyzz_mixed_add(accumulator, point);
-    point.x = point.x + make_bb_fq(static_cast<uint32_t>(i) + 1);
-    point.y = point.y + make_bb_fq(static_cast<uint32_t>(i) + 7);
   }
   out[idx] = accumulator;
 }
@@ -836,8 +834,6 @@ __global__ void bb_xyzz_mixed_add_unchecked_kernel(bb_xyzz_t *out,
   };
   for (int i = 0; i < inner_iters; ++i) {
     bb_xyzz_mixed_add_unchecked(accumulator, point);
-    point.x = point.x + make_bb_fq(static_cast<uint32_t>(i) + 1);
-    point.y = point.y + make_bb_fq(static_cast<uint32_t>(i) + 7);
   }
   out[idx] = accumulator;
 }
@@ -862,8 +858,6 @@ __global__ void bb_jacobian_mixed_add_unchecked_kernel(bb_jacobian_t *out,
   };
   for (int i = 0; i < inner_iters; ++i) {
     bb_jacobian_mixed_add_unchecked(accumulator, point);
-    point.x = point.x + make_bb_fq(static_cast<uint32_t>(i) + 1);
-    point.y = point.y + make_bb_fq(static_cast<uint32_t>(i) + 7);
   }
   out[idx] = accumulator;
 }
@@ -951,8 +945,6 @@ __global__ void icicle_projective_mixed_add_kernel(icicle_projective_t *out,
   };
   for (int i = 0; i < inner_iters; ++i) {
     accumulator = accumulator + point;
-    point.x = point.x + make_icicle_fq(static_cast<uint32_t>(i) + 1);
-    point.y = point.y + make_icicle_fq(static_cast<uint32_t>(i) + 7);
   }
   out[idx] = accumulator;
 }
@@ -1073,8 +1065,6 @@ __global__ void icicle_xyzz_mixed_add_unchecked_kernel(icicle_xyzz_t *out,
   };
   for (int i = 0; i < inner_iters; ++i) {
     icicle_xyzz_mixed_add_unchecked(accumulator, point);
-    point.x = point.x + make_icicle_fq(static_cast<uint32_t>(i) + 1);
-    point.y = point.y + make_icicle_fq(static_cast<uint32_t>(i) + 7);
   }
   out[idx] = accumulator;
 }
@@ -1100,8 +1090,6 @@ __global__ void icicle_xyzz_mixed_add_checked_kernel(icicle_xyzz_t *out,
   };
   for (int i = 0; i < inner_iters; ++i) {
     icicle_xyzz_mixed_add_checked(accumulator, point);
-    point.x = point.x + make_icicle_fq(static_cast<uint32_t>(i) + 1);
-    point.y = point.y + make_icicle_fq(static_cast<uint32_t>(i) + 7);
   }
   out[idx] = accumulator;
 }

@@ -161,8 +161,8 @@ def run_benchmark(
             row[BACKENDS[backend]] = to_ms(float(entry["real_time"]), entry.get("time_unit", "ns"))
         else:
             row[f"{BACKENDS[backend]}_{mode}_ms"] = to_ms(float(entry["real_time"]), entry.get("time_unit", "ns"))
-        if "c" in entry and backend != "CPU":
-            row[f"{BACKENDS[backend]}_c"] = int(round(float(entry["c"])))
+        if "c" in entry and backend != "CPU" and "c" not in row:
+            row["c"] = int(round(float(entry["c"])))
         if backend in PHASE_PREFIXES:
             prefix = PHASE_PREFIXES[backend]
             for phase in ("preprocess_ms", "backend_ms", "postprocess_ms", "setup_h2d_ms"):
@@ -206,9 +206,7 @@ def print_table(rows: dict[int, dict[str, float]], enabled: list[str]) -> None:
     print()
     headers = [
         "n",
-        "bb_c",
-        "v28_c",
-        "v4_c",
+        "c",
         "cpu_ms",
         "bb_jac_e2e",
         "bb_jac_backend",
@@ -240,9 +238,7 @@ def print_table(rows: dict[int, dict[str, float]], enabled: list[str]) -> None:
         v4_device = row.get("v4_device_ms")
         values = [
             f"2^{log_size}",
-            str(int(row["bb_jac_c"])) if "bb_jac_c" in row else "-",
-            str(int(row["v28_c"])) if "v28_c" in row else "-",
-            str(int(row["v4_c"])) if "v4_c" in row else "-",
+            str(int(row["c"])) if "c" in row else "-",
             fmt_ms(cpu),
             fmt_ms(bb_jac),
             fmt_ms(bb_jac_backend),
