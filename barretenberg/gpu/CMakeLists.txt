@@ -142,6 +142,19 @@ if(NOT FUZZING)
         add_dependencies(gpu_msm_bench msgpack-c)
     endif()
 
+    add_executable(gpu_msm_accumulation_bench
+        benchmark/msm_accumulation.bench.cpp
+        benchmark/msm_accumulation_kernels.cu)
+    target_include_directories(gpu_msm_accumulation_bench
+        PRIVATE
+            "${BB_GPU_INCLUDE_DIR}"
+            "${BB_GPU_CPP_SOURCE_DIR}")
+    target_link_libraries(gpu_msm_accumulation_bench
+        PRIVATE
+            benchmark::benchmark
+            CUDA::cudart
+            ${BB_GPU_STDCXX_LIBRARY})
+
     add_executable(gpu_field_arithmetic_bench
         benchmark/field_arithmetic.bench.cpp
         benchmark/field_arithmetic_kernels.cu)
