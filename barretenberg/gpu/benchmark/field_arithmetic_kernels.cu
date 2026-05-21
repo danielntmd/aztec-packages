@@ -49,6 +49,8 @@ enum class bench_case : int {
   FQ32_WIDE_PRODUCT = 23,
   FQ32_STRAIGHTLINE_WIDE_PRODUCT = 24,
   FQ32_KARATSUBA_WIDE_PRODUCT = 25,
+  BB_SQR_NO_PREREDUCE = 26,
+  BB_SQR_DEDICATED_NO_PREREDUCE = 27,
 };
 
 void check_cuda(const cudaError_t error) {
@@ -738,6 +740,38 @@ __global__ void bb_field_sqr_kernel(bb_fq_t *out, const size_t count,
   out[idx] = a;
 }
 
+__global__ void bb_field_sqr_no_prereduce_kernel(bb_fq_t *out,
+                                                 const size_t count,
+                                                 const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  bb_fq_t a = make_bb_fq(static_cast<uint32_t>(idx) + 17);
+  for (int i = 0; i < inner_iters; ++i) {
+    a = bb_add_no_prereduce(a.sqr_assume_canonical(),
+                            make_bb_fq(static_cast<uint32_t>(i) + 3));
+  }
+  out[idx] = a;
+}
+
+__global__ void
+bb_field_sqr_dedicated_no_prereduce_kernel(bb_fq_t *out, const size_t count,
+                                           const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  bb_fq_t a = make_bb_fq(static_cast<uint32_t>(idx) + 17);
+  for (int i = 0; i < inner_iters; ++i) {
+    a = bb_add_no_prereduce(a.sqr_dedicated_assume_canonical(),
+                            make_bb_fq(static_cast<uint32_t>(i) + 3));
+  }
+  out[idx] = a;
+}
+
 __global__ void bb_xyzz_mixed_add_kernel(bb_xyzz_t *out, const size_t count,
                                          const int inner_iters) {
   const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -1136,6 +1170,12 @@ extern "C" float bb_gpu_field_bench_run(const int case_id,
     return run_kernel<bb_fq_t>(count, inner_iters, bb_field_mul_kernel);
   case bench_case::BB_SQR:
     return run_kernel<bb_fq_t>(count, inner_iters, bb_field_sqr_kernel);
+  case bench_case::BB_SQR_NO_PREREDUCE:
+    return run_kernel<bb_fq_t>(count, inner_iters,
+                               bb_field_sqr_no_prereduce_kernel);
+  case bench_case::BB_SQR_DEDICATED_NO_PREREDUCE:
+    return run_kernel<bb_fq_t>(count, inner_iters,
+                               bb_field_sqr_dedicated_no_prereduce_kernel);
   case bench_case::BB_XYZZ_MIXED_ADD:
     return run_kernel<bb_xyzz_t>(count, inner_iters, bb_xyzz_mixed_add_kernel);
   case bench_case::BB_ADD_NO_PREREDUCE:
@@ -1172,8 +1212,8 @@ extern "C" float bb_gpu_field_bench_run(const int case_id,
     return run_kernel<exp_fq32_wide_t>(count, inner_iters,
                                        fq32_wide_product_kernel);
   case bench_case::FQ32_STRAIGHTLINE_WIDE_PRODUCT:
-    return run_kernel<exp_fq32_wide_t>(
-        count, inner_iters, fq32_straightline_wide_product_kernel);
+    return run_kernel<exp_fq32_wide_t>(count, inner_iters,
+                                       fq32_straightline_wide_product_kernel);
   case bench_case::FQ32_KARATSUBA_WIDE_PRODUCT:
     return run_kernel<exp_fq32_wide_t>(count, inner_iters,
                                        fq32_karatsuba_wide_product_kernel);

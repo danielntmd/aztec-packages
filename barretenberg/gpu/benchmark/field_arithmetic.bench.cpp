@@ -45,6 +45,8 @@ enum class bench_case : int {
   FQ32_WIDE_PRODUCT = 23,
   FQ32_STRAIGHTLINE_WIDE_PRODUCT = 24,
   FQ32_KARATSUBA_WIDE_PRODUCT = 25,
+  BB_SQR_NO_PREREDUCE = 26,
+  BB_SQR_DEDICATED_NO_PREREDUCE = 27,
 };
 
 int env_int(const char *name, const int fallback) {
@@ -103,6 +105,14 @@ void bench_bb_field_mul(benchmark::State &state) {
 
 void bench_bb_field_sqr(benchmark::State &state) {
   bench_field_case(state, bench_case::BB_SQR, 1);
+}
+
+void bench_bb_field_sqr_no_prereduce(benchmark::State &state) {
+  bench_field_case(state, bench_case::BB_SQR_NO_PREREDUCE, 1);
+}
+
+void bench_bb_field_sqr_dedicated_no_prereduce(benchmark::State &state) {
+  bench_field_case(state, bench_case::BB_SQR_DEDICATED_NO_PREREDUCE, 1);
 }
 
 void bench_bb_xyzz_mixed_add(benchmark::State &state) {
@@ -265,6 +275,14 @@ BENCHMARK(bench_fq32_karatsuba_wide_product)
     ->UseManualTime();
 BENCHMARK(bench_bb_field_sqr)
     ->Name("BN254/Field/BB/Sqr")
+    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->UseManualTime();
+BENCHMARK(bench_bb_field_sqr_no_prereduce)
+    ->Name("BN254/Field/BB/SqrNoPreReduce")
+    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->UseManualTime();
+BENCHMARK(bench_bb_field_sqr_dedicated_no_prereduce)
+    ->Name("BN254/Field/BB/SqrDedicatedNoPreReduce")
     ->Arg(DEFAULT_LOG_ELEMENTS)
     ->UseManualTime();
 BENCHMARK(bench_bb_xyzz_mixed_add)

@@ -153,6 +153,43 @@ void expect_same_field(const fq_t &actual, const fq &expected) {
   EXPECT_EQ(to_cpu(actual), expected);
 }
 
+void add_to_wide(std::array<uint64_t, 9> &limbs, size_t index, uint64_t value) {
+  while (value != 0 && index < limbs.size()) {
+    const uint64_t old = limbs[index];
+    limbs[index] += value;
+    value = limbs[index] < old ? 1 : 0;
+    ++index;
+  }
+}
+
+void add_product_to_wide(std::array<uint64_t, 9> &limbs, const size_t index,
+                         const uint64_t lhs, const uint64_t rhs) {
+  const unsigned __int128 product = static_cast<unsigned __int128>(lhs) * rhs;
+  add_to_wide(limbs, index, static_cast<uint64_t>(product));
+  add_to_wide(limbs, index + 1, static_cast<uint64_t>(product >> 64));
+}
+
+std::array<uint64_t, 9> mul_wide_reference(const fq_t &lhs, const fq_t &rhs) {
+  std::array<uint64_t, 9> out{};
+  for (size_t i = 0; i < 4; ++i) {
+    for (size_t j = 0; j < 4; ++j) {
+      add_product_to_wide(out, i + j, lhs.data[i], rhs.data[j]);
+    }
+  }
+  return out;
+}
+
+std::array<uint64_t, 9> sqr_wide_reference(const fq_t &value) {
+  return mul_wide_reference(value, value);
+}
+
+void expect_same_wide(const uint64_t actual[9],
+                      const std::array<uint64_t, 9> &expected) {
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(actual[i], expected[i]) << "limb=" << i;
+  }
+}
+
 void expect_same_standard_field(const experimental::fq32_t &actual,
                                 const fq &expected) {
   const fq standard = expected.from_montgomery_form_reduced();
@@ -268,25 +305,28 @@ TEST(GpuBn254, FqOpsMatchCpu) {
   BB_REQUIRE_CUDA_DEVICE();
 
   auto &engine = numeric::get_debug_randomness();
-  std::array<fq, 5> lhs_values = {
+  const std::array<fq, 6> lhs_values = {
       fq::zero(),
       fq::one(),
-      fq(2),
+      -fq::one(),
+      -fq(2),
       fq::random_element(&engine),
       fq::random_element(&engine),
   };
-  std::array<fq, 5> rhs_values = {
+  const std::array<fq, 6> rhs_values = {
       fq::one(),
+      -fq::one(),
       fq(3),
-      fq::random_element(&engine),
+      fq(2),
       fq::random_element(&engine),
       fq::random_element(&engine),
   };
 
   for (size_t i = 0; i < lhs_values.size(); ++i) {
     gpu_testing::fq_ops_output output{};
-    gpu_testing::run_fq_ops(to_gpu(lhs_values[i]), to_gpu(rhs_values[i]),
-                            output);
+    const fq_t lhs = to_gpu(lhs_values[i]);
+    const fq_t rhs = to_gpu(rhs_values[i]);
+    gpu_testing::run_fq_ops(lhs, rhs, output);
 
     expect_same_field(output.add, lhs_values[i] + rhs_values[i]);
     expect_same_field(output.sub, lhs_values[i] - rhs_values[i]);
@@ -294,6 +334,14 @@ TEST(GpuBn254, FqOpsMatchCpu) {
     expect_same_field(output.dbl, lhs_values[i] + lhs_values[i]);
     expect_same_field(output.mul, lhs_values[i] * rhs_values[i]);
     expect_same_field(output.sqr, lhs_values[i].sqr());
+    expect_same_field(output.add_canonical, lhs_values[i] + rhs_values[i]);
+    expect_same_field(output.sub_canonical, lhs_values[i] - rhs_values[i]);
+    expect_same_field(output.mul_canonical, lhs_values[i] * rhs_values[i]);
+    expect_same_field(output.sqr_canonical, lhs_values[i].sqr());
+    expect_same_field(output.sqr_dedicated_canonical, lhs_values[i].sqr());
+    expect_same_field(output.sqr_canonical_as_mul, lhs_values[i].sqr());
+    expect_same_wide(output.sqr_wide, sqr_wide_reference(lhs));
+    expect_same_wide(output.mul_wide_self, mul_wide_reference(lhs, lhs));
     expect_same_raw(output.from_montgomery,
                     lhs_values[i].from_montgomery_form_reduced());
     EXPECT_EQ(output.eq, lhs_values[i] == rhs_values[i]);
@@ -301,6 +349,36 @@ TEST(GpuBn254, FqOpsMatchCpu) {
     if (!lhs_values[i].is_zero()) {
       expect_same_field(output.inv, lhs_values[i].invert());
     }
+  }
+}
+
+TEST(GpuBn254, FqCanonicalWideSquareMatchesWideMulForRawLimbs) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  const fq_t modulus = fq_t::modulus();
+  const std::array<fq_t, 6> values = {
+      fq_t::zero(),
+      fq_t::one(),
+      fq_t::raw(modulus.data[0] - 1, modulus.data[1], modulus.data[2],
+                modulus.data[3]),
+      fq_t::raw(0xffffffffffffffffULL, 0xffffffffffffffffULL,
+                0xffffffffffffffffULL, 0x1fffffffffffffffULL),
+      fq_t::raw(0, 0xffffffffffffffffULL, 0xffffffffffffffffULL,
+                0x2fffffffffffffffULL),
+      fq_t::raw(0x0123456789abcdefULL, 0xfedcba9876543210ULL,
+                0x0f0f0f0f0f0f0f0fULL, 0x0011223344556677ULL),
+  };
+
+  for (const fq_t &value : values) {
+    gpu_testing::fq_ops_output output{};
+    gpu_testing::run_fq_ops(value, fq_t::one(), output);
+
+    expect_same_wide(output.sqr_wide, sqr_wide_reference(value));
+    expect_same_wide(output.mul_wide_self, mul_wide_reference(value, value));
+    expect_same_field(output.sqr_dedicated_canonical,
+                      to_cpu(output.sqr_canonical_as_mul));
+    expect_same_field(output.sqr_canonical,
+                      to_cpu(output.sqr_canonical_as_mul));
   }
 }
 

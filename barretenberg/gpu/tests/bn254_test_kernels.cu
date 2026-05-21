@@ -16,6 +16,14 @@ __global__ void fq_ops_kernel(fq_t lhs, fq_t rhs, fq_ops_output *output) {
   output->dbl = lhs.dbl();
   output->mul = lhs * rhs;
   output->sqr = lhs.sqr();
+  output->add_canonical = lhs.add_assume_canonical(rhs);
+  output->sub_canonical = lhs.sub_assume_canonical(rhs);
+  output->mul_canonical = lhs.mul_assume_canonical(rhs);
+  output->sqr_canonical = lhs.sqr_assume_canonical();
+  output->sqr_dedicated_canonical = lhs.sqr_dedicated_assume_canonical();
+  output->sqr_canonical_as_mul = lhs.mul_assume_canonical(lhs);
+  lhs.sqr_wide_assume_canonical(output->sqr_wide);
+  lhs.mul_wide_assume_canonical(lhs, output->mul_wide_self);
   output->inv = lhs.is_zero() ? fq_t::zero() : lhs.inv();
   output->from_montgomery = lhs.from_montgomery_form_reduced();
   output->eq = lhs == rhs;

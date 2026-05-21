@@ -14,6 +14,14 @@ struct fq_ops_output {
   fq_t dbl;
   fq_t mul;
   fq_t sqr;
+  fq_t add_canonical;
+  fq_t sub_canonical;
+  fq_t mul_canonical;
+  fq_t sqr_canonical;
+  fq_t sqr_dedicated_canonical;
+  fq_t sqr_canonical_as_mul;
+  uint64_t sqr_wide[9];
+  uint64_t mul_wide_self[9];
   fq_t inv;
   fq_t from_montgomery;
   bool eq;
