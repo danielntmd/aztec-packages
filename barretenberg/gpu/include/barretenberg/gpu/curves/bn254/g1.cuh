@@ -246,11 +246,8 @@ BB_GPU_HD inline void mixed_add_z1_equals_one(jacobian_g1_t &lhs,
 }
 
 BB_GPU_HD inline void xyzz_mixed_add(xyzz_g1_t &lhs, const affine_g1_t &rhs) {
-  if (is_infinity(rhs)) {
-    return;
-  }
   if (lhs.infinity) {
-    lhs = to_xyzz(rhs);
+    lhs = {rhs.x, rhs.y, fq_t::one(), fq_t::one(), false};
     return;
   }
 
@@ -284,11 +281,8 @@ BB_GPU_HD inline void xyzz_mixed_add(xyzz_g1_t &lhs, const affine_g1_t &rhs) {
 
 BB_GPU_HD inline void xyzz_mixed_add_zz1_equals_one(xyzz_g1_t &lhs,
                                                     const affine_g1_t &rhs) {
-  if (is_infinity(rhs)) {
-    return;
-  }
   if (lhs.infinity) {
-    lhs = to_xyzz(rhs);
+    lhs = {rhs.x, rhs.y, fq_t::one(), fq_t::one(), false};
     return;
   }
 
