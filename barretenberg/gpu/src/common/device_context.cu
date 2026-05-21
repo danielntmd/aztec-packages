@@ -3,6 +3,7 @@
 #include "barretenberg/gpu/common/device_context.hpp"
 
 #include "barretenberg/gpu/common/cuda_error.cuh"
+#include "barretenberg/gpu/curves/bn254/g1.cuh"
 
 #include <cuda_runtime.h>
 
@@ -10,6 +11,26 @@
 #include <cstdint>
 
 namespace bb::gpu {
+
+namespace {
+
+__global__ void shift_srs_layer_kernel(const bn254::affine_g1_t *src,
+                                       bn254::affine_g1_t *dst,
+                                       const uint32_t shift_bits,
+                                       const size_t num_points) {
+  const size_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= num_points) {
+    return;
+  }
+
+  bn254::jacobian_g1_t point = bn254::to_jacobian(src[idx]);
+  for (uint32_t i = 0; i < shift_bits; ++i) {
+    bn254::self_double(point);
+  }
+  dst[idx] = bn254::to_affine(point);
+}
+
+} // namespace
 
 void *device_malloc_bytes(const size_t bytes) {
   if (bytes == 0) {
@@ -99,6 +120,71 @@ void DeviceContext::ensure_srs_uploaded(const bn254::affine_g1_t *srs_points,
   }
   srs_host_base_ = srs_points;
   srs_size_ = num_points;
+  shifted_srs_points_.reset();
+  shifted_srs_host_base_ = nullptr;
+  shifted_srs_point_start_index_ = 0;
+  shifted_srs_original_size_ = 0;
+  shifted_srs_size_ = 0;
+  shifted_srs_shift_bits_ = 0;
+  shifted_srs_precompute_factor_ = 1;
+}
+
+void DeviceContext::ensure_shifted_srs_uploaded(
+    const size_t point_start_index, const size_t num_points,
+    const uint32_t shift_bits, const uint32_t precompute_factor) {
+  if (precompute_factor <= 1) {
+    shifted_srs_points_.reset();
+    shifted_srs_host_base_ = nullptr;
+    shifted_srs_point_start_index_ = 0;
+    shifted_srs_original_size_ = 0;
+    shifted_srs_size_ = 0;
+    shifted_srs_shift_bits_ = 0;
+    shifted_srs_precompute_factor_ = 1;
+    return;
+  }
+
+  check_condition(srs_host_base_ != nullptr,
+                  "bb::gpu: SRS has not been uploaded");
+  check_condition(point_start_index <= srs_size_ &&
+                      num_points <= srs_size_ - point_start_index,
+                  "bb::gpu: shifted SRS span exceeds cached SRS");
+  if (shifted_srs_host_base_ == srs_host_base_ &&
+      shifted_srs_point_start_index_ == point_start_index &&
+      shifted_srs_original_size_ == num_points &&
+      shifted_srs_shift_bits_ == shift_bits &&
+      shifted_srs_precompute_factor_ == precompute_factor) {
+    return;
+  }
+
+  const size_t shifted_size =
+      num_points * static_cast<size_t>(precompute_factor);
+  shifted_srs_points_.resize(shifted_size);
+  shifted_srs_size_ = shifted_size;
+  if (num_points != 0) {
+    check_cuda(cudaMemcpyAsync(shifted_srs_points_.data(),
+                               srs_points_.data() + point_start_index,
+                               sizeof(bn254::affine_g1_t) * num_points,
+                               cudaMemcpyDeviceToDevice,
+                               as_cuda_stream(stream())),
+               "cudaMemcpyAsync shifted SRS layer 0");
+    constexpr uint32_t THREADS = 256;
+    const uint32_t blocks = ceil_div_u32(num_points, THREADS);
+    for (uint32_t layer = 1; layer < precompute_factor; ++layer) {
+      const bn254::affine_g1_t *src =
+          shifted_srs_points_.data() + ((layer - 1) * num_points);
+      bn254::affine_g1_t *dst =
+          shifted_srs_points_.data() + (layer * num_points);
+      shift_srs_layer_kernel<<<blocks, THREADS, 0, as_cuda_stream(stream())>>>(
+          src, dst, shift_bits, num_points);
+      check_cuda(cudaGetLastError(), "shift_srs_layer_kernel launch");
+    }
+  }
+
+  shifted_srs_host_base_ = srs_host_base_;
+  shifted_srs_point_start_index_ = point_start_index;
+  shifted_srs_original_size_ = num_points;
+  shifted_srs_shift_bits_ = shift_bits;
+  shifted_srs_precompute_factor_ = precompute_factor;
 }
 
 size_t DeviceContext::get_srs_offset(const bn254::affine_g1_t *points,
@@ -131,9 +217,16 @@ void DeviceContext::reserve_temp(const size_t bytes) {
 void DeviceContext::reset() {
   sync();
   srs_points_.reset();
+  shifted_srs_points_.reset();
   temp_storage_.reset();
   srs_host_base_ = nullptr;
   srs_size_ = 0;
+  shifted_srs_host_base_ = nullptr;
+  shifted_srs_point_start_index_ = 0;
+  shifted_srs_original_size_ = 0;
+  shifted_srs_size_ = 0;
+  shifted_srs_shift_bits_ = 0;
+  shifted_srs_precompute_factor_ = 1;
 }
 
 DeviceContext &default_context() {

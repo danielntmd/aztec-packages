@@ -19,6 +19,8 @@ enum class bench_case : int {
   JACOBIAN_UNCHECKED_LARGE = 7,
   XYZZ_UNCHECKED_LARGE = 8,
   PROJECTIVE_RCB_LARGE = 9,
+  XYZZ_ASSUME_FINITE_NORMAL = 10,
+  XYZZ_ASSUME_FINITE_LARGE = 11,
 };
 
 void normal_bucket_sweep(benchmark::internal::Benchmark *benchmark) {
@@ -78,6 +80,10 @@ void bench_xyzz_unchecked_normal(benchmark::State &state) {
   bench_accumulation_case(state, bench_case::XYZZ_UNCHECKED_NORMAL);
 }
 
+void bench_xyzz_assume_finite_normal(benchmark::State &state) {
+  bench_accumulation_case(state, bench_case::XYZZ_ASSUME_FINITE_NORMAL);
+}
+
 void bench_projective_rcb_normal(benchmark::State &state) {
   bench_accumulation_case(state, bench_case::PROJECTIVE_RCB_NORMAL);
 }
@@ -96,6 +102,10 @@ void bench_jacobian_unchecked_large(benchmark::State &state) {
 
 void bench_xyzz_unchecked_large(benchmark::State &state) {
   bench_accumulation_case(state, bench_case::XYZZ_UNCHECKED_LARGE);
+}
+
+void bench_xyzz_assume_finite_large(benchmark::State &state) {
+  bench_accumulation_case(state, bench_case::XYZZ_ASSUME_FINITE_LARGE);
 }
 
 void bench_projective_rcb_large(benchmark::State &state) {
@@ -118,6 +128,10 @@ BENCHMARK(bench_xyzz_unchecked_normal)
     ->Name("BN254/MSMAccum/BB/XYZZUnchecked/Normal")
     ->Apply(normal_bucket_sweep)
     ->UseManualTime();
+BENCHMARK(bench_xyzz_assume_finite_normal)
+    ->Name("BN254/MSMAccum/BB/XYZZAssumeFinite/Normal")
+    ->Apply(normal_bucket_sweep)
+    ->UseManualTime();
 BENCHMARK(bench_projective_rcb_normal)
     ->Name("BN254/MSMAccum/BB/ProjectiveRCB/Normal")
     ->Apply(normal_bucket_sweep)
@@ -136,6 +150,10 @@ BENCHMARK(bench_jacobian_unchecked_large)
     ->UseManualTime();
 BENCHMARK(bench_xyzz_unchecked_large)
     ->Name("BN254/MSMAccum/BB/XYZZUnchecked/Large")
+    ->Apply(large_bucket_sweep)
+    ->UseManualTime();
+BENCHMARK(bench_xyzz_assume_finite_large)
+    ->Name("BN254/MSMAccum/BB/XYZZAssumeFinite/Large")
     ->Apply(large_bucket_sweep)
     ->UseManualTime();
 BENCHMARK(bench_projective_rcb_large)

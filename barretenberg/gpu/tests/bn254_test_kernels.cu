@@ -95,6 +95,20 @@ __global__ void g1_chained_xyzz_mixed_add_kernel(const affine_g1_t *points,
   *output = to_affine(chained_xyzz_mixed_add(points, num_points));
 }
 
+__global__ void g1_chained_xyzz_mixed_add_unchecked_kernel(
+    const affine_g1_t *points, size_t num_points, affine_g1_t *output) {
+  xyzz_g1_t accumulator = to_xyzz(points[0]);
+  size_t offset = 1;
+  if (offset < num_points) {
+    xyzz_mixed_add_zz1_equals_one_unchecked(accumulator, points[offset]);
+    ++offset;
+  }
+  for (; offset < num_points; ++offset) {
+    xyzz_mixed_add_unchecked(accumulator, points[offset]);
+  }
+  *output = to_affine(accumulator);
+}
+
 template <typename Output, typename Launch>
 void run_one(Output &output, Launch &&launch) {
   Output *device_output = nullptr;
@@ -172,6 +186,29 @@ void run_g1_chained_xyzz_mixed_add(const affine_g1_t *points,
   g1_chained_xyzz_mixed_add_kernel<<<1, 1>>>(device_points, num_points,
                                              device_output);
   check_cuda(cudaGetLastError(), "g1_chained_xyzz_mixed_add_kernel launch");
+  check_cuda(cudaMemcpy(&output, device_output, sizeof(affine_g1_t),
+                        cudaMemcpyDeviceToHost),
+             "cudaMemcpy D2H");
+  check_cuda(cudaFree(device_output), "cudaFree output");
+  check_cuda(cudaFree(device_points), "cudaFree points");
+}
+
+void run_g1_chained_xyzz_mixed_add_unchecked(const affine_g1_t *points,
+                                             const size_t num_points,
+                                             affine_g1_t &output) {
+  affine_g1_t *device_points = nullptr;
+  affine_g1_t *device_output = nullptr;
+  check_cuda(cudaMalloc(&device_points, sizeof(affine_g1_t) * num_points),
+             "cudaMalloc points");
+  check_cuda(cudaMalloc(&device_output, sizeof(affine_g1_t)),
+             "cudaMalloc output");
+  check_cuda(cudaMemcpy(device_points, points, sizeof(affine_g1_t) * num_points,
+                        cudaMemcpyHostToDevice),
+             "cudaMemcpy H2D");
+  g1_chained_xyzz_mixed_add_unchecked_kernel<<<1, 1>>>(
+      device_points, num_points, device_output);
+  check_cuda(cudaGetLastError(),
+             "g1_chained_xyzz_mixed_add_unchecked_kernel launch");
   check_cuda(cudaMemcpy(&output, device_output, sizeof(affine_g1_t),
                         cudaMemcpyDeviceToHost),
              "cudaMemcpy D2H");

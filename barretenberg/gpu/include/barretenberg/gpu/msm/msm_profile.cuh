@@ -21,6 +21,7 @@ struct msm_profile {
   float scalar_chunk1_copy_ms = 0.0F;
   float scalar_chunk1_split_ms = 0.0F;
   float split_scalars_ms = 0.0F;
+  float precompute_bases_ms = 0.0F;
   float sort_records_ms = 0.0F;
   float encode_buckets_ms = 0.0F;
   float scan_bucket_offsets_ms = 0.0F;
@@ -43,6 +44,12 @@ struct msm_profile {
   uint32_t scalar_split_first_chunk_percent = 0;
   uint32_t digit_mode = 0;
   uint32_t coordinate_mode = 0;
+  uint32_t precompute_factor = 0;
+  uint32_t folded_windows = 0;
+  uint32_t large_bucket_mode = 0;
+  uint32_t large_bucket_chunk_size = 0;
+  uint64_t precomputed_srs_bytes = 0;
+  uint64_t large_bucket_chunk_count = 0;
   uint64_t normal_bucket_count = 0;
   uint64_t large_bucket_count = 0;
   uint64_t normal_bucket_point_count = 0;

@@ -62,7 +62,37 @@ public:
 
   ~ScopedMsmCoordinateMode() {
     bb::gpu::bn254::set_msm_coordinate_mode(
-        bb::gpu::bn254::msm_coordinate_mode::JACOBIAN);
+        bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  }
+};
+
+class ScopedMsmPrecomputeFactor {
+public:
+  explicit ScopedMsmPrecomputeFactor(const uint32_t factor) {
+    bb::gpu::bn254::set_msm_precompute_factor(factor);
+  }
+
+  ScopedMsmPrecomputeFactor(const ScopedMsmPrecomputeFactor &) = delete;
+  ScopedMsmPrecomputeFactor &
+  operator=(const ScopedMsmPrecomputeFactor &) = delete;
+
+  ~ScopedMsmPrecomputeFactor() { bb::gpu::bn254::set_msm_precompute_factor(1); }
+};
+
+class ScopedMsmLargeBucketMode {
+public:
+  explicit ScopedMsmLargeBucketMode(
+      const bb::gpu::bn254::msm_large_bucket_mode mode) {
+    bb::gpu::bn254::set_msm_large_bucket_mode(mode);
+  }
+
+  ScopedMsmLargeBucketMode(const ScopedMsmLargeBucketMode &) = delete;
+  ScopedMsmLargeBucketMode &
+  operator=(const ScopedMsmLargeBucketMode &) = delete;
+
+  ~ScopedMsmLargeBucketMode() {
+    bb::gpu::bn254::set_msm_large_bucket_mode(
+        bb::gpu::bn254::msm_large_bucket_mode::AUTO);
   }
 };
 
@@ -153,6 +183,17 @@ fq fq32_chain_reference(fq lhs, fq rhs) {
 void expect_same_point(const affine_g1_t &actual,
                        const curve::BN254::AffineElement &expected) {
   EXPECT_EQ(to_cpu(actual), expected);
+}
+
+curve::BN254::AffineElement generator_multiple(const uint64_t scalar) {
+  return curve::BN254::AffineElement(curve::BN254::Group::affine_one *
+                                     fr(scalar));
+}
+
+bool is_ordinary_mixed_add_case(const curve::BN254::AffineElement &accumulator,
+                                const curve::BN254::AffineElement &rhs) {
+  return !accumulator.is_point_at_infinity() && !rhs.is_point_at_infinity() &&
+         rhs != accumulator && rhs != -accumulator;
 }
 
 curve::BN254::Element
@@ -424,6 +465,54 @@ TEST(GpuBn254, G1EdgeCasesMatchCpu) {
   EXPECT_TRUE(output.on_curve_rhs);
 }
 
+TEST(GpuBn254, G1XyzzUncheckedPreconditionsRejectIncompleteCases) {
+  curve::BN254::AffineElement generator = curve::BN254::Group::affine_one;
+  curve::BN254::AffineElement infinity =
+      curve::BN254::AffineElement::infinity();
+
+  EXPECT_FALSE(is_ordinary_mixed_add_case(generator, generator));
+  EXPECT_FALSE(is_ordinary_mixed_add_case(generator, -generator));
+  EXPECT_FALSE(is_ordinary_mixed_add_case(infinity, generator));
+  EXPECT_FALSE(is_ordinary_mixed_add_case(generator, infinity));
+  EXPECT_TRUE(is_ordinary_mixed_add_case(generator, generator_multiple(2)));
+}
+
+TEST(GpuBn254, G1ChainedXyzzUncheckedMatchesCpuWhenPreconditionsHold) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  const std::vector<curve::BN254::AffineElement> points = {
+      generator_multiple(1),
+      generator_multiple(2),
+      generator_multiple(4),
+      generator_multiple(8),
+  };
+
+  curve::BN254::Element accumulator = curve::BN254::Group::point_at_infinity;
+  for (const auto &point : points) {
+    if (!accumulator.is_point_at_infinity()) {
+      EXPECT_TRUE(is_ordinary_mixed_add_case(
+          curve::BN254::AffineElement(accumulator), point));
+    }
+    accumulator += point;
+  }
+
+  std::vector<affine_g1_t> gpu_points;
+  gpu_points.reserve(points.size());
+  for (const auto &point : points) {
+    gpu_points.emplace_back(to_gpu(point));
+  }
+
+  affine_g1_t unchecked_output{};
+  gpu_testing::run_g1_chained_xyzz_mixed_add_unchecked(
+      gpu_points.data(), gpu_points.size(), unchecked_output);
+  expect_same_point(unchecked_output, curve::BN254::AffineElement(accumulator));
+
+  affine_g1_t checked_output{};
+  gpu_testing::run_g1_chained_xyzz_mixed_add(gpu_points.data(),
+                                             gpu_points.size(), checked_output);
+  expect_same_point(unchecked_output, to_cpu(checked_output));
+}
+
 TEST(GpuBn254, G1ChainedMixedAddMatchesCpu) {
   BB_REQUIRE_CUDA_DEVICE();
 
@@ -582,6 +671,233 @@ TEST(GpuBn254, MsmStartIndexMatchesCpu) {
         << "coordinate_mode=" << static_cast<uint32_t>(coordinate_mode);
   }
 }
+
+TEST(GpuBn254, MsmPrecomputeFactorsMatchCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 48; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    scalars.emplace_back(i % 9 == 0 ? fr::zero() : fr::random_element(&engine));
+  }
+  upload_test_srs(points);
+
+  const ScopedMsmCoordinateMode scoped_coordinate_mode(
+      bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  const ScopedMsmDigitMode scoped_digit_mode(
+      bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+
+  for (uint32_t bits_per_slice : {4U, 8U, 13U}) {
+    const auto expected =
+        reference_msm_with_explicit_window(points, scalar_span, bits_per_slice);
+    for (uint32_t factor : {1U, 2U, 4U, 8U}) {
+      const ScopedMsmPrecomputeFactor scoped_precompute_factor(factor);
+      const auto actual =
+          bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
+      EXPECT_EQ(actual, expected)
+          << "bits_per_slice=" << bits_per_slice << " factor=" << factor;
+    }
+  }
+}
+
+TEST(GpuBn254, MsmPrecomputeStartIndexMatchesCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  for (size_t i = 0; i < 24; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+  }
+  upload_test_srs(points);
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 11; ++i) {
+    scalars.emplace_back(i % 4 == 0 ? fr::zero() : fr::random_element(&engine));
+  }
+  auto scalar_span = PolynomialSpan<const fr>{
+      7, std::span<const fr>(scalars.data(), scalars.size())};
+
+  const ScopedMsmCoordinateMode scoped_coordinate_mode(
+      bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  const ScopedMsmDigitMode scoped_digit_mode(
+      bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+
+  for (uint32_t factor : {2U, 4U, 8U}) {
+    const ScopedMsmPrecomputeFactor scoped_precompute_factor(factor);
+    const auto expected =
+        reference_msm_with_explicit_window(points, scalar_span, 5);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 5);
+    EXPECT_EQ(actual, expected) << "factor=" << factor;
+  }
+}
+
+TEST(GpuBn254, MsmPrecomputeFactorChangeMatchesCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 36; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    scalars.emplace_back(i % 7 == 0 ? fr::zero() : fr::random_element(&engine));
+  }
+  upload_test_srs(points);
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+
+  const ScopedMsmCoordinateMode scoped_coordinate_mode(
+      bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  const ScopedMsmDigitMode scoped_digit_mode(
+      bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  const auto expected =
+      reference_msm_with_explicit_window(points, scalar_span, 8);
+
+  for (uint32_t factor : {2U, 4U, 8U, 1U, 2U}) {
+    const ScopedMsmPrecomputeFactor scoped_precompute_factor(factor);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 8);
+    EXPECT_EQ(actual, expected) << "factor=" << factor;
+  }
+}
+
+TEST(GpuBn254, MsmChunkedLargeBucketsMatchCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 700; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    scalars.emplace_back(fr(5));
+  }
+  upload_test_srs(points);
+
+  const ScopedMsmCoordinateMode scoped_coordinate_mode(
+      bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  const ScopedMsmDigitMode scoped_digit_mode(
+      bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  const ScopedMsmLargeBucketMode scoped_large_bucket_mode(
+      bb::gpu::bn254::msm_large_bucket_mode::CHUNKED_XYZZ);
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+
+  const auto expected =
+      reference_msm_with_explicit_window(points, scalar_span, 4);
+  for (uint32_t factor : {1U, 2U, 4U, 8U}) {
+    const ScopedMsmPrecomputeFactor scoped_precompute_factor(factor);
+    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
+    EXPECT_EQ(actual, expected) << "factor=" << factor;
+  }
+}
+
+TEST(GpuBn254, MsmChunkedLargeBucketsStartIndexMatchesCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  for (size_t i = 0; i < 760; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+  }
+  upload_test_srs(points);
+  std::vector<fr> scalars(640, fr(5));
+  auto scalar_span = PolynomialSpan<const fr>{
+      37, std::span<const fr>(scalars.data(), scalars.size())};
+
+  const ScopedMsmCoordinateMode scoped_coordinate_mode(
+      bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  const ScopedMsmDigitMode scoped_digit_mode(
+      bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  const ScopedMsmLargeBucketMode scoped_large_bucket_mode(
+      bb::gpu::bn254::msm_large_bucket_mode::CHUNKED_XYZZ);
+  const ScopedMsmPrecomputeFactor scoped_precompute_factor(4);
+
+  const auto expected =
+      reference_msm_with_explicit_window(points, scalar_span, 5);
+  const auto actual = bb::gpu::bn254::msm(scalar_span, points, 5);
+  EXPECT_EQ(actual, expected);
+}
+
+#if GTEST_HAS_DEATH_TEST
+TEST(GpuBn254, MsmPrecomputeRejectsUnsupportedModes) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 8; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    scalars.emplace_back(fr::random_element(&engine));
+  }
+  upload_test_srs(points);
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+
+  EXPECT_DEATH(
+      {
+        bb::gpu::bn254::set_msm_precompute_factor(2);
+        bb::gpu::bn254::set_msm_digit_mode(
+            bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+        bb::gpu::bn254::set_msm_coordinate_mode(
+            bb::gpu::bn254::msm_coordinate_mode::JACOBIAN);
+        (void)bb::gpu::bn254::msm(scalar_span, points, 4);
+      },
+      "precompute factor requires XYZZ");
+
+  EXPECT_DEATH(
+      {
+        bb::gpu::bn254::set_msm_precompute_factor(2);
+        bb::gpu::bn254::set_msm_digit_mode(
+            bb::gpu::bn254::msm_digit_mode::SIGNED);
+        bb::gpu::bn254::set_msm_coordinate_mode(
+            bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+        (void)bb::gpu::bn254::msm(scalar_span, points, 4);
+      },
+      "precompute factor requires unsigned digit mode");
+}
+#endif
+
+#if GTEST_HAS_DEATH_TEST
+TEST(GpuBn254, MsmChunkedLargeBucketsRejectUnsupportedModes) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 8; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    scalars.emplace_back(fr::random_element(&engine));
+  }
+  upload_test_srs(points);
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+
+  EXPECT_DEATH(
+      {
+        bb::gpu::bn254::set_msm_large_bucket_mode(
+            bb::gpu::bn254::msm_large_bucket_mode::CHUNKED_XYZZ);
+        bb::gpu::bn254::set_msm_digit_mode(
+            bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+        bb::gpu::bn254::set_msm_coordinate_mode(
+            bb::gpu::bn254::msm_coordinate_mode::JACOBIAN);
+        (void)bb::gpu::bn254::msm(scalar_span, points, 4);
+      },
+      "chunked large buckets require XYZZ");
+
+  EXPECT_DEATH(
+      {
+        bb::gpu::bn254::set_msm_large_bucket_mode(
+            bb::gpu::bn254::msm_large_bucket_mode::CHUNKED_XYZZ);
+        bb::gpu::bn254::set_msm_digit_mode(
+            bb::gpu::bn254::msm_digit_mode::SIGNED);
+        bb::gpu::bn254::set_msm_coordinate_mode(
+            bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+        (void)bb::gpu::bn254::msm(scalar_span, points, 4);
+      },
+      "chunked large buckets require unsigned digit mode");
+}
+#endif
 
 TEST(GpuBn254, MsmSameBucketNormalAccumulationAndReductionMatchCpu) {
   BB_REQUIRE_CUDA_DEVICE();

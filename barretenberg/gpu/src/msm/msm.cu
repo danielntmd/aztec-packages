@@ -14,6 +14,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -29,6 +30,10 @@ constexpr uint32_t REDUCTION_THREADS = 256;
 constexpr int LARGE_BUCKET_MIN_THRESHOLD = 512;
 constexpr uint32_t WINDOW_KEY_BITS = 8;
 constexpr uint32_t DEFAULT_SCALAR_SPLIT_FIRST_CHUNK_PERCENT = 75;
+constexpr uint32_t DEFAULT_LARGE_BUCKET_CHUNK_SIZE = 256;
+constexpr int LARGE_BUCKET_CHUNKED_MIN_AVERAGE_BUCKET_SIZE = 64;
+constexpr int LARGE_BUCKET_CHUNKED_MIN_ACTIVE_BUCKETS = 4096;
+constexpr int LARGE_BUCKET_TREE_REDUCTION_MIN_CHUNKS = 17;
 constexpr bool USE_SERIAL_RUNNING_SUM_REDUCTION_FALLBACK = false;
 constexpr uint32_t POINT_INDEX_SIGN_BIT = uint32_t{1} << 31;
 constexpr uint32_t POINT_INDEX_MASK = POINT_INDEX_SIGN_BIT - 1;
@@ -38,7 +43,9 @@ constexpr size_t BUCKET_STAT_LARGE_JOBS = 1;
 constexpr size_t BUCKET_STAT_NORMAL_POINTS = 2;
 constexpr size_t BUCKET_STAT_LARGE_POINTS = 3;
 constexpr size_t BUCKET_STAT_MAX_SIZE = 4;
-constexpr size_t BUCKET_STAT_HISTOGRAM_START = 5;
+constexpr size_t BUCKET_STAT_LARGE_CHUNKS = 5;
+constexpr size_t BUCKET_STAT_LARGE_FULL_CHUNKS = 6;
+constexpr size_t BUCKET_STAT_HISTOGRAM_START = 7;
 constexpr size_t BUCKET_STAT_COUNT =
     BUCKET_STAT_HISTOGRAM_START + MSM_BUCKET_HISTOGRAM_BINS;
 
@@ -46,6 +53,7 @@ enum class msm_stage {
   h2d_points,
   h2d_scalars,
   split_scalars,
+  precompute_bases,
   sort_records,
   encode_buckets,
   scan_bucket_offsets,
@@ -80,6 +88,9 @@ const char *stage_nvtx_name(const msm_stage stage_name,
     return xyzz ? "bb.msm.xyzz.h2d_scalars" : "bb.msm.jacobian.h2d_scalars";
   case msm_stage::split_scalars:
     return xyzz ? "bb.msm.xyzz.split_scalars" : "bb.msm.jacobian.split_scalars";
+  case msm_stage::precompute_bases:
+    return xyzz ? "bb.msm.xyzz.precompute_bases"
+                : "bb.msm.jacobian.precompute_bases";
   case msm_stage::sort_records:
     return xyzz ? "bb.msm.xyzz.sort_records" : "bb.msm.jacobian.sort_records";
   case msm_stage::encode_buckets:
@@ -133,6 +144,8 @@ public:
   void set_scalar_split_first_chunk_percent(uint32_t) {}
   void set_digit_mode(msm_digit_mode) {}
   void set_coordinate_mode(msm_coordinate_mode) {}
+  void set_precompute_config(uint32_t, uint32_t, uint64_t) {}
+  void set_large_bucket_config(msm_large_bucket_mode, uint32_t, uint64_t) {}
   void set_bucket_distribution(const uint64_t *) {}
   const char *scalar_copy_split_range_name() const {
     return "bb.msm.scalar_copy_split_pipeline";
@@ -254,6 +267,26 @@ public:
     }
   }
 
+  void set_precompute_config(const uint32_t factor,
+                             const uint32_t folded_windows,
+                             const uint64_t precomputed_srs_bytes) {
+    if (profile_ != nullptr) {
+      profile_->precompute_factor = factor;
+      profile_->folded_windows = folded_windows;
+      profile_->precomputed_srs_bytes = precomputed_srs_bytes;
+    }
+  }
+
+  void set_large_bucket_config(const msm_large_bucket_mode mode,
+                               const uint32_t chunk_size,
+                               const uint64_t chunk_count) {
+    if (profile_ != nullptr) {
+      profile_->large_bucket_mode = static_cast<uint32_t>(mode);
+      profile_->large_bucket_chunk_size = chunk_size;
+      profile_->large_bucket_chunk_count = chunk_count;
+    }
+  }
+
   void set_bucket_distribution(const uint64_t *stats) {
     if (profile_ == nullptr) {
       return;
@@ -263,6 +296,7 @@ public:
     profile_->normal_bucket_point_count = stats[BUCKET_STAT_NORMAL_POINTS];
     profile_->large_bucket_point_count = stats[BUCKET_STAT_LARGE_POINTS];
     profile_->max_bucket_size = stats[BUCKET_STAT_MAX_SIZE];
+    profile_->large_bucket_chunk_count = stats[BUCKET_STAT_LARGE_CHUNKS];
     for (size_t i = 0; i < MSM_BUCKET_HISTOGRAM_BINS; ++i) {
       profile_->bucket_size_histogram[i] =
           stats[BUCKET_STAT_HISTOGRAM_START + i];
@@ -326,6 +360,8 @@ private:
       return &profile_->h2d_scalars_ms;
     case msm_stage::split_scalars:
       return &profile_->split_scalars_ms;
+    case msm_stage::precompute_bases:
+      return &profile_->precompute_bases_ms;
     case msm_stage::sort_records:
       return &profile_->sort_records_ms;
     case msm_stage::encode_buckets:
@@ -389,6 +425,55 @@ split_scalars_kernel(const fr_t *scalars_montgomery, uint32_t *bucket_indices,
     bucket_indices[output_idx] =
         digit == 0 ? 0 : ((window << bits_per_slice) | digit);
     point_indices[output_idx] = point_index;
+  }
+}
+
+BB_GPU_HD inline uint32_t
+get_padded_scalar_slice_low(const fr_t &scalar, const uint32_t low_window,
+                            const uint32_t slice_size) {
+  uint32_t digit = 0;
+  const uint32_t lo_bit = low_window * slice_size;
+  for (uint32_t i = 0; i < slice_size; ++i) {
+    const uint32_t bit = lo_bit + i;
+    if (bit < NUM_BITS_IN_FIELD &&
+        ((scalar.data[bit / 64] >> (bit % 64)) & 1ULL) != 0) {
+      digit |= uint32_t{1} << i;
+    }
+  }
+  return digit;
+}
+
+__global__ void split_scalars_precomputed_kernel(
+    const fr_t *scalars_montgomery, uint32_t *bucket_indices,
+    uint32_t *point_indices, const size_t total_num_scalars,
+    const size_t chunk_start, const size_t chunk_size,
+    const uint32_t point_start_index, const uint32_t srs_size,
+    const uint32_t bits_per_slice, const uint32_t num_windows,
+    const uint32_t folded_windows) {
+  const size_t local_scalar_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (local_scalar_idx >= chunk_size) {
+    return;
+  }
+
+  const size_t scalar_idx = chunk_start + local_scalar_idx;
+  const fr_t scalar =
+      scalars_montgomery[scalar_idx].from_montgomery_form_reduced();
+  const uint32_t base_point_index =
+      point_start_index + static_cast<uint32_t>(scalar_idx);
+
+  for (uint32_t low_window = 0; low_window < num_windows; ++low_window) {
+    const uint32_t digit =
+        scalar.is_zero()
+            ? 0
+            : get_padded_scalar_slice_low(scalar, low_window, bits_per_slice);
+    const uint32_t layer = low_window / folded_windows;
+    const uint32_t folded_low_window = low_window % folded_windows;
+    const uint32_t target_window = folded_windows - 1 - folded_low_window;
+    const size_t output_idx =
+        (static_cast<size_t>(low_window) * total_num_scalars) + scalar_idx;
+    bucket_indices[output_idx] =
+        digit == 0 ? 0 : ((target_window << bits_per_slice) | digit);
+    point_indices[output_idx] = (layer * srs_size) + base_point_index;
   }
 }
 
@@ -498,11 +583,10 @@ __device__ uint32_t bucket_size_histogram_bin(const uint32_t count) {
   return 9;
 }
 
-__global__ void
-collect_bucket_distribution_kernel(const int *sorted_bucket_run_indices,
-                                   const int *bucket_sizes, uint64_t *stats,
-                                   const int num_active_buckets,
-                                   const int large_bucket_threshold) {
+__global__ void collect_bucket_distribution_kernel(
+    const int *sorted_bucket_run_indices, const int *bucket_sizes,
+    uint64_t *stats, const int num_active_buckets,
+    const int large_bucket_threshold, const uint32_t chunk_size) {
   const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
   if (job_idx >= num_active_buckets) {
     return;
@@ -517,6 +601,13 @@ collect_bucket_distribution_kernel(const int *sorted_bucket_run_indices,
     atomicAdd(reinterpret_cast<unsigned long long *>(
                   &stats[BUCKET_STAT_LARGE_POINTS]),
               static_cast<unsigned long long>(count));
+    const uint32_t chunk_count = (count + chunk_size - 1) / chunk_size;
+    atomicAdd(reinterpret_cast<unsigned long long *>(
+                  &stats[BUCKET_STAT_LARGE_CHUNKS]),
+              static_cast<unsigned long long>(chunk_count));
+    atomicAdd(reinterpret_cast<unsigned long long *>(
+                  &stats[BUCKET_STAT_LARGE_FULL_CHUNKS]),
+              static_cast<unsigned long long>(count / chunk_size));
   } else {
     atomicAdd(
         reinterpret_cast<unsigned long long *>(&stats[BUCKET_STAT_NORMAL_JOBS]),
@@ -749,7 +840,7 @@ __global__ void accumulate_large_buckets_xyzz_kernel(
     const int *bucket_sizes, const int *bucket_offsets,
     const uint32_t *sorted_point_indices, const affine_g1_t *points,
     xyzz_g1_t *buckets, const int num_active_buckets,
-    const int large_bucket_threshold) {
+    const int large_bucket_threshold, const int large_bucket_upper_threshold) {
   const uint32_t warp_idx = threadIdx.x / WARP_THREADS;
   const uint32_t lane_idx = threadIdx.x % WARP_THREADS;
   const int job_idx =
@@ -760,7 +851,7 @@ __global__ void accumulate_large_buckets_xyzz_kernel(
 
   const int run_idx = sorted_bucket_run_indices[job_idx];
   const int count = bucket_sizes[run_idx];
-  if (count <= large_bucket_threshold) {
+  if (count <= large_bucket_threshold || count > large_bucket_upper_threshold) {
     return;
   }
 
@@ -868,6 +959,179 @@ __global__ void accumulate_large_buckets_signed_xyzz_kernel(
   if (lane_idx == 0) {
     buckets[unique_bucket_indices[run_idx] - 1] = partials[threadIdx.x];
   }
+}
+
+__global__ void count_large_bucket_chunks_kernel(
+    const int *sorted_bucket_run_indices, const int *bucket_sizes,
+    int *large_bucket_chunk_counts, int *large_bucket_full_chunk_counts,
+    const int num_active_buckets, const int large_bucket_threshold,
+    const uint32_t chunk_size) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  const int count = bucket_sizes[run_idx];
+  const int chunk_size_int = static_cast<int>(chunk_size);
+  if (count > large_bucket_threshold) {
+    large_bucket_chunk_counts[job_idx] =
+        (count + chunk_size_int - 1) / chunk_size_int;
+    large_bucket_full_chunk_counts[job_idx] = count / chunk_size_int;
+  } else {
+    large_bucket_chunk_counts[job_idx] = 0;
+    large_bucket_full_chunk_counts[job_idx] = 0;
+  }
+}
+
+__global__ void build_large_bucket_chunk_jobs_kernel(
+    const int *sorted_bucket_run_indices, const int *bucket_sizes,
+    const int *bucket_offsets, const int *large_bucket_chunk_counts,
+    const int *large_bucket_chunk_offsets,
+    const int *large_bucket_full_chunk_counts,
+    const int *large_bucket_full_chunk_offsets, int *chunk_bucket_job_indices,
+    int *exec_chunk_partial_indices, int *exec_chunk_point_offsets,
+    int *exec_chunk_point_counts, const int num_active_buckets,
+    const int total_full_chunks, const uint32_t chunk_size) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int chunk_count = large_bucket_chunk_counts[job_idx];
+  if (chunk_count == 0) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  const int bucket_start = bucket_offsets[run_idx];
+  const int bucket_count = bucket_sizes[run_idx];
+  const int chunk_offset = large_bucket_chunk_offsets[job_idx];
+  const int full_chunk_count = large_bucket_full_chunk_counts[job_idx];
+  const int full_chunk_offset = large_bucket_full_chunk_offsets[job_idx];
+  for (int chunk = 0; chunk < full_chunk_count; ++chunk) {
+    const int local_offset = chunk * static_cast<int>(chunk_size);
+    const int partial_idx = chunk_offset + chunk;
+    const int exec_idx = full_chunk_offset + chunk;
+    chunk_bucket_job_indices[partial_idx] = job_idx;
+    exec_chunk_partial_indices[exec_idx] = partial_idx;
+    exec_chunk_point_offsets[exec_idx] = bucket_start + local_offset;
+    exec_chunk_point_counts[exec_idx] = static_cast<int>(chunk_size);
+  }
+  if (full_chunk_count < chunk_count) {
+    const int tail_prefix = chunk_offset - full_chunk_offset;
+    const int partial_idx = chunk_offset + full_chunk_count;
+    const int exec_idx = total_full_chunks + tail_prefix;
+    const int local_offset = full_chunk_count * static_cast<int>(chunk_size);
+    chunk_bucket_job_indices[partial_idx] = job_idx;
+    exec_chunk_partial_indices[exec_idx] = partial_idx;
+    exec_chunk_point_offsets[exec_idx] = bucket_start + local_offset;
+    exec_chunk_point_counts[exec_idx] = bucket_count - local_offset;
+  }
+}
+
+__global__ void __launch_bounds__(BUCKET_THREADS, 2)
+    accumulate_large_bucket_segments_xyzz_kernel(
+        const int *exec_chunk_point_offsets, const int *exec_chunk_point_counts,
+        const int *exec_chunk_partial_indices,
+        const uint32_t *sorted_point_indices, const affine_g1_t *points,
+        xyzz_g1_t *chunk_partials, const int num_chunks) {
+  const int chunk_idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (chunk_idx >= num_chunks) {
+    return;
+  }
+
+  const int start = exec_chunk_point_offsets[chunk_idx];
+  const int count = exec_chunk_point_counts[chunk_idx];
+  chunk_partials[exec_chunk_partial_indices[chunk_idx]] =
+      chained_xyzz_mixed_add_indexed_nonzero(points, sorted_point_indices,
+                                             start, count);
+}
+
+__global__ void reduce_large_bucket_chunk_partials_tree_xyzz_kernel(
+    int *large_bucket_chunk_counts, const int *large_bucket_chunk_offsets,
+    xyzz_g1_t *chunk_partials, const int *chunk_bucket_job_indices,
+    const int num_chunks) {
+  const int chunk_idx =
+      static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (chunk_idx >= num_chunks) {
+    return;
+  }
+
+  const int job_idx = chunk_bucket_job_indices[chunk_idx];
+  const int count = large_bucket_chunk_counts[job_idx];
+  if (count <= 1) {
+    return;
+  }
+
+  const int chunk_offset = large_bucket_chunk_offsets[job_idx];
+  const int local_idx = chunk_idx - chunk_offset;
+  if (local_idx >= count) {
+    return;
+  }
+
+  const int upper_offset = (count + 1) >> 1;
+  if (local_idx < (count >> 1)) {
+    chunk_partials[chunk_idx] =
+        xyzz_add(chunk_partials[chunk_idx],
+                 chunk_partials[chunk_offset + upper_offset + local_idx]);
+  }
+}
+
+__global__ void
+update_large_bucket_chunk_counts_kernel(int *large_bucket_chunk_counts,
+                                        const int num_active_buckets) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+  const int count = large_bucket_chunk_counts[job_idx];
+  if (count > 1) {
+    large_bucket_chunk_counts[job_idx] = (count + 1) >> 1;
+  }
+}
+
+__global__ void reduce_large_bucket_chunk_partials_xyzz_kernel(
+    const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *large_bucket_chunk_counts, const int *large_bucket_chunk_offsets,
+    const xyzz_g1_t *chunk_partials, xyzz_g1_t *buckets,
+    const int num_active_buckets) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int chunk_count = large_bucket_chunk_counts[job_idx];
+  if (chunk_count == 0) {
+    return;
+  }
+
+  const int chunk_offset = large_bucket_chunk_offsets[job_idx];
+  xyzz_g1_t local = xyzz_infinity();
+  for (int chunk = 0; chunk < chunk_count; ++chunk) {
+    local = xyzz_add(local, chunk_partials[chunk_offset + chunk]);
+  }
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  buckets[unique_bucket_indices[run_idx]] = local;
+}
+
+__global__ void scatter_large_bucket_chunk_partials_xyzz_kernel(
+    const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *large_bucket_chunk_counts, const int *large_bucket_chunk_offsets,
+    const xyzz_g1_t *chunk_partials, xyzz_g1_t *buckets,
+    const int num_active_buckets) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  if (large_bucket_chunk_counts[job_idx] == 0) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  buckets[unique_bucket_indices[run_idx]] =
+      chunk_partials[large_bucket_chunk_offsets[job_idx]];
 }
 
 __global__ void reduce_bucket_bit_kernel(jacobian_g1_t *buckets,
@@ -1176,12 +1440,37 @@ msm_digit_mode &msm_digit_mode_ref() {
 msm_digit_mode current_msm_digit_mode() { return msm_digit_mode_ref(); }
 
 msm_coordinate_mode &msm_coordinate_mode_ref() {
-  static msm_coordinate_mode mode = msm_coordinate_mode::JACOBIAN;
+  static msm_coordinate_mode mode = msm_coordinate_mode::XYZZ;
   return mode;
 }
 
 msm_coordinate_mode current_msm_coordinate_mode() {
   return msm_coordinate_mode_ref();
+}
+
+uint32_t &msm_precompute_factor_ref() {
+  static uint32_t factor = 1;
+  return factor;
+}
+
+uint32_t current_msm_precompute_factor() { return msm_precompute_factor_ref(); }
+
+msm_large_bucket_mode &msm_large_bucket_mode_ref() {
+  static msm_large_bucket_mode mode = msm_large_bucket_mode::AUTO;
+  return mode;
+}
+
+msm_large_bucket_mode current_msm_large_bucket_mode() {
+  return msm_large_bucket_mode_ref();
+}
+
+uint32_t &msm_large_bucket_chunk_size_ref() {
+  static uint32_t chunk_size = DEFAULT_LARGE_BUCKET_CHUNK_SIZE;
+  return chunk_size;
+}
+
+uint32_t current_msm_large_bucket_chunk_size() {
+  return msm_large_bucket_chunk_size_ref();
 }
 
 void copy_and_split_scalar_chunk(
@@ -1190,10 +1479,11 @@ void copy_and_split_scalar_chunk(
     const size_t chunk_start, const size_t chunk_size,
     const uint32_t point_start_index, const uint32_t bits_per_slice,
     const uint32_t num_windows, const msm_digit_mode digit_mode,
-    const cudaStream_t stream, const bool record_profile,
-    cudaEvent_t copy_done_event, cudaEvent_t copy_start_event,
-    cudaEvent_t copy_stop_event, cudaEvent_t split_start_event,
-    cudaEvent_t split_stop_event) {
+    const uint32_t precompute_factor, const uint32_t folded_windows,
+    const uint32_t srs_size, const cudaStream_t stream,
+    const bool record_profile, cudaEvent_t copy_done_event,
+    cudaEvent_t copy_start_event, cudaEvent_t copy_stop_event,
+    cudaEvent_t split_start_event, cudaEvent_t split_stop_event) {
   if (chunk_size == 0) {
     return;
   }
@@ -1215,7 +1505,13 @@ void copy_and_split_scalar_chunk(
   }
 
   const uint32_t split_blocks = ceil_div_u32(chunk_size, SPLIT_THREADS);
-  if (digit_mode == msm_digit_mode::SIGNED) {
+  if (precompute_factor > 1) {
+    split_scalars_precomputed_kernel<<<split_blocks, SPLIT_THREADS, 0,
+                                       stream>>>(
+        scalars_device, bucket_indices, point_indices, total_num_scalars,
+        chunk_start, chunk_size, point_start_index, srs_size, bits_per_slice,
+        num_windows, folded_windows);
+  } else if (digit_mode == msm_digit_mode::SIGNED) {
     split_scalars_signed_kernel<<<split_blocks, SPLIT_THREADS, 0, stream>>>(
         scalars_device, bucket_indices, point_indices, total_num_scalars,
         chunk_start, chunk_size, point_start_index, bits_per_slice,
@@ -1239,7 +1535,9 @@ void copy_and_split_scalars_pipeline(
     uint32_t *bucket_indices, uint32_t *point_indices, const size_t num_scalars,
     const uint32_t point_start_index, const uint32_t bits_per_slice,
     const uint32_t num_windows, const msm_digit_mode digit_mode,
-    const cudaStream_t main_stream, Recorder &recorder) {
+    const uint32_t precompute_factor, const uint32_t folded_windows,
+    const uint32_t srs_size, const cudaStream_t main_stream,
+    Recorder &recorder) {
   bb::gpu::ScopedNvtxRange nvtx_range(recorder.scalar_copy_split_range_name());
   const uint32_t first_chunk_percent = scalar_split_first_chunk_percent();
   const size_t first_chunk_size =
@@ -1288,9 +1586,10 @@ void copy_and_split_scalars_pipeline(
   copy_and_split_scalar_chunk(
       scalars, scalars_montgomery.data(), bucket_indices, point_indices,
       num_scalars, 0, first_chunk_size, point_start_index, bits_per_slice,
-      num_windows, digit_mode, first_cuda_stream, record_profile,
-      first_copy_done_event, copy_start_events[0], copy_stop_events[0],
-      split_start_events[0], split_stop_events[0]);
+      num_windows, digit_mode, precompute_factor, folded_windows, srs_size,
+      first_cuda_stream, record_profile, first_copy_done_event,
+      copy_start_events[0], copy_stop_events[0], split_start_events[0],
+      split_stop_events[0]);
   record_event(first_split_done_event, first_cuda_stream,
                "cudaEventRecord first scalar split done");
 
@@ -1300,9 +1599,10 @@ void copy_and_split_scalars_pipeline(
     copy_and_split_scalar_chunk(
         scalars, scalars_montgomery.data(), bucket_indices, point_indices,
         num_scalars, second_chunk_start, second_chunk_size, point_start_index,
-        bits_per_slice, num_windows, digit_mode, second_cuda_stream,
-        record_profile, nullptr, copy_start_events[1], copy_stop_events[1],
-        split_start_events[1], split_stop_events[1]);
+        bits_per_slice, num_windows, digit_mode, precompute_factor,
+        folded_windows, srs_size, second_cuda_stream, record_profile, nullptr,
+        copy_start_events[1], copy_stop_events[1], split_start_events[1],
+        split_stop_events[1]);
     record_event(second_split_done_event, second_cuda_stream,
                  "cudaEventRecord second scalar split done");
     wait_event(main_stream, second_split_done_event,
@@ -1352,15 +1652,15 @@ void copy_and_split_scalars_pipeline(
 }
 
 template <typename Recorder>
-void collect_bucket_distribution(const int *sorted_bucket_run_indices,
-                                 const int *bucket_sizes,
-                                 const int num_active_buckets,
-                                 const int large_bucket_threshold,
-                                 const uint32_t bucket_job_blocks,
-                                 const cudaStream_t cuda_stream, void *stream,
-                                 Recorder &recorder) {
-  if (!recorder.enabled()) {
-    return;
+std::array<uint64_t, BUCKET_STAT_COUNT> collect_bucket_distribution(
+    const int *sorted_bucket_run_indices, const int *bucket_sizes,
+    const int num_active_buckets, const int large_bucket_threshold,
+    const uint32_t large_bucket_chunk_size, const uint32_t bucket_job_blocks,
+    const cudaStream_t cuda_stream, void *stream, Recorder &recorder,
+    const bool force_collect = false) {
+  std::array<uint64_t, BUCKET_STAT_COUNT> stats{};
+  if (!recorder.enabled() && !force_collect) {
+    return stats;
   }
 
   DeviceBuffer<uint64_t> stats_device;
@@ -1371,15 +1671,109 @@ void collect_bucket_distribution(const int *sorted_bucket_run_indices,
   collect_bucket_distribution_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
                                        cuda_stream>>>(
       sorted_bucket_run_indices, bucket_sizes, stats_device.data(),
-      num_active_buckets, large_bucket_threshold);
+      num_active_buckets, large_bucket_threshold, large_bucket_chunk_size);
   check_cuda(cudaGetLastError(), "collect_bucket_distribution_kernel launch");
 
-  std::array<uint64_t, BUCKET_STAT_COUNT> stats{};
   copy_device_to_host(stats.data(), stats_device.data(),
                       sizeof(uint64_t) * stats.size(), stream);
   check_cuda(cudaStreamSynchronize(cuda_stream),
              "cudaStreamSynchronize bucket distribution stats");
   recorder.set_bucket_distribution(stats.data());
+  return stats;
+}
+
+template <typename Recorder>
+void accumulate_large_buckets_xyzz_chunked(
+    DeviceBuffer<std::byte> &temp_storage, const int *sorted_bucket_run_indices,
+    const uint32_t *unique_bucket_indices, const int *bucket_sizes,
+    const int *bucket_offsets, const uint32_t *sorted_point_indices,
+    const affine_g1_t *points, xyzz_g1_t *dense_buckets,
+    const int num_active_buckets, const int large_bucket_threshold,
+    const uint32_t bucket_job_blocks, const uint32_t chunk_size,
+    const int num_chunks, const int num_full_chunks, const int max_chunk_count,
+    DeviceBuffer<int> &large_bucket_chunk_counts,
+    DeviceBuffer<int> &large_bucket_chunk_offsets,
+    DeviceBuffer<int> &large_bucket_full_chunk_counts,
+    DeviceBuffer<int> &large_bucket_full_chunk_offsets,
+    DeviceBuffer<int> &chunk_bucket_job_indices,
+    DeviceBuffer<int> &exec_chunk_partial_indices,
+    DeviceBuffer<int> &exec_chunk_point_offsets,
+    DeviceBuffer<int> &exec_chunk_point_counts,
+    DeviceBuffer<xyzz_g1_t> &chunk_partials, const cudaStream_t cuda_stream,
+    void *stream, Recorder &recorder) {
+  if (num_chunks == 0) {
+    recorder.set_large_bucket_config(msm_large_bucket_mode::SINGLE_WARP,
+                                     chunk_size, 0);
+    return;
+  }
+
+  count_large_bucket_chunks_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
+                                     cuda_stream>>>(
+      sorted_bucket_run_indices, bucket_sizes, large_bucket_chunk_counts.data(),
+      large_bucket_full_chunk_counts.data(), num_active_buckets,
+      large_bucket_threshold, chunk_size);
+  check_cuda(cudaGetLastError(), "count_large_bucket_chunks_kernel launch");
+  cub_exclusive_sum(temp_storage, large_bucket_chunk_counts.data(),
+                    large_bucket_chunk_offsets.data(), num_active_buckets,
+                    stream);
+  cub_exclusive_sum(temp_storage, large_bucket_full_chunk_counts.data(),
+                    large_bucket_full_chunk_offsets.data(), num_active_buckets,
+                    stream);
+
+  build_large_bucket_chunk_jobs_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
+                                         cuda_stream>>>(
+      sorted_bucket_run_indices, bucket_sizes, bucket_offsets,
+      large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
+      large_bucket_full_chunk_counts.data(),
+      large_bucket_full_chunk_offsets.data(), chunk_bucket_job_indices.data(),
+      exec_chunk_partial_indices.data(), exec_chunk_point_offsets.data(),
+      exec_chunk_point_counts.data(), num_active_buckets, num_full_chunks,
+      chunk_size);
+  check_cuda(cudaGetLastError(), "build_large_bucket_chunk_jobs_kernel launch");
+
+  const uint32_t chunk_blocks =
+      ceil_div_u32(static_cast<size_t>(num_chunks), BUCKET_THREADS);
+  accumulate_large_bucket_segments_xyzz_kernel<<<chunk_blocks, BUCKET_THREADS,
+                                                 0, cuda_stream>>>(
+      exec_chunk_point_offsets.data(), exec_chunk_point_counts.data(),
+      exec_chunk_partial_indices.data(), sorted_point_indices, points,
+      chunk_partials.data(), num_chunks);
+  check_cuda(cudaGetLastError(),
+             "accumulate_large_bucket_segments_xyzz_kernel launch");
+
+  if (max_chunk_count < LARGE_BUCKET_TREE_REDUCTION_MIN_CHUNKS) {
+    reduce_large_bucket_chunk_partials_xyzz_kernel<<<
+        bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+        sorted_bucket_run_indices, unique_bucket_indices,
+        large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
+        chunk_partials.data(), dense_buckets, num_active_buckets);
+    check_cuda(cudaGetLastError(),
+               "reduce_large_bucket_chunk_partials_xyzz_kernel launch");
+    return;
+  }
+
+  for (int active_chunk_count = max_chunk_count; active_chunk_count > 1;
+       active_chunk_count = (active_chunk_count + 1) >> 1) {
+    reduce_large_bucket_chunk_partials_tree_xyzz_kernel<<<
+        chunk_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+        large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
+        chunk_partials.data(), chunk_bucket_job_indices.data(), num_chunks);
+    check_cuda(cudaGetLastError(),
+               "reduce_large_bucket_chunk_partials_tree_xyzz_kernel launch");
+    update_large_bucket_chunk_counts_kernel<<<bucket_job_blocks, BUCKET_THREADS,
+                                              0, cuda_stream>>>(
+        large_bucket_chunk_counts.data(), num_active_buckets);
+    check_cuda(cudaGetLastError(),
+               "update_large_bucket_chunk_counts_kernel launch");
+  }
+
+  scatter_large_bucket_chunk_partials_xyzz_kernel<<<
+      bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+      sorted_bucket_run_indices, unique_bucket_indices,
+      large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
+      chunk_partials.data(), dense_buckets, num_active_buckets);
+  check_cuda(cudaGetLastError(),
+             "scatter_large_bucket_chunk_partials_xyzz_kernel launch");
 }
 
 template <typename Recorder>
@@ -1395,12 +1789,63 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
   recorder.set_digit_mode(digit_mode);
   const msm_coordinate_mode coordinate_mode = current_msm_coordinate_mode();
   recorder.set_coordinate_mode(coordinate_mode);
+  const msm_large_bucket_mode large_bucket_mode =
+      current_msm_large_bucket_mode();
+  const uint32_t large_bucket_chunk_size =
+      current_msm_large_bucket_chunk_size();
+  check_condition(large_bucket_mode == msm_large_bucket_mode::SINGLE_WARP ||
+                      large_bucket_mode ==
+                          msm_large_bucket_mode::CHUNKED_XYZZ ||
+                      large_bucket_mode == msm_large_bucket_mode::AUTO,
+                  "bb::gpu::bn254::msm: invalid large bucket mode");
+  if (large_bucket_mode == msm_large_bucket_mode::CHUNKED_XYZZ) {
+    check_condition(digit_mode == msm_digit_mode::UNSIGNED,
+                    "bb::gpu::bn254::msm: chunked large buckets require "
+                    "unsigned digit mode");
+    check_condition(coordinate_mode == msm_coordinate_mode::XYZZ,
+                    "bb::gpu::bn254::msm: chunked large buckets require XYZZ "
+                    "coordinate mode");
+  }
+  recorder.set_large_bucket_config(large_bucket_mode, large_bucket_chunk_size,
+                                   0);
 
-  const uint32_t num_windows =
+  const uint32_t original_num_windows =
       (NUM_BITS_IN_FIELD + bits_per_slice - 1) / bits_per_slice;
-  const uint32_t remainder = NUM_BITS_IN_FIELD % bits_per_slice;
+  const uint32_t original_remainder = NUM_BITS_IN_FIELD % bits_per_slice;
+  const uint32_t precompute_factor = current_msm_precompute_factor();
+  check_condition(precompute_factor == 1 || precompute_factor == 2 ||
+                      precompute_factor == 4 || precompute_factor == 8,
+                  "bb::gpu::bn254::msm: precompute factor must be 1, 2, 4, "
+                  "or 8");
+  if (precompute_factor > 1) {
+    check_condition(digit_mode == msm_digit_mode::UNSIGNED,
+                    "bb::gpu::bn254::msm: precompute factor requires "
+                    "unsigned digit mode");
+    check_condition(coordinate_mode == msm_coordinate_mode::XYZZ,
+                    "bb::gpu::bn254::msm: precompute factor requires XYZZ "
+                    "coordinate mode");
+  }
+
+  const uint32_t active_num_windows =
+      precompute_factor == 1
+          ? original_num_windows
+          : ceil_div_u32(original_num_windows, precompute_factor);
+  const uint32_t final_remainder =
+      precompute_factor == 1 ? original_remainder : 0;
+  const uint32_t shift_bits = active_num_windows * bits_per_slice;
+  recorder.set_precompute_config(precompute_factor, active_num_windows, 0);
+
   const uint32_t point_start_index =
       static_cast<uint32_t>(point_start_index_size);
+  const size_t srs_size = context.srs_points().size();
+  check_condition(point_start_index_size + num_scalars <= srs_size,
+                  "bb::gpu::bn254::msm: point span exceeds cached SRS");
+  if (precompute_factor > 1) {
+    check_condition(
+        num_scalars <= std::numeric_limits<uint32_t>::max() / precompute_factor,
+        "bb::gpu::bn254::msm: precomputed point indices exceed 32 bits");
+  }
+
   if (digit_mode == msm_digit_mode::SIGNED) {
     check_condition(bits_per_slice <= 20 && bits_per_slice > 0,
                     "bb::gpu::bn254::msm: signed mode requires "
@@ -1410,7 +1855,7 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
                     "to fit in 31 bits");
   }
   const size_t total_entries_size =
-      num_scalars * static_cast<size_t>(num_windows);
+      num_scalars * static_cast<size_t>(original_num_windows);
   check_condition(total_entries_size <= static_cast<size_t>(INT32_MAX),
                   "bb::gpu::bn254::msm: schedule exceeds CUB int range");
   const int total_entries = static_cast<int>(total_entries_size);
@@ -1418,6 +1863,21 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
   const uint32_t bucket_bits = digit_mode == msm_digit_mode::SIGNED
                                    ? bits_per_slice - 1
                                    : bits_per_slice;
+  const affine_g1_t *points_device = context.srs_points().data();
+  uint32_t split_point_start_index = point_start_index;
+  uint32_t split_srs_size = static_cast<uint32_t>(srs_size);
+  if (precompute_factor > 1) {
+    recorder.time(msm_stage::precompute_bases, [&]() {
+      context.ensure_shifted_srs_uploaded(point_start_index, num_scalars,
+                                          shift_bits, precompute_factor);
+    });
+    recorder.set_precompute_config(
+        precompute_factor, active_num_windows,
+        static_cast<uint64_t>(context.shifted_srs_bytes()));
+    points_device = context.shifted_srs_points().data();
+    split_point_start_index = 0;
+    split_srs_size = static_cast<uint32_t>(num_scalars);
+  }
 
   DeviceBuffer<fr_t> scalars_montgomery;
   DeviceBuffer<uint32_t> bucket_indices;
@@ -1431,8 +1891,9 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
 
   copy_and_split_scalars_pipeline(
       scalars, scalars_montgomery, bucket_indices.data(), point_indices.data(),
-      num_scalars, point_start_index, bits_per_slice, num_windows, digit_mode,
-      cuda_stream, recorder);
+      num_scalars, split_point_start_index, bits_per_slice,
+      original_num_windows, digit_mode, precompute_factor, active_num_windows,
+      split_srs_size, cuda_stream, recorder);
 
   DeviceBuffer<std::byte> temp_storage;
   recorder.time(msm_stage::sort_records, [&]() {
@@ -1510,33 +1971,78 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
 
   const uint32_t bucket_stride = uint32_t{1} << bucket_bits;
   const size_t total_dense_buckets =
-      static_cast<size_t>(num_windows) * bucket_stride;
+      static_cast<size_t>(active_num_windows) * bucket_stride;
   DeviceBuffer<affine_g1_t> result_device;
   result_device.resize(1);
 
   const uint32_t init_blocks =
       ceil_div_u32(total_dense_buckets, BUCKET_THREADS);
-  const int average_bucket_size =
+  const int estimated_average_bucket_size =
       static_cast<int>((num_scalars + static_cast<size_t>(bucket_stride) - 1) /
                        static_cast<size_t>(bucket_stride));
-  const int threshold_candidate = 4 * average_bucket_size;
+  const int threshold_candidate = 4 * estimated_average_bucket_size;
   const int large_bucket_threshold =
       threshold_candidate > LARGE_BUCKET_MIN_THRESHOLD
           ? threshold_candidate
           : LARGE_BUCKET_MIN_THRESHOLD;
+  uint32_t large_bucket_segment_size =
+      estimated_average_bucket_size > 0
+          ? static_cast<uint32_t>(estimated_average_bucket_size)
+          : 1;
   recorder.set_large_bucket_threshold(
       static_cast<uint32_t>(large_bucket_threshold));
-  collect_bucket_distribution(
-      sorted_bucket_run_indices.data(), bucket_sizes.data(), num_active_buckets,
-      large_bucket_threshold, bucket_job_blocks, cuda_stream, stream, recorder);
+  const bool chunked_large_bucket_candidate =
+      (large_bucket_mode == msm_large_bucket_mode::CHUNKED_XYZZ ||
+       large_bucket_mode == msm_large_bucket_mode::AUTO) &&
+      coordinate_mode == msm_coordinate_mode::XYZZ &&
+      digit_mode == msm_digit_mode::UNSIGNED &&
+      estimated_average_bucket_size >=
+          LARGE_BUCKET_CHUNKED_MIN_AVERAGE_BUCKET_SIZE &&
+      num_active_buckets >= LARGE_BUCKET_CHUNKED_MIN_ACTIVE_BUCKETS;
+  std::array<uint64_t, BUCKET_STAT_COUNT> bucket_stats =
+      collect_bucket_distribution(
+          sorted_bucket_run_indices.data(), bucket_sizes.data(),
+          num_active_buckets, large_bucket_threshold, large_bucket_segment_size,
+          bucket_job_blocks, cuda_stream, stream, recorder,
+          chunked_large_bucket_candidate);
+  if (chunked_large_bucket_candidate &&
+      bucket_stats[BUCKET_STAT_NORMAL_JOBS] != 0) {
+    const uint64_t normal_jobs = bucket_stats[BUCKET_STAT_NORMAL_JOBS];
+    const uint64_t observed_average_bucket_size =
+        (bucket_stats[BUCKET_STAT_NORMAL_POINTS] + normal_jobs - 1) /
+        normal_jobs;
+    check_condition(observed_average_bucket_size <=
+                        std::numeric_limits<uint32_t>::max(),
+                    "bb::gpu::bn254::msm: observed bucket size exceeds "
+                    "uint32 range");
+    const uint32_t observed_large_bucket_segment_size =
+        observed_average_bucket_size != 0
+            ? static_cast<uint32_t>(observed_average_bucket_size)
+            : large_bucket_segment_size;
+    if (observed_large_bucket_segment_size != large_bucket_segment_size) {
+      large_bucket_segment_size = observed_large_bucket_segment_size;
+      bucket_stats = collect_bucket_distribution(
+          sorted_bucket_run_indices.data(), bucket_sizes.data(),
+          num_active_buckets, large_bucket_threshold, large_bucket_segment_size,
+          bucket_job_blocks, cuda_stream, stream, recorder,
+          chunked_large_bucket_candidate);
+    }
+  }
+  const bool has_large_buckets = bucket_stats[BUCKET_STAT_LARGE_JOBS] != 0;
+  const bool use_chunked_large_buckets =
+      chunked_large_bucket_candidate && has_large_buckets;
+  if (!use_chunked_large_buckets) {
+    recorder.set_large_bucket_config(msm_large_bucket_mode::SINGLE_WARP,
+                                     large_bucket_chunk_size, 0);
+  }
 
   if (coordinate_mode == msm_coordinate_mode::XYZZ) {
     DeviceBuffer<xyzz_g1_t> dense_buckets;
     DeviceBuffer<xyzz_g1_t> bit_sums;
     DeviceBuffer<xyzz_g1_t> window_sums;
     dense_buckets.resize(total_dense_buckets);
-    bit_sums.resize(static_cast<size_t>(num_windows) * bucket_bits);
-    window_sums.resize(num_windows);
+    bit_sums.resize(static_cast<size_t>(active_num_windows) * bucket_bits);
+    window_sums.resize(active_num_windows);
 
     recorder.time(msm_stage::init_buckets, [&]() {
       init_xyzz_bucket_storage_kernel<<<init_blocks, BUCKET_THREADS, 0,
@@ -1545,80 +2051,156 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
       check_cuda(cudaGetLastError(), "init_xyzz_bucket_storage_kernel launch");
     });
 
-    recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
-      if (digit_mode == msm_digit_mode::SIGNED) {
-        accumulate_normal_buckets_signed_xyzz_kernel<<<
-            bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
-            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-            bucket_sizes.data(), bucket_offsets.data(),
-            sorted_point_indices.data(), context.srs_points().data(),
-            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-      } else {
+    if (use_chunked_large_buckets) {
+      check_condition(bucket_stats[BUCKET_STAT_LARGE_CHUNKS] <=
+                          static_cast<uint64_t>(INT32_MAX),
+                      "bb::gpu::bn254::msm: large bucket chunk count exceeds "
+                      "CUB int range");
+      check_condition(bucket_stats[BUCKET_STAT_LARGE_FULL_CHUNKS] <=
+                          static_cast<uint64_t>(INT32_MAX),
+                      "bb::gpu::bn254::msm: large bucket full chunk count "
+                      "exceeds CUB int range");
+      const int num_large_bucket_chunks =
+          static_cast<int>(bucket_stats[BUCKET_STAT_LARGE_CHUNKS]);
+      const int num_large_bucket_full_chunks =
+          static_cast<int>(bucket_stats[BUCKET_STAT_LARGE_FULL_CHUNKS]);
+      const int max_large_bucket_chunk_count = static_cast<int>(
+          (bucket_stats[BUCKET_STAT_MAX_SIZE] + large_bucket_segment_size - 1) /
+          large_bucket_segment_size);
+      DeviceBuffer<int> large_bucket_chunk_counts;
+      DeviceBuffer<int> large_bucket_chunk_offsets;
+      DeviceBuffer<int> large_bucket_full_chunk_counts;
+      DeviceBuffer<int> large_bucket_full_chunk_offsets;
+      DeviceBuffer<int> chunk_bucket_job_indices;
+      DeviceBuffer<int> exec_chunk_partial_indices;
+      DeviceBuffer<int> exec_chunk_point_offsets;
+      DeviceBuffer<int> exec_chunk_point_counts;
+      DeviceBuffer<xyzz_g1_t> chunk_partials;
+      large_bucket_chunk_counts.resize(static_cast<size_t>(num_active_buckets));
+      large_bucket_chunk_offsets.resize(
+          static_cast<size_t>(num_active_buckets));
+      large_bucket_full_chunk_counts.resize(
+          static_cast<size_t>(num_active_buckets));
+      large_bucket_full_chunk_offsets.resize(
+          static_cast<size_t>(num_active_buckets));
+      chunk_bucket_job_indices.resize(
+          static_cast<size_t>(num_large_bucket_chunks));
+      exec_chunk_partial_indices.resize(
+          static_cast<size_t>(num_large_bucket_chunks));
+      exec_chunk_point_offsets.resize(
+          static_cast<size_t>(num_large_bucket_chunks));
+      exec_chunk_point_counts.resize(
+          static_cast<size_t>(num_large_bucket_chunks));
+      chunk_partials.resize(static_cast<size_t>(num_large_bucket_chunks));
+      recorder.set_large_bucket_config(msm_large_bucket_mode::CHUNKED_XYZZ,
+                                       large_bucket_segment_size,
+                                       bucket_stats[BUCKET_STAT_LARGE_CHUNKS]);
+      recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
         accumulate_normal_buckets_xyzz_kernel<<<
             bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
             sorted_bucket_run_indices.data(), single_bucket_indices.data(),
             bucket_sizes.data(), bucket_offsets.data(),
-            sorted_point_indices.data(), context.srs_points().data(),
-            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-      }
-      check_cuda(cudaGetLastError(),
-                 "accumulate_normal_buckets_xyzz_kernel launch");
-    });
+            sorted_point_indices.data(), points_device, dense_buckets.data(),
+            num_active_buckets, large_bucket_threshold);
+        check_cuda(cudaGetLastError(),
+                   "accumulate_normal_buckets_xyzz_kernel launch");
+      });
+      recorder.time(msm_stage::accumulate_large_buckets, [&]() {
+        accumulate_large_buckets_xyzz_chunked(
+            temp_storage, sorted_bucket_run_indices.data(),
+            single_bucket_indices.data(), bucket_sizes.data(),
+            bucket_offsets.data(), sorted_point_indices.data(), points_device,
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold,
+            bucket_job_blocks, large_bucket_segment_size,
+            num_large_bucket_chunks, num_large_bucket_full_chunks,
+            max_large_bucket_chunk_count, large_bucket_chunk_counts,
+            large_bucket_chunk_offsets, large_bucket_full_chunk_counts,
+            large_bucket_full_chunk_offsets, chunk_bucket_job_indices,
+            exec_chunk_partial_indices, exec_chunk_point_offsets,
+            exec_chunk_point_counts, chunk_partials, cuda_stream, stream,
+            recorder);
+        check_cuda(cudaGetLastError(),
+                   "accumulate_large_buckets_xyzz_kernel launch");
+      });
+    } else {
+      recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
+        if (digit_mode == msm_digit_mode::SIGNED) {
+          accumulate_normal_buckets_signed_xyzz_kernel<<<
+              bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+              sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+              bucket_sizes.data(), bucket_offsets.data(),
+              sorted_point_indices.data(), points_device, dense_buckets.data(),
+              num_active_buckets, large_bucket_threshold);
+        } else {
+          accumulate_normal_buckets_xyzz_kernel<<<
+              bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+              sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+              bucket_sizes.data(), bucket_offsets.data(),
+              sorted_point_indices.data(), points_device, dense_buckets.data(),
+              num_active_buckets, large_bucket_threshold);
+        }
+        check_cuda(cudaGetLastError(),
+                   "accumulate_normal_buckets_xyzz_kernel launch");
+      });
 
-    recorder.time(msm_stage::accumulate_large_buckets, [&]() {
-      const uint32_t large_blocks = ceil_div_u32(
-          static_cast<size_t>(num_active_buckets), BUCKET_WARPS_PER_BLOCK);
-      if (digit_mode == msm_digit_mode::SIGNED) {
-        accumulate_large_buckets_signed_xyzz_kernel<<<
-            large_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
-            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-            bucket_sizes.data(), bucket_offsets.data(),
-            sorted_point_indices.data(), context.srs_points().data(),
-            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-      } else {
-        accumulate_large_buckets_xyzz_kernel<<<large_blocks, BUCKET_THREADS, 0,
-                                               cuda_stream>>>(
-            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-            bucket_sizes.data(), bucket_offsets.data(),
-            sorted_point_indices.data(), context.srs_points().data(),
-            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-      }
-      check_cuda(cudaGetLastError(),
-                 "accumulate_large_buckets_xyzz_kernel launch");
-    });
+      recorder.time(msm_stage::accumulate_large_buckets, [&]() {
+        const uint32_t large_blocks = ceil_div_u32(
+            static_cast<size_t>(num_active_buckets), BUCKET_WARPS_PER_BLOCK);
+        if (digit_mode == msm_digit_mode::SIGNED) {
+          accumulate_large_buckets_signed_xyzz_kernel<<<
+              large_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+              sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+              bucket_sizes.data(), bucket_offsets.data(),
+              sorted_point_indices.data(), points_device, dense_buckets.data(),
+              num_active_buckets, large_bucket_threshold);
+        } else {
+          accumulate_large_buckets_xyzz_kernel<<<large_blocks, BUCKET_THREADS,
+                                                 0, cuda_stream>>>(
+              sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+              bucket_sizes.data(), bucket_offsets.data(),
+              sorted_point_indices.data(), points_device, dense_buckets.data(),
+              num_active_buckets, large_bucket_threshold,
+              std::numeric_limits<int>::max());
+        }
+        check_cuda(cudaGetLastError(),
+                   "accumulate_large_buckets_xyzz_kernel launch");
+      });
+    }
 
     if (USE_SERIAL_RUNNING_SUM_REDUCTION_FALLBACK) {
       recorder.time(msm_stage::reduce_buckets, [&]() {
-        reduce_xyzz_windows_running_sum_kernel<<<num_windows, 1, 0,
+        reduce_xyzz_windows_running_sum_kernel<<<active_num_windows, 1, 0,
                                                  cuda_stream>>>(
             dense_buckets.data(), window_sums.data(), bits_per_slice,
-            num_windows);
+            active_num_windows);
         check_cuda(cudaGetLastError(),
                    "reduce_xyzz_windows_running_sum_kernel launch");
       });
     } else {
       recorder.time(msm_stage::reduce_buckets, [&]() {
         for (int bit = static_cast<int>(bucket_bits) - 1; bit >= 0; --bit) {
-          reduce_xyzz_bucket_bit_kernel<<<num_windows, REDUCTION_THREADS, 0,
-                                          cuda_stream>>>(
+          reduce_xyzz_bucket_bit_kernel<<<active_num_windows, REDUCTION_THREADS,
+                                          0, cuda_stream>>>(
               dense_buckets.data(), bit_sums.data(), static_cast<uint32_t>(bit),
-              bucket_bits, num_windows);
+              bucket_bits, active_num_windows);
           check_cuda(cudaGetLastError(),
                      "reduce_xyzz_bucket_bit_kernel launch");
         }
       });
 
-      const uint32_t window_blocks = ceil_div_u32(num_windows, BUCKET_THREADS);
+      const uint32_t window_blocks =
+          ceil_div_u32(active_num_windows, BUCKET_THREADS);
       recorder.time(msm_stage::compose_windows, [&]() {
         if (digit_mode == msm_digit_mode::SIGNED) {
           compose_signed_xyzz_window_sums_kernel<<<
               window_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
               bit_sums.data(), dense_buckets.data(), window_sums.data(),
-              bucket_bits, num_windows);
+              bucket_bits, active_num_windows);
         } else {
           compose_xyzz_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
                                             cuda_stream>>>(
-              bit_sums.data(), window_sums.data(), bits_per_slice, num_windows);
+              bit_sums.data(), window_sums.data(), bits_per_slice,
+              active_num_windows);
         }
         check_cuda(cudaGetLastError(),
                    "compose_xyzz_window_sums_kernel launch");
@@ -1627,8 +2209,8 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
 
     recorder.time(msm_stage::final_accumulation, [&]() {
       final_xyzz_accumulation_kernel<<<1, 32, 0, cuda_stream>>>(
-          window_sums.data(), result_device.data(), bits_per_slice, num_windows,
-          remainder);
+          window_sums.data(), result_device.data(), bits_per_slice,
+          active_num_windows, final_remainder);
       check_cuda(cudaGetLastError(), "final_xyzz_accumulation_kernel launch");
     });
   } else {
@@ -1636,8 +2218,8 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
     DeviceBuffer<jacobian_g1_t> bit_sums;
     DeviceBuffer<jacobian_g1_t> window_sums;
     dense_buckets.resize(total_dense_buckets);
-    bit_sums.resize(static_cast<size_t>(num_windows) * bucket_bits);
-    window_sums.resize(num_windows);
+    bit_sums.resize(static_cast<size_t>(active_num_windows) * bucket_bits);
+    window_sums.resize(active_num_windows);
 
     recorder.time(msm_stage::init_buckets, [&]() {
       init_bucket_storage_kernel<<<init_blocks, BUCKET_THREADS, 0,
@@ -1652,15 +2234,15 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
             bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
             sorted_bucket_run_indices.data(), single_bucket_indices.data(),
             bucket_sizes.data(), bucket_offsets.data(),
-            sorted_point_indices.data(), context.srs_points().data(),
-            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+            sorted_point_indices.data(), points_device, dense_buckets.data(),
+            num_active_buckets, large_bucket_threshold);
       } else {
         accumulate_normal_buckets_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
                                            cuda_stream>>>(
             sorted_bucket_run_indices.data(), single_bucket_indices.data(),
             bucket_sizes.data(), bucket_offsets.data(),
-            sorted_point_indices.data(), context.srs_points().data(),
-            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+            sorted_point_indices.data(), points_device, dense_buckets.data(),
+            num_active_buckets, large_bucket_threshold);
       }
       check_cuda(cudaGetLastError(), "accumulate_normal_buckets_kernel launch");
     });
@@ -1673,49 +2255,52 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
                                                  0, cuda_stream>>>(
             sorted_bucket_run_indices.data(), single_bucket_indices.data(),
             bucket_sizes.data(), bucket_offsets.data(),
-            sorted_point_indices.data(), context.srs_points().data(),
-            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+            sorted_point_indices.data(), points_device, dense_buckets.data(),
+            num_active_buckets, large_bucket_threshold);
       } else {
         accumulate_large_buckets_kernel<<<large_blocks, BUCKET_THREADS, 0,
                                           cuda_stream>>>(
             sorted_bucket_run_indices.data(), single_bucket_indices.data(),
             bucket_sizes.data(), bucket_offsets.data(),
-            sorted_point_indices.data(), context.srs_points().data(),
-            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+            sorted_point_indices.data(), points_device, dense_buckets.data(),
+            num_active_buckets, large_bucket_threshold);
       }
       check_cuda(cudaGetLastError(), "accumulate_large_buckets_kernel launch");
     });
 
     if (USE_SERIAL_RUNNING_SUM_REDUCTION_FALLBACK) {
       recorder.time(msm_stage::reduce_buckets, [&]() {
-        reduce_windows_running_sum_kernel<<<num_windows, 1, 0, cuda_stream>>>(
+        reduce_windows_running_sum_kernel<<<active_num_windows, 1, 0,
+                                            cuda_stream>>>(
             dense_buckets.data(), window_sums.data(), bits_per_slice,
-            num_windows);
+            active_num_windows);
         check_cuda(cudaGetLastError(),
                    "reduce_windows_running_sum_kernel launch");
       });
     } else {
       recorder.time(msm_stage::reduce_buckets, [&]() {
         for (int bit = static_cast<int>(bucket_bits) - 1; bit >= 0; --bit) {
-          reduce_bucket_bit_kernel<<<num_windows, REDUCTION_THREADS, 0,
+          reduce_bucket_bit_kernel<<<active_num_windows, REDUCTION_THREADS, 0,
                                      cuda_stream>>>(
               dense_buckets.data(), bit_sums.data(), static_cast<uint32_t>(bit),
-              bucket_bits, num_windows);
+              bucket_bits, active_num_windows);
           check_cuda(cudaGetLastError(), "reduce_bucket_bit_kernel launch");
         }
       });
 
-      const uint32_t window_blocks = ceil_div_u32(num_windows, BUCKET_THREADS);
+      const uint32_t window_blocks =
+          ceil_div_u32(active_num_windows, BUCKET_THREADS);
       recorder.time(msm_stage::compose_windows, [&]() {
         if (digit_mode == msm_digit_mode::SIGNED) {
           compose_signed_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
                                               cuda_stream>>>(
               bit_sums.data(), dense_buckets.data(), window_sums.data(),
-              bucket_bits, num_windows);
+              bucket_bits, active_num_windows);
         } else {
           compose_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
                                        cuda_stream>>>(
-              bit_sums.data(), window_sums.data(), bits_per_slice, num_windows);
+              bit_sums.data(), window_sums.data(), bits_per_slice,
+              active_num_windows);
         }
         check_cuda(cudaGetLastError(), "compose_window_sums_kernel launch");
       });
@@ -1723,8 +2308,8 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
 
     recorder.time(msm_stage::final_accumulation, [&]() {
       final_accumulation_kernel<<<1, 32, 0, cuda_stream>>>(
-          window_sums.data(), result_device.data(), bits_per_slice, num_windows,
-          remainder);
+          window_sums.data(), result_device.data(), bits_per_slice,
+          active_num_windows, final_remainder);
       check_cuda(cudaGetLastError(), "final_accumulation_kernel launch");
     });
   }
@@ -1806,6 +2391,29 @@ void set_msm_coordinate_mode(const msm_coordinate_mode mode) {
                       mode == msm_coordinate_mode::XYZZ,
                   "bb::gpu::bn254::msm: invalid coordinate mode");
   msm_coordinate_mode_ref() = mode;
+}
+
+void set_msm_precompute_factor(const uint32_t factor) {
+  check_condition(factor == 1 || factor == 2 || factor == 4 || factor == 8,
+                  "bb::gpu::bn254::msm: precompute factor must be 1, 2, 4, "
+                  "or 8");
+  msm_precompute_factor_ref() = factor;
+}
+
+void set_msm_large_bucket_mode(const msm_large_bucket_mode mode) {
+  check_condition(mode == msm_large_bucket_mode::SINGLE_WARP ||
+                      mode == msm_large_bucket_mode::CHUNKED_XYZZ ||
+                      mode == msm_large_bucket_mode::AUTO,
+                  "bb::gpu::bn254::msm: invalid large bucket mode");
+  msm_large_bucket_mode_ref() = mode;
+}
+
+void set_msm_large_bucket_chunk_size(const uint32_t points_per_chunk) {
+  check_condition(points_per_chunk >= 64 && points_per_chunk <= 2048 &&
+                      points_per_chunk % WARP_THREADS == 0,
+                  "bb::gpu::bn254::msm: large bucket chunk size must be a "
+                  "multiple of 32 in [64, 2048]");
+  msm_large_bucket_chunk_size_ref() = points_per_chunk;
 }
 
 } // namespace bb::gpu::bn254

@@ -304,6 +304,111 @@ BB_GPU_HD inline void xyzz_mixed_add_zz1_equals_one(xyzz_g1_t &lhs,
   lhs.x = x3;
 }
 
+BB_GPU_HD inline void xyzz_mixed_add_assume_finite(xyzz_g1_t &lhs,
+                                                   const affine_g1_t &rhs) {
+  fq_t p = rhs.x * lhs.zz;
+  p = p - lhs.x;
+  fq_t r = rhs.y * lhs.zzz;
+  r = r - lhs.y;
+
+  if (p.is_zero()) {
+    if (r.is_zero()) {
+      self_double(lhs);
+    } else {
+      lhs = xyzz_infinity();
+    }
+    return;
+  }
+
+  fq_t pp = p.sqr();
+  fq_t ppp = p * pp;
+  lhs.zz = lhs.zz * pp;
+  lhs.zzz = lhs.zzz * ppp;
+  fq_t q = lhs.x * pp;
+  fq_t x3 = r.sqr();
+  x3 = x3 - ppp;
+  pp = q + q;
+  x3 = x3 - pp;
+  q = q - x3;
+  q = r * q;
+  ppp = lhs.y * ppp;
+  lhs.y = q - ppp;
+  lhs.x = x3;
+}
+
+BB_GPU_HD inline void
+xyzz_mixed_add_zz1_equals_one_assume_finite(xyzz_g1_t &lhs,
+                                            const affine_g1_t &rhs) {
+  fq_t p = rhs.x - lhs.x;
+  fq_t r = rhs.y - lhs.y;
+  if (p.is_zero()) {
+    if (r.is_zero()) {
+      self_double(lhs);
+    } else {
+      lhs = xyzz_infinity();
+    }
+    return;
+  }
+
+  fq_t pp = p.sqr();
+  fq_t ppp = p * pp;
+  lhs.zz = pp;
+  lhs.zzz = ppp;
+  fq_t q = lhs.x * pp;
+  fq_t x3 = r.sqr();
+  x3 = x3 - ppp;
+  pp = q + q;
+  x3 = x3 - pp;
+  q = q - x3;
+  q = r * q;
+  ppp = lhs.y * ppp;
+  lhs.y = q - ppp;
+  lhs.x = x3;
+}
+
+BB_GPU_HD inline void xyzz_mixed_add_unchecked(xyzz_g1_t &lhs,
+                                               const affine_g1_t &rhs) {
+  fq_t p = rhs.x * lhs.zz;
+  p = p - lhs.x;
+  fq_t r = rhs.y * lhs.zzz;
+  r = r - lhs.y;
+  fq_t pp = p.sqr();
+  fq_t ppp = p * pp;
+  lhs.zz = lhs.zz * pp;
+  lhs.zzz = lhs.zzz * ppp;
+  fq_t q = lhs.x * pp;
+  fq_t x3 = r.sqr();
+  x3 = x3 - ppp;
+  pp = q + q;
+  x3 = x3 - pp;
+  q = q - x3;
+  q = r * q;
+  ppp = lhs.y * ppp;
+  lhs.y = q - ppp;
+  lhs.x = x3;
+}
+
+BB_GPU_HD inline void
+xyzz_mixed_add_zz1_equals_one_unchecked(xyzz_g1_t &lhs,
+                                        const affine_g1_t &rhs) {
+  fq_t p = rhs.x - lhs.x;
+  fq_t r = rhs.y - lhs.y;
+  fq_t pp = p.sqr();
+  fq_t ppp = p * pp;
+  lhs.zz = pp;
+  lhs.zzz = ppp;
+  fq_t q = lhs.x * pp;
+  fq_t x3 = r.sqr();
+  x3 = x3 - ppp;
+  pp = q + q;
+  x3 = x3 - pp;
+  q = q - x3;
+  q = r * q;
+  ppp = lhs.y * ppp;
+  lhs.y = q - ppp;
+  lhs.x = x3;
+}
+
 BB_GPU_HD inline jacobian_g1_t chained_mixed_add(const affine_g1_t *points,
                                                  const size_t num_points) {
   size_t offset = 0;
@@ -430,6 +535,47 @@ BB_GPU_HD inline xyzz_g1_t chained_xyzz_mixed_add_indexed_nonzero(
   xyzz_g1_t accumulator;
   chained_xyzz_mixed_add_indexed_nonzero(accumulator, points, point_indices,
                                          start, count, first_offset, step);
+  return accumulator;
+}
+
+BB_GPU_HD inline xyzz_g1_t
+chained_xyzz_mixed_add_indexed_nonzero_assume_finite(
+    const affine_g1_t *points, const uint32_t *point_indices, const int start,
+    const int count, const int first_offset = 0, const int step = 1) {
+  if (first_offset >= count) {
+    return xyzz_infinity();
+  }
+
+  int offset = first_offset;
+  xyzz_g1_t accumulator = to_xyzz(points[point_indices[start + offset]]);
+  offset += step;
+  if (offset < count) {
+    xyzz_mixed_add_zz1_equals_one_assume_finite(
+        accumulator, points[point_indices[start + offset]]);
+    offset += step;
+  }
+  for (; offset < count; offset += step) {
+    xyzz_mixed_add_assume_finite(accumulator,
+                                 points[point_indices[start + offset]]);
+  }
+  return accumulator;
+}
+
+BB_GPU_HD inline xyzz_g1_t chained_xyzz_mixed_add_indexed_nonzero_unchecked(
+    const affine_g1_t *points, const uint32_t *point_indices, const int start,
+    const int count, const int first_offset = 0, const int step = 1) {
+  int offset = first_offset;
+  xyzz_g1_t accumulator = to_xyzz(points[point_indices[start + offset]]);
+  offset += step;
+  if (offset < count) {
+    xyzz_mixed_add_zz1_equals_one_unchecked(
+        accumulator, points[point_indices[start + offset]]);
+    offset += step;
+  }
+  for (; offset < count; offset += step) {
+    xyzz_mixed_add_unchecked(accumulator,
+                             points[point_indices[start + offset]]);
+  }
   return accumulator;
 }
 

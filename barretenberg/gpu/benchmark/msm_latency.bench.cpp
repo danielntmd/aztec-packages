@@ -59,7 +59,37 @@ public:
 
   ~ScopedMsmCoordinateMode() {
     bb::gpu::bn254::set_msm_coordinate_mode(
-        bb::gpu::bn254::msm_coordinate_mode::JACOBIAN);
+        bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  }
+};
+
+class ScopedMsmPrecomputeFactor {
+public:
+  explicit ScopedMsmPrecomputeFactor(const uint32_t factor) {
+    bb::gpu::bn254::set_msm_precompute_factor(factor);
+  }
+
+  ScopedMsmPrecomputeFactor(const ScopedMsmPrecomputeFactor &) = delete;
+  ScopedMsmPrecomputeFactor &
+  operator=(const ScopedMsmPrecomputeFactor &) = delete;
+
+  ~ScopedMsmPrecomputeFactor() { bb::gpu::bn254::set_msm_precompute_factor(1); }
+};
+
+class ScopedMsmLargeBucketMode {
+public:
+  explicit ScopedMsmLargeBucketMode(
+      const bb::gpu::bn254::msm_large_bucket_mode mode) {
+    bb::gpu::bn254::set_msm_large_bucket_mode(mode);
+  }
+
+  ScopedMsmLargeBucketMode(const ScopedMsmLargeBucketMode &) = delete;
+  ScopedMsmLargeBucketMode &
+  operator=(const ScopedMsmLargeBucketMode &) = delete;
+
+  ~ScopedMsmLargeBucketMode() {
+    bb::gpu::bn254::set_msm_large_bucket_mode(
+        bb::gpu::bn254::msm_large_bucket_mode::AUTO);
   }
 };
 
@@ -200,6 +230,20 @@ void add_profile_counters(benchmark::State &state,
       benchmark::Counter(totals.digit_mode / iterations);
   state.counters["coord_mode"] =
       benchmark::Counter(totals.coordinate_mode / iterations);
+  state.counters["precompute_factor"] =
+      benchmark::Counter(totals.precompute_factor / iterations);
+  state.counters["folded_windows"] =
+      benchmark::Counter(totals.folded_windows / iterations);
+  state.counters["precompute_bases_ms"] =
+      totals.precompute_bases_ms / iterations;
+  state.counters["precomputed_srs_bytes"] =
+      benchmark::Counter(totals.precomputed_srs_bytes / iterations);
+  state.counters["large_bucket_mode"] =
+      benchmark::Counter(totals.large_bucket_mode / iterations);
+  state.counters["large_bucket_chunk_size"] =
+      benchmark::Counter(totals.large_bucket_chunk_size / iterations);
+  state.counters["large_bucket_chunks"] =
+      benchmark::Counter(totals.large_bucket_chunk_count / iterations);
   state.counters["split_ms"] = totals.split_scalars_ms / iterations;
   state.counters["sort_records_ms"] = totals.sort_records_ms / iterations;
   state.counters["rle_ms"] = totals.encode_buckets_ms / iterations;
@@ -277,6 +321,7 @@ void add_profile(bb::gpu::bn254::msm_profile &totals,
   totals.scalar_chunk1_copy_ms += profile.scalar_chunk1_copy_ms;
   totals.scalar_chunk1_split_ms += profile.scalar_chunk1_split_ms;
   totals.split_scalars_ms += profile.split_scalars_ms;
+  totals.precompute_bases_ms += profile.precompute_bases_ms;
   totals.sort_records_ms += profile.sort_records_ms;
   totals.encode_buckets_ms += profile.encode_buckets_ms;
   totals.scan_bucket_offsets_ms += profile.scan_bucket_offsets_ms;
@@ -300,6 +345,12 @@ void add_profile(bb::gpu::bn254::msm_profile &totals,
       profile.scalar_split_first_chunk_percent;
   totals.digit_mode += profile.digit_mode;
   totals.coordinate_mode += profile.coordinate_mode;
+  totals.precompute_factor += profile.precompute_factor;
+  totals.folded_windows += profile.folded_windows;
+  totals.precomputed_srs_bytes += profile.precomputed_srs_bytes;
+  totals.large_bucket_mode += profile.large_bucket_mode;
+  totals.large_bucket_chunk_size += profile.large_bucket_chunk_size;
+  totals.large_bucket_chunk_count += profile.large_bucket_chunk_count;
   totals.normal_bucket_count += profile.normal_bucket_count;
   totals.large_bucket_count += profile.large_bucket_count;
   totals.normal_bucket_point_count += profile.normal_bucket_point_count;
@@ -444,6 +495,80 @@ void bench_gpu_single_msm_profiled_coordinate_mode(benchmark::State &state) {
   const uint32_t bits_per_slice = auto_bits_per_slice(num_points);
 
   const ScopedMsmCoordinateMode scoped_coordinate_mode(coordinate_mode);
+  bb::gpu::bn254::msm_profile totals{};
+  for (auto _ : state) {
+    bb::gpu::bn254::msm_profile profile{};
+    auto result = gpu_profiled_msm(*input, bits_per_slice, &profile);
+    benchmark::DoNotOptimize(result);
+
+    add_profile(totals, profile);
+  }
+
+  add_profile_counters(state, totals);
+  assert_correctness(*input, bits_per_slice, static_cast<int>(state.range(0)));
+}
+
+void bench_gpu_single_msm_profiled_precompute_factor(benchmark::State &state) {
+  if (!cuda_available()) {
+    state.SkipWithError("No CUDA-capable device is available");
+    return;
+  }
+
+  const size_t num_points = size_t{1} << state.range(0);
+  const auto precompute_factor = static_cast<uint32_t>(state.range(1));
+  auto input = make_input(num_points);
+  const uint32_t bits_per_slice = auto_bits_per_slice(num_points);
+
+  const ScopedMsmCoordinateMode scoped_coordinate_mode(
+      bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  const ScopedMsmDigitMode scoped_digit_mode(
+      bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  const ScopedMsmPrecomputeFactor scoped_precompute_factor(precompute_factor);
+
+  bb::gpu::bn254::msm_profile warmup_profile{};
+  auto warmup_result =
+      gpu_profiled_msm(*input, bits_per_slice, &warmup_profile);
+  benchmark::DoNotOptimize(warmup_result);
+
+  bb::gpu::bn254::msm_profile totals{};
+  for (auto _ : state) {
+    bb::gpu::bn254::msm_profile profile{};
+    auto result = gpu_profiled_msm(*input, bits_per_slice, &profile);
+    benchmark::DoNotOptimize(result);
+
+    add_profile(totals, profile);
+  }
+
+  add_profile_counters(state, totals);
+  assert_correctness(*input, bits_per_slice, static_cast<int>(state.range(0)));
+}
+
+void bench_gpu_single_msm_profiled_precompute_factor_large_bucket_mode(
+    benchmark::State &state) {
+  if (!cuda_available()) {
+    state.SkipWithError("No CUDA-capable device is available");
+    return;
+  }
+
+  const size_t num_points = size_t{1} << state.range(0);
+  const auto precompute_factor = static_cast<uint32_t>(state.range(1));
+  const auto large_bucket_mode =
+      static_cast<bb::gpu::bn254::msm_large_bucket_mode>(state.range(2));
+  auto input = make_input(num_points);
+  const uint32_t bits_per_slice = auto_bits_per_slice(num_points);
+
+  const ScopedMsmCoordinateMode scoped_coordinate_mode(
+      bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  const ScopedMsmDigitMode scoped_digit_mode(
+      bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  const ScopedMsmPrecomputeFactor scoped_precompute_factor(precompute_factor);
+  const ScopedMsmLargeBucketMode scoped_large_bucket_mode(large_bucket_mode);
+
+  bb::gpu::bn254::msm_profile warmup_profile{};
+  auto warmup_result =
+      gpu_profiled_msm(*input, bits_per_slice, &warmup_profile);
+  benchmark::DoNotOptimize(warmup_result);
+
   bb::gpu::bn254::msm_profile totals{};
   for (auto _ : state) {
     bb::gpu::bn254::msm_profile profile{};
@@ -610,6 +735,42 @@ BENCHMARK(bench_gpu_single_msm_profiled_coordinate_mode)
     ->Args({22, 1})
     ->Args({24, 0})
     ->Args({24, 1})
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(bench_gpu_single_msm_profiled_precompute_factor)
+    ->Name("BN254/GPU/single_msm_profiled_precompute_factor")
+    ->Args({20, 1})
+    ->Args({20, 2})
+    ->Args({20, 4})
+    ->Args({20, 8})
+    ->Args({22, 1})
+    ->Args({22, 2})
+    ->Args({22, 4})
+    ->Args({22, 8})
+    ->Args({24, 1})
+    ->Args({24, 2})
+    ->Args({24, 4})
+    ->Args({24, 8})
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(bench_gpu_single_msm_profiled_precompute_factor_large_bucket_mode)
+    ->Name("BN254/GPU/single_msm_profiled_precompute_factor_large_bucket_mode")
+    ->Args({20, 2, 0})
+    ->Args({20, 2, 1})
+    ->Args({20, 4, 0})
+    ->Args({20, 4, 1})
+    ->Args({20, 8, 0})
+    ->Args({20, 8, 1})
+    ->Args({22, 2, 0})
+    ->Args({22, 2, 1})
+    ->Args({22, 4, 0})
+    ->Args({22, 4, 1})
+    ->Args({22, 8, 0})
+    ->Args({22, 8, 1})
+    ->Args({24, 2, 0})
+    ->Args({24, 2, 1})
+    ->Args({24, 4, 0})
+    ->Args({24, 4, 1})
+    ->Args({24, 8, 0})
+    ->Args({24, 8, 1})
     ->Unit(benchmark::kMillisecond);
 BENCHMARK(bench_gpu_all_sizes_profiled)
     ->Name("BN254/GPU/all_sizes_profiled")

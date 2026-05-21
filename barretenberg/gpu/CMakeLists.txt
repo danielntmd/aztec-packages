@@ -155,6 +155,29 @@ if(NOT FUZZING)
             CUDA::cudart
             ${BB_GPU_STDCXX_LIBRARY})
 
+    if(ICICLE_V28_ROOT AND EXISTS "${ICICLE_V28_ROOT}/icicle/src/msm/msm.cu")
+        add_executable(gpu_msm_large_bucket_compare_bench
+            benchmark/msm_large_bucket_compare.bench.cpp
+            benchmark/msm_accumulation_kernels.cu
+            benchmark/msm_icicle_large_bucket_kernels.cu)
+        target_include_directories(gpu_msm_large_bucket_compare_bench
+            PRIVATE
+                "${BB_GPU_INCLUDE_DIR}"
+                "${BB_GPU_CPP_SOURCE_DIR}"
+                "${ICICLE_V28_ROOT}/include"
+                "${ICICLE_V28_ROOT}/icicle/include"
+                "${ICICLE_V28_ROOT}/icicle/src")
+        target_compile_definitions(gpu_msm_large_bucket_compare_bench
+            PRIVATE
+                FIELD_ID=1
+                CURVE_ID=1)
+        target_link_libraries(gpu_msm_large_bucket_compare_bench
+            PRIVATE
+                benchmark::benchmark
+                CUDA::cudart
+                ${BB_GPU_STDCXX_LIBRARY})
+    endif()
+
     add_executable(gpu_field_arithmetic_bench
         benchmark/field_arithmetic.bench.cpp
         benchmark/field_arithmetic_kernels.cu)

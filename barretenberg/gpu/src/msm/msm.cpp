@@ -55,11 +55,22 @@ curve::BN254::AffineElement to_cpu_point(const affine_g1_t &point) {
                                     : out;
 }
 
+void validate_srs_points_are_finite(
+    std::span<const curve::BN254::AffineElement> srs_points) {
+  for (const auto &point : srs_points) {
+    if (point.is_point_at_infinity() || !point.on_curve()) {
+      throw_or_abort(
+          "bb::gpu::bn254::init: SRS points must be finite on-curve points");
+    }
+  }
+}
+
 } // namespace
 
 void init(std::span<const curve::BN254::AffineElement> srs_points) {
   static_assert(sizeof(affine_g1_t) == sizeof(curve::BN254::AffineElement));
   static_assert(alignof(affine_g1_t) == alignof(curve::BN254::AffineElement));
+  validate_srs_points_are_finite(srs_points);
   bb::gpu::default_context().ensure_srs_uploaded(
       {reinterpret_cast<const affine_g1_t *>(srs_points.data()),
        srs_points.size()});

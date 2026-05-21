@@ -64,6 +64,9 @@ void run_g1_chained_mixed_add(const affine_g1_t *points, size_t num_points,
                               affine_g1_t &output);
 void run_g1_chained_xyzz_mixed_add(const affine_g1_t *points, size_t num_points,
                                    affine_g1_t &output);
+void run_g1_chained_xyzz_mixed_add_unchecked(const affine_g1_t *points,
+                                             size_t num_points,
+                                             affine_g1_t &output);
 const char *cuda_device_status();
 
 } // namespace bb::gpu::bn254::testing

@@ -29,6 +29,15 @@ enum class bench_case : int {
   JACOBIAN_UNCHECKED_LARGE = 7,
   XYZZ_UNCHECKED_LARGE = 8,
   PROJECTIVE_RCB_LARGE = 9,
+  XYZZ_ASSUME_FINITE_NORMAL = 10,
+  XYZZ_ASSUME_FINITE_LARGE = 11,
+};
+
+enum class segmented_bench_case : int {
+  ACCUMULATE_KERNEL_ONLY = 0,
+  SUBPIPELINE = 1,
+  TREE_ACCUMULATE_KERNEL_ONLY = 2,
+  TREE_SUBPIPELINE = 3,
 };
 
 struct projective_t {
@@ -118,48 +127,6 @@ jacobian_mixed_add_unchecked(jacobian_t &lhs, const affine_t &rhs) {
   t1 = t1 + t1;
   t3 = t2 * t3;
   lhs.y = t3 - t1;
-}
-
-__device__ __forceinline__ void
-xyzz_mixed_add_zz1_equals_one_unchecked(xyzz_t &lhs, const affine_t &rhs) {
-  fq_t p = rhs.x - lhs.x;
-  fq_t r = rhs.y - lhs.y;
-  fq_t pp = p.sqr();
-  fq_t ppp = p * pp;
-  lhs.zz = pp;
-  lhs.zzz = ppp;
-  fq_t q = lhs.x * pp;
-  fq_t x3 = r.sqr();
-  x3 = x3 - ppp;
-  pp = q + q;
-  x3 = x3 - pp;
-  q = q - x3;
-  q = r * q;
-  ppp = lhs.y * ppp;
-  lhs.y = q - ppp;
-  lhs.x = x3;
-}
-
-__device__ __forceinline__ void xyzz_mixed_add_unchecked(xyzz_t &lhs,
-                                                         const affine_t &rhs) {
-  fq_t p = rhs.x * lhs.zz;
-  p = p - lhs.x;
-  fq_t r = rhs.y * lhs.zzz;
-  r = r - lhs.y;
-  fq_t pp = p.sqr();
-  fq_t ppp = p * pp;
-  lhs.zz = lhs.zz * pp;
-  lhs.zzz = lhs.zzz * ppp;
-  fq_t q = lhs.x * pp;
-  fq_t x3 = r.sqr();
-  x3 = x3 - ppp;
-  pp = q + q;
-  x3 = x3 - pp;
-  q = q - x3;
-  q = r * q;
-  ppp = lhs.y * ppp;
-  lhs.y = q - ppp;
-  lhs.x = x3;
 }
 
 __device__ __forceinline__ void projective_rcb_mixed_add(projective_t &lhs,
@@ -254,20 +221,16 @@ __device__ jacobian_t chained_jacobian_mixed_add_unchecked(
 __device__ xyzz_t chained_xyzz_mixed_add_unchecked(
     const affine_t *points, const uint32_t *point_indices, const int start,
     const int count, const int first_offset = 0, const int step = 1) {
-  int offset = first_offset;
-  xyzz_t accumulator =
-      bb::gpu::bn254::to_xyzz(points[point_indices[start + offset]]);
-  offset += step;
-  if (offset < count) {
-    xyzz_mixed_add_zz1_equals_one_unchecked(
-        accumulator, points[point_indices[start + offset]]);
-    offset += step;
-  }
-  for (; offset < count; offset += step) {
-    xyzz_mixed_add_unchecked(accumulator,
-                             points[point_indices[start + offset]]);
-  }
-  return accumulator;
+  return bb::gpu::bn254::chained_xyzz_mixed_add_indexed_nonzero_unchecked(
+      points, point_indices, start, count, first_offset, step);
+}
+
+__device__ xyzz_t chained_xyzz_mixed_add_assume_finite(
+    const affine_t *points, const uint32_t *point_indices, const int start,
+    const int count, const int first_offset = 0, const int step = 1) {
+  using bb::gpu::bn254::chained_xyzz_mixed_add_indexed_nonzero_assume_finite;
+  return chained_xyzz_mixed_add_indexed_nonzero_assume_finite(
+      points, point_indices, start, count, first_offset, step);
 }
 
 __device__ projective_t chained_projective_rcb_mixed_add(
@@ -377,6 +340,23 @@ __global__ void accumulate_normal_xyzz_unchecked_kernel(
   const int start = bucket_offsets[run_idx];
   buckets[unique_bucket_indices[run_idx]] =
       chained_xyzz_mixed_add_unchecked(points, point_indices, start, count);
+}
+
+__global__ void accumulate_normal_xyzz_assume_finite_kernel(
+    const int *bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *bucket_sizes, const int *bucket_offsets,
+    const uint32_t *point_indices, const affine_t *points, xyzz_t *buckets,
+    const int num_buckets) {
+  const int job_idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (job_idx >= num_buckets) {
+    return;
+  }
+
+  const int run_idx = bucket_run_indices[job_idx];
+  const int count = bucket_sizes[run_idx];
+  const int start = bucket_offsets[run_idx];
+  buckets[unique_bucket_indices[run_idx]] =
+      chained_xyzz_mixed_add_assume_finite(points, point_indices, start, count);
 }
 
 __global__ void accumulate_normal_projective_rcb_kernel(
@@ -507,6 +487,43 @@ __global__ void accumulate_large_xyzz_unchecked_kernel(
   }
 }
 
+__global__ void accumulate_large_xyzz_assume_finite_kernel(
+    const int *bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *bucket_sizes, const int *bucket_offsets,
+    const uint32_t *point_indices, const affine_t *points, xyzz_t *buckets,
+    const int num_buckets) {
+  const uint32_t warp_idx = threadIdx.x / WARP_THREADS;
+  const uint32_t lane_idx = threadIdx.x % WARP_THREADS;
+  const int job_idx =
+      static_cast<int>(blockIdx.x * BUCKET_WARPS_PER_BLOCK + warp_idx);
+  if (job_idx >= num_buckets) {
+    return;
+  }
+
+  const int run_idx = bucket_run_indices[job_idx];
+  const int count = bucket_sizes[run_idx];
+  const int start = bucket_offsets[run_idx];
+  xyzz_t local = chained_xyzz_mixed_add_assume_finite(
+      points, point_indices, start, count, static_cast<int>(lane_idx),
+      WARP_THREADS);
+
+  __shared__ xyzz_t partials[BUCKET_THREADS];
+  partials[threadIdx.x] = local;
+  __syncwarp();
+
+  for (uint32_t stride = WARP_THREADS >> 1; stride > 0; stride >>= 1) {
+    if (lane_idx < stride) {
+      partials[threadIdx.x] = bb::gpu::bn254::xyzz_add(
+          partials[threadIdx.x], partials[threadIdx.x + stride]);
+    }
+    __syncwarp();
+  }
+
+  if (lane_idx == 0) {
+    buckets[unique_bucket_indices[run_idx]] = partials[threadIdx.x];
+  }
+}
+
 __global__ void accumulate_large_projective_rcb_kernel(
     const int *bucket_run_indices, const uint32_t *unique_bucket_indices,
     const int *bucket_sizes, const int *bucket_offsets,
@@ -581,6 +598,131 @@ __global__ void accumulate_large_xyzz_kernel(
   }
 }
 
+__global__ void setup_segment_jobs_kernel(int *segment_point_offsets,
+                                          int *segment_point_counts,
+                                          const int num_buckets,
+                                          const int bucket_size,
+                                          const int segment_size) {
+  const int segment_idx =
+      static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  const int segments_per_bucket =
+      ((bucket_size + segment_size - 1) / segment_size) + 1;
+  const int num_segments = num_buckets * segments_per_bucket;
+  if (segment_idx >= num_segments) {
+    return;
+  }
+
+  const int bucket_idx = segment_idx / segments_per_bucket;
+  const int local_segment_idx =
+      segment_idx - (bucket_idx * segments_per_bucket);
+  const int local_offset = local_segment_idx * segment_size;
+  const int remaining = bucket_size - local_offset;
+  segment_point_offsets[segment_idx] =
+      (bucket_idx * bucket_size) + local_offset;
+  segment_point_counts[segment_idx] =
+      remaining <= 0 ? 0
+                     : (remaining < segment_size ? remaining : segment_size);
+}
+
+__global__ void accumulate_large_xyzz_segments_kernel(
+    const int *segment_point_offsets, const int *segment_point_counts,
+    const uint32_t *point_indices, const affine_t *points,
+    xyzz_t *segment_partials, const int num_segments) {
+  const int segment_idx =
+      static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (segment_idx >= num_segments) {
+    return;
+  }
+
+  segment_partials[segment_idx] =
+      bb::gpu::bn254::chained_xyzz_mixed_add_indexed_nonzero(
+          points, point_indices, segment_point_offsets[segment_idx],
+          segment_point_counts[segment_idx]);
+}
+
+__global__ void reduce_large_xyzz_segment_partials_kernel(
+    const xyzz_t *segment_partials, xyzz_t *buckets, const int num_buckets,
+    const int segments_per_bucket) {
+  const int bucket_idx =
+      static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (bucket_idx >= num_buckets) {
+    return;
+  }
+
+  xyzz_t accumulator = bb::gpu::bn254::xyzz_infinity();
+  const int segment_offset = bucket_idx * segments_per_bucket;
+  for (int i = 0; i < segments_per_bucket; ++i) {
+    accumulator = bb::gpu::bn254::xyzz_add(
+        accumulator, segment_partials[segment_offset + i]);
+  }
+  buckets[bucket_idx] = accumulator;
+}
+
+__global__ void setup_segment_counts_kernel(int *segment_counts,
+                                            const int num_buckets,
+                                            const int segments_per_bucket) {
+  const int bucket_idx =
+      static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (bucket_idx < num_buckets) {
+    segment_counts[bucket_idx] = segments_per_bucket;
+  }
+}
+
+__global__ void reduce_large_xyzz_segment_partials_tree_kernel(
+    int *segment_counts, xyzz_t *segment_partials, const int num_segments,
+    const int segments_per_bucket) {
+  const int segment_idx =
+      static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (segment_idx >= num_segments) {
+    return;
+  }
+
+  const int bucket_idx = segment_idx / segments_per_bucket;
+  const int count = segment_counts[bucket_idx];
+  if (count <= 1) {
+    return;
+  }
+
+  const int segment_offset = bucket_idx * segments_per_bucket;
+  const int local_idx = segment_idx - segment_offset;
+  if (local_idx >= count) {
+    return;
+  }
+
+  const int upper_offset = (count + 1) >> 1;
+  if (local_idx < (count >> 1)) {
+    segment_partials[segment_idx] = bb::gpu::bn254::xyzz_add(
+        segment_partials[segment_idx],
+        segment_partials[segment_offset + upper_offset + local_idx]);
+  }
+}
+
+__global__ void update_segment_counts_kernel(int *segment_counts,
+                                             const int num_buckets) {
+  const int bucket_idx =
+      static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (bucket_idx >= num_buckets) {
+    return;
+  }
+
+  const int count = segment_counts[bucket_idx];
+  if (count > 1) {
+    segment_counts[bucket_idx] = (count + 1) >> 1;
+  }
+}
+
+__global__ void scatter_large_xyzz_segment_partials_kernel(
+    const int *segment_counts, const xyzz_t *segment_partials, xyzz_t *buckets,
+    const int num_buckets, const int segments_per_bucket) {
+  const int bucket_idx =
+      static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (bucket_idx >= num_buckets || segment_counts[bucket_idx] == 0) {
+    return;
+  }
+
+  buckets[bucket_idx] = segment_partials[bucket_idx * segments_per_bucket];
+}
+
 float run_accumulation_benchmark(const bench_case accumulation_case,
                                  const int log_buckets, const int bucket_size) {
   const int num_buckets = 1 << log_buckets;
@@ -605,7 +747,9 @@ float run_accumulation_benchmark(const bench_case accumulation_case,
   if (accumulation_case == bench_case::XYZZ_NORMAL ||
       accumulation_case == bench_case::XYZZ_LARGE ||
       accumulation_case == bench_case::XYZZ_UNCHECKED_NORMAL ||
-      accumulation_case == bench_case::XYZZ_UNCHECKED_LARGE) {
+      accumulation_case == bench_case::XYZZ_UNCHECKED_LARGE ||
+      accumulation_case == bench_case::XYZZ_ASSUME_FINITE_NORMAL ||
+      accumulation_case == bench_case::XYZZ_ASSUME_FINITE_LARGE) {
     bucket_element_size = sizeof(xyzz_t);
   } else if (accumulation_case == bench_case::PROJECTIVE_RCB_NORMAL ||
              accumulation_case == bench_case::PROJECTIVE_RCB_LARGE) {
@@ -654,6 +798,13 @@ float run_accumulation_benchmark(const bench_case accumulation_case,
           bucket_offsets, point_indices, points, static_cast<xyzz_t *>(buckets),
           num_buckets);
       break;
+    case bench_case::XYZZ_ASSUME_FINITE_NORMAL:
+      accumulate_normal_xyzz_assume_finite_kernel<<<normal_blocks,
+                                                    THREADS_PER_BLOCK>>>(
+          bucket_run_indices, unique_bucket_indices, bucket_sizes,
+          bucket_offsets, point_indices, points, static_cast<xyzz_t *>(buckets),
+          num_buckets);
+      break;
     case bench_case::PROJECTIVE_RCB_NORMAL:
       accumulate_normal_projective_rcb_kernel<<<normal_blocks,
                                                 THREADS_PER_BLOCK>>>(
@@ -686,6 +837,13 @@ float run_accumulation_benchmark(const bench_case accumulation_case,
           bucket_offsets, point_indices, points, static_cast<xyzz_t *>(buckets),
           num_buckets);
       break;
+    case bench_case::XYZZ_ASSUME_FINITE_LARGE:
+      accumulate_large_xyzz_assume_finite_kernel<<<large_blocks,
+                                                   BUCKET_THREADS>>>(
+          bucket_run_indices, unique_bucket_indices, bucket_sizes,
+          bucket_offsets, point_indices, points, static_cast<xyzz_t *>(buckets),
+          num_buckets);
+      break;
     case bench_case::PROJECTIVE_RCB_LARGE:
       accumulate_large_projective_rcb_kernel<<<large_blocks, BUCKET_THREADS>>>(
           bucket_run_indices, unique_bucket_indices, bucket_sizes,
@@ -710,6 +868,135 @@ float run_accumulation_benchmark(const bench_case accumulation_case,
   return elapsed_ms;
 }
 
+float run_segmented_accumulation_benchmark(
+    const segmented_bench_case benchmark_case, const int log_buckets,
+    const int bucket_size, const int segment_size) {
+  const int num_buckets = 1 << log_buckets;
+  const int segments_per_bucket =
+      ((bucket_size + segment_size - 1) / segment_size) + 1;
+  const int num_segments = num_buckets * segments_per_bucket;
+  const size_t num_points = static_cast<size_t>(num_buckets) * bucket_size;
+
+  affine_t *points = nullptr;
+  uint32_t *point_indices = nullptr;
+  int *bucket_run_indices = nullptr;
+  uint32_t *unique_bucket_indices = nullptr;
+  int *bucket_sizes = nullptr;
+  int *bucket_offsets = nullptr;
+  int *segment_point_offsets = nullptr;
+  int *segment_point_counts = nullptr;
+  int *segment_counts = nullptr;
+  xyzz_t *segment_partials = nullptr;
+  xyzz_t *buckets = nullptr;
+
+  check_cuda(cudaMalloc(&points, sizeof(affine_t) * num_points));
+  check_cuda(cudaMalloc(&point_indices, sizeof(uint32_t) * num_points));
+  check_cuda(cudaMalloc(&bucket_run_indices, sizeof(int) * num_buckets));
+  check_cuda(
+      cudaMalloc(&unique_bucket_indices, sizeof(uint32_t) * num_buckets));
+  check_cuda(cudaMalloc(&bucket_sizes, sizeof(int) * num_buckets));
+  check_cuda(cudaMalloc(&bucket_offsets, sizeof(int) * num_buckets));
+  check_cuda(cudaMalloc(&segment_point_offsets, sizeof(int) * num_segments));
+  check_cuda(cudaMalloc(&segment_point_counts, sizeof(int) * num_segments));
+  check_cuda(cudaMalloc(&segment_counts, sizeof(int) * num_buckets));
+  check_cuda(cudaMalloc(&segment_partials, sizeof(xyzz_t) * num_segments));
+  check_cuda(cudaMalloc(&buckets, sizeof(xyzz_t) * num_buckets));
+
+  const uint32_t setup_blocks = ceil_div_u32(num_points, THREADS_PER_BLOCK);
+  setup_accumulation_inputs_kernel<<<setup_blocks, THREADS_PER_BLOCK>>>(
+      points, point_indices, bucket_run_indices, unique_bucket_indices,
+      bucket_sizes, bucket_offsets, num_buckets, bucket_size);
+  check_cuda(cudaGetLastError());
+
+  const uint32_t segment_blocks =
+      ceil_div_u32(static_cast<size_t>(num_segments), THREADS_PER_BLOCK);
+  const uint32_t bucket_blocks =
+      ceil_div_u32(static_cast<size_t>(num_buckets), THREADS_PER_BLOCK);
+
+  auto setup_segments = [&]() {
+    setup_segment_jobs_kernel<<<segment_blocks, THREADS_PER_BLOCK>>>(
+        segment_point_offsets, segment_point_counts, num_buckets, bucket_size,
+        segment_size);
+    check_cuda(cudaGetLastError());
+    setup_segment_counts_kernel<<<bucket_blocks, THREADS_PER_BLOCK>>>(
+        segment_counts, num_buckets, segments_per_bucket);
+    check_cuda(cudaGetLastError());
+  };
+
+  auto launch_segments = [&]() {
+    accumulate_large_xyzz_segments_kernel<<<segment_blocks,
+                                            THREADS_PER_BLOCK>>>(
+        segment_point_offsets, segment_point_counts, point_indices, points,
+        segment_partials, num_segments);
+    check_cuda(cudaGetLastError());
+  };
+
+  auto reduce_segments = [&]() {
+    reduce_large_xyzz_segment_partials_kernel<<<bucket_blocks,
+                                                THREADS_PER_BLOCK>>>(
+        segment_partials, buckets, num_buckets, segments_per_bucket);
+    check_cuda(cudaGetLastError());
+  };
+
+  auto reduce_segments_tree = [&]() {
+    for (int active_segments = segments_per_bucket; active_segments > 1;
+         active_segments = (active_segments + 1) >> 1) {
+      reduce_large_xyzz_segment_partials_tree_kernel<<<segment_blocks,
+                                                       THREADS_PER_BLOCK>>>(
+          segment_counts, segment_partials, num_segments, segments_per_bucket);
+      check_cuda(cudaGetLastError());
+      update_segment_counts_kernel<<<bucket_blocks, THREADS_PER_BLOCK>>>(
+          segment_counts, num_buckets);
+      check_cuda(cudaGetLastError());
+    }
+    scatter_large_xyzz_segment_partials_kernel<<<bucket_blocks,
+                                                 THREADS_PER_BLOCK>>>(
+        segment_counts, segment_partials, buckets, num_buckets,
+        segments_per_bucket);
+    check_cuda(cudaGetLastError());
+  };
+
+  auto launch = [&]() {
+    switch (benchmark_case) {
+    case segmented_bench_case::ACCUMULATE_KERNEL_ONLY:
+    case segmented_bench_case::TREE_ACCUMULATE_KERNEL_ONLY:
+      launch_segments();
+      break;
+    case segmented_bench_case::SUBPIPELINE:
+      setup_segments();
+      launch_segments();
+      reduce_segments();
+      break;
+    case segmented_bench_case::TREE_SUBPIPELINE:
+      setup_segments();
+      launch_segments();
+      reduce_segments_tree();
+      break;
+    }
+  };
+
+  setup_segments();
+  check_cuda(cudaDeviceSynchronize());
+  launch();
+  check_cuda(cudaDeviceSynchronize());
+  setup_segments();
+  check_cuda(cudaDeviceSynchronize());
+  const float elapsed_ms = time_cuda_launch(launch);
+
+  check_cuda(cudaFree(buckets));
+  check_cuda(cudaFree(segment_partials));
+  check_cuda(cudaFree(segment_counts));
+  check_cuda(cudaFree(segment_point_counts));
+  check_cuda(cudaFree(segment_point_offsets));
+  check_cuda(cudaFree(bucket_offsets));
+  check_cuda(cudaFree(bucket_sizes));
+  check_cuda(cudaFree(unique_bucket_indices));
+  check_cuda(cudaFree(bucket_run_indices));
+  check_cuda(cudaFree(point_indices));
+  check_cuda(cudaFree(points));
+  return elapsed_ms;
+}
+
 } // namespace
 
 extern "C" int bb_gpu_msm_accum_bench_cuda_available() {
@@ -722,4 +1009,13 @@ extern "C" float bb_gpu_msm_accum_bench_run(const int case_id,
                                             const int bucket_size) {
   return run_accumulation_benchmark(static_cast<bench_case>(case_id),
                                     log_buckets, bucket_size);
+}
+
+extern "C" float bb_gpu_msm_segmented_accum_bench_run(const int case_id,
+                                                      const int log_buckets,
+                                                      const int bucket_size,
+                                                      const int segment_size) {
+  return run_segmented_accumulation_benchmark(
+      static_cast<segmented_bench_case>(case_id), log_buckets, bucket_size,
+      segment_size);
 }
