@@ -328,14 +328,14 @@ BB_GPU_HD inline void xyzz_mixed_add_assume_finite(xyzz_g1_t &lhs,
   }
 
   fq_t pp = fq_sqr_canonical(p);
+  fq_t q = fq_mul_canonical(lhs.x, pp);
   fq_t ppp = fq_mul_canonical(p, pp);
   lhs.zz = fq_mul_canonical(lhs.zz, pp);
-  lhs.zzz = fq_mul_canonical(lhs.zzz, ppp);
-  fq_t q = fq_mul_canonical(lhs.x, pp);
   fq_t x3 = fq_sqr_canonical(r);
   x3 = fq_sub(x3, ppp);
   pp = fq_add(q, q);
   x3 = fq_sub(x3, pp);
+  lhs.zzz = fq_mul_canonical(lhs.zzz, ppp);
   q = fq_sub(q, x3);
   q = fq_mul_canonical(r, q);
   ppp = fq_mul_canonical(lhs.y, ppp);
@@ -358,19 +358,69 @@ xyzz_mixed_add_zz1_equals_one_assume_finite(xyzz_g1_t &lhs,
   }
 
   fq_t pp = fq_sqr_canonical(p);
+  fq_t q = fq_mul_canonical(lhs.x, pp);
   fq_t ppp = fq_mul_canonical(p, pp);
   lhs.zz = pp;
-  lhs.zzz = ppp;
-  fq_t q = fq_mul_canonical(lhs.x, pp);
   fq_t x3 = fq_sqr_canonical(r);
   x3 = fq_sub(x3, ppp);
   pp = fq_add(q, q);
   x3 = fq_sub(x3, pp);
+  lhs.zzz = ppp;
   q = fq_sub(q, x3);
   q = fq_mul_canonical(r, q);
   ppp = fq_mul_canonical(lhs.y, ppp);
   lhs.y = fq_sub(q, ppp);
   lhs.x = x3;
+}
+
+constexpr size_t XYZZ_MIXED_ADD_FALLBACK_COUNTER_COUNT = 4;
+constexpr size_t XYZZ_MIXED_ADD_P_ZERO_TOTAL_COUNTER = 0;
+constexpr size_t XYZZ_MIXED_ADD_P_ZERO_DOUBLE_COUNTER = 1;
+constexpr size_t XYZZ_MIXED_ADD_P_ZERO_OPPOSITE_COUNTER = 2;
+constexpr size_t XYZZ_MIXED_ADD_INFINITY_RECOVERY_COUNTER = 3;
+
+BB_GPU_D inline void xyzz_atomic_increment(uint64_t *counters,
+                                           const size_t counter_index) {
+  if (counters == nullptr) {
+    return;
+  }
+#if defined(__CUDA_ARCH__)
+  atomicAdd(reinterpret_cast<unsigned long long *>(&counters[counter_index]),
+            1ULL);
+#endif
+}
+
+BB_GPU_D inline void xyzz_record_mixed_add_fallback(const xyzz_g1_t &lhs,
+                                                    const affine_g1_t &rhs,
+                                                    uint64_t *counters) {
+  if (counters == nullptr) {
+    return;
+  }
+  const fq_t p = fq_sub(fq_mul_canonical(rhs.x, lhs.zz), lhs.x);
+  const fq_t r = fq_sub(fq_mul_canonical(rhs.y, lhs.zzz), lhs.y);
+  if (!p.is_zero()) {
+    return;
+  }
+  xyzz_atomic_increment(counters, XYZZ_MIXED_ADD_P_ZERO_TOTAL_COUNTER);
+  xyzz_atomic_increment(counters, r.is_zero()
+                                      ? XYZZ_MIXED_ADD_P_ZERO_DOUBLE_COUNTER
+                                      : XYZZ_MIXED_ADD_P_ZERO_OPPOSITE_COUNTER);
+}
+
+BB_GPU_D inline void xyzz_record_mixed_add_zz1_equals_one_fallback(
+    const xyzz_g1_t &lhs, const affine_g1_t &rhs, uint64_t *counters) {
+  if (counters == nullptr) {
+    return;
+  }
+  const fq_t p = fq_sub(rhs.x, lhs.x);
+  const fq_t r = fq_sub(rhs.y, lhs.y);
+  if (!p.is_zero()) {
+    return;
+  }
+  xyzz_atomic_increment(counters, XYZZ_MIXED_ADD_P_ZERO_TOTAL_COUNTER);
+  xyzz_atomic_increment(counters, r.is_zero()
+                                      ? XYZZ_MIXED_ADD_P_ZERO_DOUBLE_COUNTER
+                                      : XYZZ_MIXED_ADD_P_ZERO_OPPOSITE_COUNTER);
 }
 
 BB_GPU_HD inline void xyzz_mixed_add_unchecked(xyzz_g1_t &lhs,
@@ -522,15 +572,55 @@ BB_GPU_HD inline void chained_xyzz_mixed_add_indexed_nonzero(
   }
 
   int offset = first_offset;
-  accumulator = to_xyzz(points[point_indices[start + offset]]);
+  affine_g1_t point = points[point_indices[start + offset]];
+  accumulator = {point.x, point.y, fq_t::one(), fq_t::one(), false};
   offset += step;
   if (offset < count) {
-    xyzz_mixed_add_zz1_equals_one(accumulator,
-                                  points[point_indices[start + offset]]);
+    xyzz_mixed_add_zz1_equals_one_assume_finite(
+        accumulator, points[point_indices[start + offset]]);
     offset += step;
   }
   for (; offset < count; offset += step) {
-    xyzz_mixed_add(accumulator, points[point_indices[start + offset]]);
+    point = points[point_indices[start + offset]];
+    if (accumulator.infinity) {
+      accumulator = {point.x, point.y, fq_t::one(), fq_t::one(), false};
+    } else {
+      xyzz_mixed_add_assume_finite(accumulator, point);
+    }
+  }
+}
+
+BB_GPU_D inline void chained_xyzz_mixed_add_indexed_nonzero_profiled(
+    xyzz_g1_t &accumulator, const affine_g1_t *points,
+    const uint32_t *point_indices, const int start, const int count,
+    uint64_t *fallback_counters, const int first_offset = 0,
+    const int step = 1) {
+  if (first_offset >= count) {
+    accumulator = xyzz_infinity();
+    return;
+  }
+
+  int offset = first_offset;
+  affine_g1_t point = points[point_indices[start + offset]];
+  accumulator = {point.x, point.y, fq_t::one(), fq_t::one(), false};
+  offset += step;
+  if (offset < count) {
+    point = points[point_indices[start + offset]];
+    xyzz_record_mixed_add_zz1_equals_one_fallback(accumulator, point,
+                                                  fallback_counters);
+    xyzz_mixed_add_zz1_equals_one_assume_finite(accumulator, point);
+    offset += step;
+  }
+  for (; offset < count; offset += step) {
+    point = points[point_indices[start + offset]];
+    if (accumulator.infinity) {
+      xyzz_atomic_increment(fallback_counters,
+                            XYZZ_MIXED_ADD_INFINITY_RECOVERY_COUNTER);
+      accumulator = {point.x, point.y, fq_t::one(), fq_t::one(), false};
+    } else {
+      xyzz_record_mixed_add_fallback(accumulator, point, fallback_counters);
+      xyzz_mixed_add_assume_finite(accumulator, point);
+    }
   }
 }
 

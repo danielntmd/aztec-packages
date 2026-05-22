@@ -66,6 +66,22 @@ public:
   }
 };
 
+class ScopedMsmFieldBackend {
+public:
+  explicit ScopedMsmFieldBackend(
+      const bb::gpu::bn254::msm_field_backend backend) {
+    bb::gpu::bn254::set_msm_field_backend(backend);
+  }
+
+  ScopedMsmFieldBackend(const ScopedMsmFieldBackend &) = delete;
+  ScopedMsmFieldBackend &operator=(const ScopedMsmFieldBackend &) = delete;
+
+  ~ScopedMsmFieldBackend() {
+    bb::gpu::bn254::set_msm_field_backend(
+        bb::gpu::bn254::msm_field_backend::FQ64_MONTGOMERY);
+  }
+};
+
 class ScopedMsmPrecomputeFactor {
 public:
   explicit ScopedMsmPrecomputeFactor(const uint32_t factor) {
@@ -766,6 +782,41 @@ TEST(GpuBn254, MsmPrecomputeFactorsMatchCpu) {
       bb::gpu::bn254::msm_coordinate_mode::XYZZ);
   const ScopedMsmDigitMode scoped_digit_mode(
       bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+
+  for (uint32_t bits_per_slice : {4U, 8U, 13U}) {
+    const auto expected =
+        reference_msm_with_explicit_window(points, scalar_span, bits_per_slice);
+    for (uint32_t factor : {1U, 2U, 4U, 8U}) {
+      const ScopedMsmPrecomputeFactor scoped_precompute_factor(factor);
+      const auto actual =
+          bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
+      EXPECT_EQ(actual, expected)
+          << "bits_per_slice=" << bits_per_slice << " factor=" << factor;
+    }
+  }
+}
+
+TEST(GpuBn254, MsmFq32BackendMatchesCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 64; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    scalars.emplace_back(i % 11 == 0 ? fr::zero()
+                                     : fr::random_element(&engine));
+  }
+  upload_test_srs(points);
+
+  const ScopedMsmCoordinateMode scoped_coordinate_mode(
+      bb::gpu::bn254::msm_coordinate_mode::XYZZ);
+  const ScopedMsmDigitMode scoped_digit_mode(
+      bb::gpu::bn254::msm_digit_mode::UNSIGNED);
+  const ScopedMsmFieldBackend scoped_field_backend(
+      bb::gpu::bn254::msm_field_backend::FQ32_BARRETT);
   auto scalar_span = PolynomialSpan<const fr>{
       0, std::span<const fr>(scalars.data(), scalars.size())};
 

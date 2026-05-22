@@ -40,6 +40,7 @@ public:
   void ensure_shifted_srs_uploaded(size_t point_start_index, size_t num_points,
                                    uint32_t shift_bits,
                                    uint32_t precompute_factor);
+  void release_shifted_srs();
   size_t get_srs_offset(const bn254::affine_g1_t *points,
                         size_t num_points) const;
   void reserve_temp(size_t bytes);

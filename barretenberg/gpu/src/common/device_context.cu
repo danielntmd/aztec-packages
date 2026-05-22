@@ -187,6 +187,17 @@ void DeviceContext::ensure_shifted_srs_uploaded(
   shifted_srs_precompute_factor_ = precompute_factor;
 }
 
+void DeviceContext::release_shifted_srs() {
+  sync();
+  shifted_srs_points_.reset();
+  shifted_srs_host_base_ = nullptr;
+  shifted_srs_point_start_index_ = 0;
+  shifted_srs_original_size_ = 0;
+  shifted_srs_size_ = 0;
+  shifted_srs_shift_bits_ = 0;
+  shifted_srs_precompute_factor_ = 1;
+}
+
 size_t DeviceContext::get_srs_offset(const bn254::affine_g1_t *points,
                                      const size_t num_points) const {
   check_condition(srs_host_base_ != nullptr,

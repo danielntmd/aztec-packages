@@ -63,6 +63,14 @@ public:
   }
 };
 
+bb::gpu::bn254::msm_field_backend configured_field_backend() {
+  const char *value = std::getenv("MSM_BENCH_FIELD_BACKEND");
+  if (value != nullptr && std::strcmp(value, "fq32") == 0) {
+    return bb::gpu::bn254::msm_field_backend::FQ32_BARRETT;
+  }
+  return bb::gpu::bn254::msm_field_backend::FQ64_MONTGOMERY;
+}
+
 class ScopedMsmPrecomputeFactor {
 public:
   explicit ScopedMsmPrecomputeFactor(const uint32_t factor) {
@@ -130,22 +138,25 @@ struct BenchInput {
   bb::Polynomial<Fr> polynomial;
 };
 
-void ensure_benchmark_crs() {
-  static const bool initialized = []() {
+void ensure_benchmark_crs(const size_t num_points) {
+  static size_t initialized_size = 0;
+  if (initialized_size >= num_points) {
+    return;
+  }
+  [&]() {
     std::vector<bb::g1::affine_element> points;
-    points.reserve(MAX_BENCH_NUM_POINTS);
+    points.reserve(num_points);
     auto &engine = bb::numeric::get_debug_randomness();
-    for (size_t i = 0; i < MAX_BENCH_NUM_POINTS; ++i) {
+    for (size_t i = 0; i < num_points; ++i) {
       points.emplace_back(Curve::AffineElement::random_element(&engine));
     }
     bb::srs::init_bn254_mem_crs_factory(points, bb::g2::one);
-    return true;
   }();
-  (void)initialized;
+  initialized_size = num_points;
 }
 
 std::unique_ptr<BenchInput> make_input(const size_t num_points) {
-  ensure_benchmark_crs();
+  ensure_benchmark_crs(num_points);
   return std::make_unique<BenchInput>(num_points);
 }
 
@@ -171,6 +182,7 @@ Commitment gpu_profiled_msm(const BenchInput &input,
   const std::span<const Commitment> points =
       input.commitment_key.get_monomial_points();
 
+  bb::gpu::bn254::set_msm_field_backend(configured_field_backend());
   bb::gpu::bn254::affine_g1_t result{};
   bb::gpu::bn254::msm_raw_profiled(
       reinterpret_cast<const bb::gpu::bn254::fr_t *>(scalars.data()),
@@ -189,8 +201,16 @@ Commitment gpu_profiled_msm(const BenchInput &input,
   std::abort();
 }
 
+bool skip_correctness_checks() {
+  const char *value = std::getenv("MSM_BENCH_SKIP_CORRECTNESS");
+  return value != nullptr && std::atoi(value) != 0;
+}
+
 void assert_correctness(const BenchInput &input, const uint32_t bits_per_slice,
                         const int log_num_points) {
+  if (skip_correctness_checks()) {
+    return;
+  }
   const Commitment expected = cpu_msm(input);
   const Commitment actual = gpu_profiled_msm(input, bits_per_slice);
   if (actual != expected) {
@@ -200,6 +220,9 @@ void assert_correctness(const BenchInput &input, const uint32_t bits_per_slice,
 
 void assert_commit_correctness(const BenchInput &input,
                                const int log_num_points) {
+  if (skip_correctness_checks()) {
+    return;
+  }
   const Commitment expected = cpu_msm(input);
   const Commitment actual = input.commitment_key.commit(input.polynomial);
   if (actual != expected) {
@@ -230,18 +253,24 @@ void add_profile_counters(benchmark::State &state,
       benchmark::Counter(totals.digit_mode / iterations);
   state.counters["coord_mode"] =
       benchmark::Counter(totals.coordinate_mode / iterations);
+  state.counters["field_backend"] =
+      benchmark::Counter(totals.field_backend / iterations);
   state.counters["precompute_factor"] =
       benchmark::Counter(totals.precompute_factor / iterations);
   state.counters["folded_windows"] =
       benchmark::Counter(totals.folded_windows / iterations);
   state.counters["precompute_bases_ms"] =
       totals.precompute_bases_ms / iterations;
+  state.counters["field_backend_convert_ms"] =
+      totals.field_backend_convert_ms / iterations;
   state.counters["precomputed_srs_bytes"] =
       benchmark::Counter(totals.precomputed_srs_bytes / iterations);
   state.counters["large_bucket_mode"] =
       benchmark::Counter(totals.large_bucket_mode / iterations);
   state.counters["large_bucket_chunk_size"] =
       benchmark::Counter(totals.large_bucket_chunk_size / iterations);
+  state.counters["unsafe_xyzz_unchecked_mixed_add"] =
+      benchmark::Counter(totals.unsafe_xyzz_unchecked_mixed_add / iterations);
   state.counters["large_bucket_chunks"] =
       benchmark::Counter(totals.large_bucket_chunk_count / iterations);
   state.counters["split_ms"] = totals.split_scalars_ms / iterations;
@@ -278,6 +307,14 @@ void add_profile_counters(benchmark::State &state,
       benchmark::Counter(totals.large_bucket_point_count / iterations);
   state.counters["max_bucket_size"] =
       benchmark::Counter(totals.max_bucket_size / iterations);
+  state.counters["xyzz_p_zero_total"] =
+      benchmark::Counter(totals.xyzz_mixed_add_p_zero_total / iterations);
+  state.counters["xyzz_p_zero_double"] =
+      benchmark::Counter(totals.xyzz_mixed_add_p_zero_double / iterations);
+  state.counters["xyzz_p_zero_opposite"] =
+      benchmark::Counter(totals.xyzz_mixed_add_p_zero_opposite / iterations);
+  state.counters["xyzz_infinity_recoveries"] = benchmark::Counter(
+      totals.xyzz_mixed_add_infinity_recoveries / iterations);
   state.counters["avg_normal_bucket_size"] =
       totals.normal_bucket_count == 0
           ? 0.0
@@ -322,6 +359,7 @@ void add_profile(bb::gpu::bn254::msm_profile &totals,
   totals.scalar_chunk1_split_ms += profile.scalar_chunk1_split_ms;
   totals.split_scalars_ms += profile.split_scalars_ms;
   totals.precompute_bases_ms += profile.precompute_bases_ms;
+  totals.field_backend_convert_ms += profile.field_backend_convert_ms;
   totals.sort_records_ms += profile.sort_records_ms;
   totals.encode_buckets_ms += profile.encode_buckets_ms;
   totals.scan_bucket_offsets_ms += profile.scan_bucket_offsets_ms;
@@ -345,17 +383,26 @@ void add_profile(bb::gpu::bn254::msm_profile &totals,
       profile.scalar_split_first_chunk_percent;
   totals.digit_mode += profile.digit_mode;
   totals.coordinate_mode += profile.coordinate_mode;
+  totals.field_backend += profile.field_backend;
   totals.precompute_factor += profile.precompute_factor;
   totals.folded_windows += profile.folded_windows;
   totals.precomputed_srs_bytes += profile.precomputed_srs_bytes;
   totals.large_bucket_mode += profile.large_bucket_mode;
   totals.large_bucket_chunk_size += profile.large_bucket_chunk_size;
+  totals.unsafe_xyzz_unchecked_mixed_add +=
+      profile.unsafe_xyzz_unchecked_mixed_add;
   totals.large_bucket_chunk_count += profile.large_bucket_chunk_count;
   totals.normal_bucket_count += profile.normal_bucket_count;
   totals.large_bucket_count += profile.large_bucket_count;
   totals.normal_bucket_point_count += profile.normal_bucket_point_count;
   totals.large_bucket_point_count += profile.large_bucket_point_count;
   totals.max_bucket_size += profile.max_bucket_size;
+  totals.xyzz_mixed_add_p_zero_total += profile.xyzz_mixed_add_p_zero_total;
+  totals.xyzz_mixed_add_p_zero_double += profile.xyzz_mixed_add_p_zero_double;
+  totals.xyzz_mixed_add_p_zero_opposite +=
+      profile.xyzz_mixed_add_p_zero_opposite;
+  totals.xyzz_mixed_add_infinity_recoveries +=
+      profile.xyzz_mixed_add_infinity_recoveries;
   for (size_t i = 0; i < bb::gpu::bn254::MSM_BUCKET_HISTOGRAM_BINS; ++i) {
     totals.bucket_size_histogram[i] += profile.bucket_size_histogram[i];
   }
@@ -664,6 +711,8 @@ void bench_gpu_all_sizes_profiled(benchmark::State &state) {
         benchmark::Counter(gpu_totals[i].active_buckets / iterations);
     state.counters[prefix + "coord_mode"] =
         benchmark::Counter(gpu_totals[i].coordinate_mode / iterations);
+    state.counters[prefix + "field_backend"] =
+        benchmark::Counter(gpu_totals[i].field_backend / iterations);
 
     total_cpu_ms += cpu_ms;
     total_gpu_ms += gpu_ms;

@@ -47,6 +47,16 @@ enum class bench_case : int {
   FQ32_KARATSUBA_WIDE_PRODUCT = 25,
   BB_SQR_NO_PREREDUCE = 26,
   BB_SQR_DEDICATED_NO_PREREDUCE = 27,
+  BB_XYZZ_MIXED_ADD_ASSUME_FINITE = 28,
+  FQ32_CALLABLE_MUL = 29,
+  FQ32_CALLABLE_SQR = 30,
+  FQ32_DEDICATED_SQR = 31,
+  FQ32_REDUCE_ONLY_BARRETT = 32,
+  FQ32_CURVE_SHAPE_XYZZ_MIXED_ADD = 33,
+  FQ32_CURVE_SHAPE_XYZZ_ADD = 34,
+  FQ32_CURVE_SHAPE_XYZZ_DOUBLE = 35,
+  BB_CURVE_SHAPE_XYZZ_ADD = 36,
+  BB_CURVE_SHAPE_XYZZ_DOUBLE = 37,
 };
 
 int env_int(const char *name, const int fallback) {
@@ -175,6 +185,22 @@ void bench_fq32_straightline_field_sqr(benchmark::State &state) {
   bench_field_case(state, bench_case::FQ32_STRAIGHTLINE_SQR, 1);
 }
 
+void bench_fq32_callable_field_mul(benchmark::State &state) {
+  bench_field_case(state, bench_case::FQ32_CALLABLE_MUL, 1);
+}
+
+void bench_fq32_callable_field_sqr(benchmark::State &state) {
+  bench_field_case(state, bench_case::FQ32_CALLABLE_SQR, 1);
+}
+
+void bench_fq32_dedicated_field_sqr(benchmark::State &state) {
+  bench_field_case(state, bench_case::FQ32_DEDICATED_SQR, 1);
+}
+
+void bench_fq32_reduce_only_barrett(benchmark::State &state) {
+  bench_field_case(state, bench_case::FQ32_REDUCE_ONLY_BARRETT, 1);
+}
+
 void bench_fq32_karatsuba_field_mul(benchmark::State &state) {
   bench_field_case(state, bench_case::FQ32_KARATSUBA_MUL, 1);
 }
@@ -195,8 +221,32 @@ void bench_bb_xyzz_mixed_add_unchecked(benchmark::State &state) {
   bench_field_case(state, bench_case::BB_XYZZ_MIXED_ADD_UNCHECKED, 1);
 }
 
+void bench_bb_xyzz_mixed_add_assume_finite(benchmark::State &state) {
+  bench_field_case(state, bench_case::BB_XYZZ_MIXED_ADD_ASSUME_FINITE, 1);
+}
+
 void bench_bb_jacobian_mixed_add_unchecked(benchmark::State &state) {
   bench_field_case(state, bench_case::BB_JACOBIAN_MIXED_ADD_UNCHECKED, 1);
+}
+
+void bench_fq32_curve_shape_xyzz_mixed_add(benchmark::State &state) {
+  bench_field_case(state, bench_case::FQ32_CURVE_SHAPE_XYZZ_MIXED_ADD, 1);
+}
+
+void bench_fq32_curve_shape_xyzz_add(benchmark::State &state) {
+  bench_field_case(state, bench_case::FQ32_CURVE_SHAPE_XYZZ_ADD, 1);
+}
+
+void bench_fq32_curve_shape_xyzz_double(benchmark::State &state) {
+  bench_field_case(state, bench_case::FQ32_CURVE_SHAPE_XYZZ_DOUBLE, 1);
+}
+
+void bench_bb_curve_shape_xyzz_add(benchmark::State &state) {
+  bench_field_case(state, bench_case::BB_CURVE_SHAPE_XYZZ_ADD, 1);
+}
+
+void bench_bb_curve_shape_xyzz_double(benchmark::State &state) {
+  bench_field_case(state, bench_case::BB_CURVE_SHAPE_XYZZ_DOUBLE, 1);
 }
 
 void bench_icicle_xyzz_mixed_add_unchecked(benchmark::State &state) {
@@ -257,6 +307,22 @@ BENCHMARK(bench_fq32_straightline_field_sqr)
     ->Name("BN254/Field/Fq32Straightline/Sqr")
     ->Arg(DEFAULT_LOG_ELEMENTS)
     ->UseManualTime();
+BENCHMARK(bench_fq32_callable_field_mul)
+    ->Name("BN254/Field/Fq32Callable/Mul")
+    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->UseManualTime();
+BENCHMARK(bench_fq32_callable_field_sqr)
+    ->Name("BN254/Field/Fq32Callable/Sqr")
+    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->UseManualTime();
+BENCHMARK(bench_fq32_dedicated_field_sqr)
+    ->Name("BN254/Field/Fq32DedicatedSqr/Sqr")
+    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->UseManualTime();
+BENCHMARK(bench_fq32_reduce_only_barrett)
+    ->Name("BN254/Field/Fq32ReduceOnly/Barrett")
+    ->Arg(DEFAULT_LOG_ELEMENTS)
+    ->UseManualTime();
 BENCHMARK(bench_fq32_karatsuba_field_mul)
     ->Name("BN254/Field/Fq32Karatsuba/Mul")
     ->Arg(DEFAULT_LOG_ELEMENTS)
@@ -293,8 +359,32 @@ BENCHMARK(bench_bb_xyzz_mixed_add_unchecked)
     ->Name("BN254/Field/BB/XYZZMixedAddUnchecked")
     ->Apply(mixed_add_chain_count_sweep)
     ->UseManualTime();
+BENCHMARK(bench_bb_xyzz_mixed_add_assume_finite)
+    ->Name("BN254/Field/BB/XYZZMixedAddAssumeFinite")
+    ->Apply(mixed_add_chain_count_sweep)
+    ->UseManualTime();
 BENCHMARK(bench_bb_jacobian_mixed_add_unchecked)
     ->Name("BN254/Field/BB/JacobianMixedAddUnchecked")
+    ->Apply(mixed_add_chain_count_sweep)
+    ->UseManualTime();
+BENCHMARK(bench_fq32_curve_shape_xyzz_mixed_add)
+    ->Name("BN254/Field/Fq32CurveShape/XYZZMixedAdd")
+    ->Apply(mixed_add_chain_count_sweep)
+    ->UseManualTime();
+BENCHMARK(bench_fq32_curve_shape_xyzz_add)
+    ->Name("BN254/Field/Fq32CurveShape/XYZZAdd")
+    ->Apply(mixed_add_chain_count_sweep)
+    ->UseManualTime();
+BENCHMARK(bench_fq32_curve_shape_xyzz_double)
+    ->Name("BN254/Field/Fq32CurveShape/XYZZDouble")
+    ->Apply(mixed_add_chain_count_sweep)
+    ->UseManualTime();
+BENCHMARK(bench_bb_curve_shape_xyzz_add)
+    ->Name("BN254/Field/BB/CurveShapeXYZZAdd")
+    ->Apply(mixed_add_chain_count_sweep)
+    ->UseManualTime();
+BENCHMARK(bench_bb_curve_shape_xyzz_double)
+    ->Name("BN254/Field/BB/CurveShapeXYZZDouble")
     ->Apply(mixed_add_chain_count_sweep)
     ->UseManualTime();
 BENCHMARK(bench_icicle_field_add)

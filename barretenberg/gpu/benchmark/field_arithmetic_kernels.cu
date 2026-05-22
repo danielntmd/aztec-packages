@@ -51,6 +51,16 @@ enum class bench_case : int {
   FQ32_KARATSUBA_WIDE_PRODUCT = 25,
   BB_SQR_NO_PREREDUCE = 26,
   BB_SQR_DEDICATED_NO_PREREDUCE = 27,
+  BB_XYZZ_MIXED_ADD_ASSUME_FINITE = 28,
+  FQ32_CALLABLE_MUL = 29,
+  FQ32_CALLABLE_SQR = 30,
+  FQ32_DEDICATED_SQR = 31,
+  FQ32_REDUCE_ONLY_BARRETT = 32,
+  FQ32_CURVE_SHAPE_XYZZ_MIXED_ADD = 33,
+  FQ32_CURVE_SHAPE_XYZZ_ADD = 34,
+  FQ32_CURVE_SHAPE_XYZZ_DOUBLE = 35,
+  BB_CURVE_SHAPE_XYZZ_ADD = 36,
+  BB_CURVE_SHAPE_XYZZ_DOUBLE = 37,
 };
 
 void check_cuda(const cudaError_t error) {
@@ -85,6 +95,14 @@ struct alignas(32) bb32_fq_t {
 
 struct alignas(64) exp_fq32_wide_t {
   uint32_t limbs[16];
+};
+
+struct alignas(32) exp_fq32_xyzz_t {
+  exp_fq32_t x;
+  exp_fq32_t y;
+  exp_fq32_t zz;
+  exp_fq32_t zzz;
+  bool infinity;
 };
 
 __device__ constexpr uint32_t BB32_MODULUS[8] = {
@@ -651,6 +669,133 @@ __global__ void fq32_straightline_field_sqr_kernel(exp_fq32_t *out,
   out[idx] = a;
 }
 
+__device__ __noinline__ exp_fq32_t fq32_callable_mul(const exp_fq32_t &lhs,
+                                                     const exp_fq32_t &rhs) {
+  return bb::gpu::bn254::experimental::mul_straightline(lhs, rhs);
+}
+
+__device__ __noinline__ exp_fq32_t fq32_callable_sqr(const exp_fq32_t &value) {
+  return bb::gpu::bn254::experimental::sqr_straightline(value);
+}
+
+__device__ __forceinline__ void fq32_add_wide_product(uint32_t wide[16],
+                                                      const int index,
+                                                      const uint32_t lhs,
+                                                      const uint32_t rhs) {
+#if defined(__CUDA_ARCH__)
+  const uint32_t lo = lhs * rhs;
+  const uint32_t hi = __umulhi(lhs, rhs);
+#else
+  const uint64_t product = static_cast<uint64_t>(lhs) * rhs;
+  const uint32_t lo = static_cast<uint32_t>(product);
+  const uint32_t hi = static_cast<uint32_t>(product >> 32);
+#endif
+  uint32_t carry =
+      bb::gpu::bn254::experimental::add_u32_with_carry_in(wide[index], lo, 0);
+  carry = bb::gpu::bn254::experimental::add_u32_with_carry_in(wide[index + 1],
+                                                              hi, carry);
+  for (int limb = index + 2; carry != 0 && limb < 16; ++limb) {
+    carry = bb::gpu::bn254::experimental::add_u32_with_carry_in(wide[limb], 0,
+                                                                carry);
+  }
+}
+
+__device__ __forceinline__ void fq32_sqr_wide_dedicated(const exp_fq32_t &value,
+                                                        uint32_t wide[16]) {
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    wide[i] = 0;
+  }
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    fq32_add_wide_product(wide, i + i, value.limbs[i], value.limbs[i]);
+#pragma unroll
+    for (int j = i + 1; j < 8; ++j) {
+      fq32_add_wide_product(wide, i + j, value.limbs[i], value.limbs[j]);
+      fq32_add_wide_product(wide, i + j, value.limbs[i], value.limbs[j]);
+    }
+  }
+}
+
+__device__ __forceinline__ exp_fq32_t
+fq32_dedicated_sqr(const exp_fq32_t &value) {
+  uint32_t wide[16] = {};
+  fq32_sqr_wide_dedicated(value, wide);
+  return bb::gpu::bn254::experimental::reduce_straightline(wide);
+}
+
+__global__ void fq32_callable_field_mul_kernel(exp_fq32_t *out,
+                                               const size_t count,
+                                               const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  exp_fq32_t a = exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 14);
+  exp_fq32_t b = exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 32);
+  for (int i = 0; i < inner_iters; ++i) {
+    a = fq32_callable_mul(a, b);
+    b = bb::gpu::bn254::experimental::add(
+        b, exp_fq32_t::from_u32(static_cast<uint32_t>(i) + 1));
+  }
+  out[idx] = a;
+}
+
+__global__ void fq32_callable_field_sqr_kernel(exp_fq32_t *out,
+                                               const size_t count,
+                                               const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  exp_fq32_t a = exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 18);
+  for (int i = 0; i < inner_iters; ++i) {
+    a = bb::gpu::bn254::experimental::add(
+        fq32_callable_sqr(a),
+        exp_fq32_t::from_u32(static_cast<uint32_t>(i) + 3));
+  }
+  out[idx] = a;
+}
+
+__global__ void fq32_dedicated_field_sqr_kernel(exp_fq32_t *out,
+                                                const size_t count,
+                                                const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  exp_fq32_t a = exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 18);
+  for (int i = 0; i < inner_iters; ++i) {
+    a = bb::gpu::bn254::experimental::add(
+        fq32_dedicated_sqr(a),
+        exp_fq32_t::from_u32(static_cast<uint32_t>(i) + 3));
+  }
+  out[idx] = a;
+}
+
+__global__ void fq32_reduce_only_barrett_kernel(exp_fq32_t *out,
+                                                const size_t count,
+                                                const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  exp_fq32_t a = exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 14);
+  exp_fq32_t b = exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 32);
+  uint32_t wide[16] = {};
+  bb::gpu::bn254::experimental::mul_wide_straightline(a, b, wide);
+  for (int i = 0; i < inner_iters; ++i) {
+    a = bb::gpu::bn254::experimental::reduce_straightline(wide);
+    wide[static_cast<uint32_t>(i) & 15U] ^=
+        a.limbs[static_cast<uint32_t>(i) & 7U];
+  }
+  out[idx] = a;
+}
+
 __global__ void fq32_karatsuba_field_mul_kernel(exp_fq32_t *out,
                                                 const size_t count,
                                                 const int inner_iters) {
@@ -827,24 +972,7 @@ bb_jacobian_mixed_add_unchecked(bb_jacobian_t &lhs, const bb_affine_t &rhs) {
 
 __device__ __forceinline__ void
 bb_xyzz_mixed_add_unchecked(bb_xyzz_t &lhs, const bb_affine_t &rhs) {
-  bb_fq_t p = rhs.x * lhs.zz;
-  p = p - lhs.x;
-  bb_fq_t r = rhs.y * lhs.zzz;
-  r = r - lhs.y;
-  bb_fq_t pp = p.sqr();
-  bb_fq_t ppp = p * pp;
-  lhs.zz = lhs.zz * pp;
-  lhs.zzz = lhs.zzz * ppp;
-  bb_fq_t q = lhs.x * pp;
-  bb_fq_t x3 = r.sqr();
-  x3 = x3 - ppp;
-  pp = q + q;
-  x3 = x3 - pp;
-  q = q - x3;
-  q = r * q;
-  ppp = lhs.y * ppp;
-  lhs.y = q - ppp;
-  lhs.x = x3;
+  bb::gpu::bn254::xyzz_mixed_add_unchecked(lhs, rhs);
 }
 
 __global__ void bb_xyzz_mixed_add_unchecked_kernel(bb_xyzz_t *out,
@@ -872,6 +1000,31 @@ __global__ void bb_xyzz_mixed_add_unchecked_kernel(bb_xyzz_t *out,
   out[idx] = accumulator;
 }
 
+__global__ void bb_xyzz_mixed_add_assume_finite_kernel(bb_xyzz_t *out,
+                                                       const size_t count,
+                                                       const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  bb_xyzz_t accumulator{
+      make_bb_fq(static_cast<uint32_t>(idx) + 101),
+      make_bb_fq(static_cast<uint32_t>(idx) + 103),
+      bb_fq_t::one(),
+      bb_fq_t::one(),
+      false,
+  };
+  bb_affine_t point{
+      make_bb_fq(static_cast<uint32_t>(idx) + 107),
+      make_bb_fq(static_cast<uint32_t>(idx) + 109),
+  };
+  for (int i = 0; i < inner_iters; ++i) {
+    bb::gpu::bn254::xyzz_mixed_add_assume_finite(accumulator, point);
+  }
+  out[idx] = accumulator;
+}
+
 __global__ void bb_jacobian_mixed_add_unchecked_kernel(bb_jacobian_t *out,
                                                        const size_t count,
                                                        const int inner_iters) {
@@ -892,6 +1045,236 @@ __global__ void bb_jacobian_mixed_add_unchecked_kernel(bb_jacobian_t *out,
   };
   for (int i = 0; i < inner_iters; ++i) {
     bb_jacobian_mixed_add_unchecked(accumulator, point);
+  }
+  out[idx] = accumulator;
+}
+
+__device__ __forceinline__ exp_fq32_t fq32_add(const exp_fq32_t &lhs,
+                                               const exp_fq32_t &rhs) {
+  return bb::gpu::bn254::experimental::add(lhs, rhs);
+}
+
+__device__ __forceinline__ exp_fq32_t fq32_sub(const exp_fq32_t &lhs,
+                                               const exp_fq32_t &rhs) {
+  return bb::gpu::bn254::experimental::sub(lhs, rhs);
+}
+
+__device__ __forceinline__ exp_fq32_t fq32_mul(const exp_fq32_t &lhs,
+                                               const exp_fq32_t &rhs) {
+  return bb::gpu::bn254::experimental::mul_straightline(lhs, rhs);
+}
+
+__device__ __forceinline__ exp_fq32_t fq32_sqr(const exp_fq32_t &value) {
+  return bb::gpu::bn254::experimental::sqr_straightline(value);
+}
+
+__device__ __forceinline__ exp_fq32_xyzz_t fq32_xyzz_infinity() {
+  return {exp_fq32_t::zero(), exp_fq32_t::zero(), exp_fq32_t::zero(),
+          exp_fq32_t::zero(), true};
+}
+
+__device__ __forceinline__ void fq32_xyzz_double(exp_fq32_xyzz_t &point) {
+  if (point.infinity) {
+    return;
+  }
+
+  exp_fq32_t u = fq32_add(point.y, point.y);
+  if (bb::gpu::bn254::experimental::is_zero(u)) {
+    point = fq32_xyzz_infinity();
+    return;
+  }
+
+  const exp_fq32_t v = fq32_sqr(u);
+  const exp_fq32_t w = fq32_mul(u, v);
+  const exp_fq32_t s = fq32_mul(point.x, v);
+  exp_fq32_t m = fq32_sqr(point.x);
+  m = fq32_add(fq32_add(m, m), m);
+  const exp_fq32_t x3 = fq32_sub(fq32_sqr(m), fq32_add(s, s));
+  point.y = fq32_sub(fq32_mul(m, fq32_sub(s, x3)), fq32_mul(w, point.y));
+  point.x = x3;
+  point.zz = fq32_mul(v, point.zz);
+  point.zzz = fq32_mul(w, point.zzz);
+}
+
+__device__ __forceinline__ void
+fq32_xyzz_mixed_add_shape(exp_fq32_xyzz_t &lhs, const exp_fq32_t &rhs_x,
+                          const exp_fq32_t &rhs_y) {
+  exp_fq32_t p = fq32_sub(fq32_mul(rhs_x, lhs.zz), lhs.x);
+  exp_fq32_t r = fq32_sub(fq32_mul(rhs_y, lhs.zzz), lhs.y);
+  exp_fq32_t pp = fq32_sqr(p);
+  exp_fq32_t q = fq32_mul(lhs.x, pp);
+  exp_fq32_t ppp = fq32_mul(p, pp);
+  lhs.zz = fq32_mul(lhs.zz, pp);
+  exp_fq32_t x3 = fq32_sqr(r);
+  x3 = fq32_sub(x3, ppp);
+  pp = fq32_add(q, q);
+  x3 = fq32_sub(x3, pp);
+  lhs.zzz = fq32_mul(lhs.zzz, ppp);
+  q = fq32_sub(q, x3);
+  q = fq32_mul(r, q);
+  ppp = fq32_mul(lhs.y, ppp);
+  lhs.y = fq32_sub(q, ppp);
+  lhs.x = x3;
+}
+
+__device__ __forceinline__ void
+fq32_xyzz_add_shape(exp_fq32_xyzz_t &lhs, const exp_fq32_xyzz_t &rhs) {
+  if (lhs.infinity) {
+    lhs = rhs;
+    return;
+  }
+  if (rhs.infinity) {
+    return;
+  }
+
+  exp_fq32_t u1 = fq32_mul(lhs.x, rhs.zz);
+  exp_fq32_t u2 = fq32_mul(rhs.x, lhs.zz);
+  exp_fq32_t s1 = fq32_mul(lhs.y, rhs.zzz);
+  exp_fq32_t s2 = fq32_mul(rhs.y, lhs.zzz);
+  exp_fq32_t p = fq32_sub(u2, u1);
+  exp_fq32_t r = fq32_sub(s2, s1);
+
+  if (bb::gpu::bn254::experimental::is_zero(p)) {
+    if (bb::gpu::bn254::experimental::is_zero(r)) {
+      fq32_xyzz_double(lhs);
+    } else {
+      lhs = fq32_xyzz_infinity();
+    }
+    return;
+  }
+
+  exp_fq32_t pp = fq32_sqr(p);
+  p = fq32_mul(p, pp);
+  u1 = fq32_mul(u1, pp);
+  exp_fq32_t x3 = fq32_sub(fq32_sqr(r), p);
+  x3 = fq32_sub(x3, fq32_add(u1, u1));
+  s1 = fq32_mul(s1, p);
+  u1 = fq32_mul(r, fq32_sub(u1, x3));
+  lhs.y = fq32_sub(u1, s1);
+  lhs.x = x3;
+  lhs.zz = fq32_mul(fq32_mul(lhs.zz, rhs.zz), pp);
+  lhs.zzz = fq32_mul(fq32_mul(lhs.zzz, rhs.zzz), p);
+}
+
+__global__ void fq32_curve_shape_xyzz_mixed_add_kernel(exp_fq32_xyzz_t *out,
+                                                       const size_t count,
+                                                       const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  exp_fq32_xyzz_t accumulator{
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 101),
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 103),
+      exp_fq32_t::one(),
+      exp_fq32_t::one(),
+      false,
+  };
+  const exp_fq32_t point_x =
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 107);
+  const exp_fq32_t point_y =
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 109);
+  for (int i = 0; i < inner_iters; ++i) {
+    fq32_xyzz_mixed_add_shape(accumulator, point_x, point_y);
+  }
+  out[idx] = accumulator;
+}
+
+__global__ void fq32_curve_shape_xyzz_add_kernel(exp_fq32_xyzz_t *out,
+                                                 const size_t count,
+                                                 const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  exp_fq32_xyzz_t accumulator{
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 101),
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 103),
+      exp_fq32_t::one(),
+      exp_fq32_t::one(),
+      false,
+  };
+  const exp_fq32_xyzz_t point{
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 107),
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 109),
+      exp_fq32_t::one(),
+      exp_fq32_t::one(),
+      false,
+  };
+  for (int i = 0; i < inner_iters; ++i) {
+    fq32_xyzz_add_shape(accumulator, point);
+  }
+  out[idx] = accumulator;
+}
+
+__global__ void fq32_curve_shape_xyzz_double_kernel(exp_fq32_xyzz_t *out,
+                                                    const size_t count,
+                                                    const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  exp_fq32_xyzz_t accumulator{
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 101),
+      exp_fq32_t::from_u32(static_cast<uint32_t>(idx) + 103),
+      exp_fq32_t::one(),
+      exp_fq32_t::one(),
+      false,
+  };
+  for (int i = 0; i < inner_iters; ++i) {
+    fq32_xyzz_double(accumulator);
+  }
+  out[idx] = accumulator;
+}
+
+__global__ void bb_curve_shape_xyzz_add_kernel(bb_xyzz_t *out,
+                                               const size_t count,
+                                               const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  bb_xyzz_t accumulator{
+      make_bb_fq(static_cast<uint32_t>(idx) + 101),
+      make_bb_fq(static_cast<uint32_t>(idx) + 103),
+      bb_fq_t::one(),
+      bb_fq_t::one(),
+      false,
+  };
+  const bb_xyzz_t point{
+      make_bb_fq(static_cast<uint32_t>(idx) + 107),
+      make_bb_fq(static_cast<uint32_t>(idx) + 109),
+      bb_fq_t::one(),
+      bb_fq_t::one(),
+      false,
+  };
+  for (int i = 0; i < inner_iters; ++i) {
+    accumulator = bb::gpu::bn254::xyzz_add(accumulator, point);
+  }
+  out[idx] = accumulator;
+}
+
+__global__ void bb_curve_shape_xyzz_double_kernel(bb_xyzz_t *out,
+                                                  const size_t count,
+                                                  const int inner_iters) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count) {
+    return;
+  }
+
+  bb_xyzz_t accumulator{
+      make_bb_fq(static_cast<uint32_t>(idx) + 101),
+      make_bb_fq(static_cast<uint32_t>(idx) + 103),
+      bb_fq_t::one(),
+      bb_fq_t::one(),
+      false,
+  };
+  for (int i = 0; i < inner_iters; ++i) {
+    bb::gpu::bn254::self_double(accumulator);
   }
   out[idx] = accumulator;
 }
@@ -1205,6 +1588,18 @@ extern "C" float bb_gpu_field_bench_run(const int case_id,
   case bench_case::FQ32_STRAIGHTLINE_SQR:
     return run_kernel<exp_fq32_t>(count, inner_iters,
                                   fq32_straightline_field_sqr_kernel);
+  case bench_case::FQ32_CALLABLE_MUL:
+    return run_kernel<exp_fq32_t>(count, inner_iters,
+                                  fq32_callable_field_mul_kernel);
+  case bench_case::FQ32_CALLABLE_SQR:
+    return run_kernel<exp_fq32_t>(count, inner_iters,
+                                  fq32_callable_field_sqr_kernel);
+  case bench_case::FQ32_DEDICATED_SQR:
+    return run_kernel<exp_fq32_t>(count, inner_iters,
+                                  fq32_dedicated_field_sqr_kernel);
+  case bench_case::FQ32_REDUCE_ONLY_BARRETT:
+    return run_kernel<exp_fq32_t>(count, inner_iters,
+                                  fq32_reduce_only_barrett_kernel);
   case bench_case::FQ32_KARATSUBA_MUL:
     return run_kernel<exp_fq32_t>(count, inner_iters,
                                   fq32_karatsuba_field_mul_kernel);
@@ -1220,9 +1615,27 @@ extern "C" float bb_gpu_field_bench_run(const int case_id,
   case bench_case::BB_XYZZ_MIXED_ADD_UNCHECKED:
     return run_kernel<bb_xyzz_t>(count, inner_iters,
                                  bb_xyzz_mixed_add_unchecked_kernel);
+  case bench_case::BB_XYZZ_MIXED_ADD_ASSUME_FINITE:
+    return run_kernel<bb_xyzz_t>(count, inner_iters,
+                                 bb_xyzz_mixed_add_assume_finite_kernel);
   case bench_case::BB_JACOBIAN_MIXED_ADD_UNCHECKED:
     return run_kernel<bb_jacobian_t>(count, inner_iters,
                                      bb_jacobian_mixed_add_unchecked_kernel);
+  case bench_case::FQ32_CURVE_SHAPE_XYZZ_MIXED_ADD:
+    return run_kernel<exp_fq32_xyzz_t>(count, inner_iters,
+                                       fq32_curve_shape_xyzz_mixed_add_kernel);
+  case bench_case::FQ32_CURVE_SHAPE_XYZZ_ADD:
+    return run_kernel<exp_fq32_xyzz_t>(count, inner_iters,
+                                       fq32_curve_shape_xyzz_add_kernel);
+  case bench_case::FQ32_CURVE_SHAPE_XYZZ_DOUBLE:
+    return run_kernel<exp_fq32_xyzz_t>(count, inner_iters,
+                                       fq32_curve_shape_xyzz_double_kernel);
+  case bench_case::BB_CURVE_SHAPE_XYZZ_ADD:
+    return run_kernel<bb_xyzz_t>(count, inner_iters,
+                                 bb_curve_shape_xyzz_add_kernel);
+  case bench_case::BB_CURVE_SHAPE_XYZZ_DOUBLE:
+    return run_kernel<bb_xyzz_t>(count, inner_iters,
+                                 bb_curve_shape_xyzz_double_kernel);
 #ifdef BB_GPU_HAVE_ICICLE_V28
   case bench_case::ICICLE_ADD:
     return run_kernel<icicle_fq_t>(count, inner_iters, icicle_field_add_kernel);

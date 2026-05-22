@@ -89,6 +89,10 @@ void add_profile_counters(benchmark::State &state,
   state.counters["gpu_total_ms"] = totals.total_profiled_ms / iterations;
   state.counters["coord_mode"] =
       benchmark::Counter(totals.coordinate_mode / iterations);
+  state.counters["field_backend"] =
+      benchmark::Counter(totals.field_backend / iterations);
+  state.counters["unsafe_xyzz_unchecked_mixed_add"] =
+      benchmark::Counter(totals.unsafe_xyzz_unchecked_mixed_add / iterations);
   state.counters["h2d_points_ms"] = totals.h2d_points_ms / iterations;
   state.counters["h2d_scalars_ms"] = totals.h2d_scalars_ms / iterations;
   state.counters["split_ms"] = totals.split_scalars_ms / iterations;
@@ -99,6 +103,8 @@ void add_profile_counters(benchmark::State &state,
   state.counters["build_jobs_ms"] = totals.build_bucket_jobs_ms / iterations;
   state.counters["sort_jobs_ms"] = totals.sort_bucket_jobs_ms / iterations;
   state.counters["init_buckets_ms"] = totals.init_buckets_ms / iterations;
+  state.counters["field_backend_convert_ms"] =
+      totals.field_backend_convert_ms / iterations;
   state.counters["normal_accum_ms"] =
       totals.accumulate_normal_buckets_ms / iterations;
   state.counters["large_accum_ms"] =
@@ -107,6 +113,14 @@ void add_profile_counters(benchmark::State &state,
   state.counters["compose_ms"] = totals.compose_windows_ms / iterations;
   state.counters["final_ms"] = totals.final_accumulation_ms / iterations;
   state.counters["d2h_result_ms"] = totals.d2h_result_ms / iterations;
+  state.counters["xyzz_p_zero_total"] =
+      benchmark::Counter(totals.xyzz_mixed_add_p_zero_total / iterations);
+  state.counters["xyzz_p_zero_double"] =
+      benchmark::Counter(totals.xyzz_mixed_add_p_zero_double / iterations);
+  state.counters["xyzz_p_zero_opposite"] =
+      benchmark::Counter(totals.xyzz_mixed_add_p_zero_opposite / iterations);
+  state.counters["xyzz_infinity_recoveries"] = benchmark::Counter(
+      totals.xyzz_mixed_add_infinity_recoveries / iterations);
 }
 
 void add_profile(bb::gpu::bn254::msm_profile &totals,
@@ -120,6 +134,7 @@ void add_profile(bb::gpu::bn254::msm_profile &totals,
   totals.build_bucket_jobs_ms += profile.build_bucket_jobs_ms;
   totals.sort_bucket_jobs_ms += profile.sort_bucket_jobs_ms;
   totals.init_buckets_ms += profile.init_buckets_ms;
+  totals.field_backend_convert_ms += profile.field_backend_convert_ms;
   totals.accumulate_normal_buckets_ms += profile.accumulate_normal_buckets_ms;
   totals.accumulate_large_buckets_ms += profile.accumulate_large_buckets_ms;
   totals.reduce_buckets_ms += profile.reduce_buckets_ms;
@@ -129,6 +144,15 @@ void add_profile(bb::gpu::bn254::msm_profile &totals,
   totals.total_profiled_ms += profile.total_profiled_ms;
   totals.bits_per_slice += profile.bits_per_slice;
   totals.coordinate_mode += profile.coordinate_mode;
+  totals.field_backend += profile.field_backend;
+  totals.unsafe_xyzz_unchecked_mixed_add +=
+      profile.unsafe_xyzz_unchecked_mixed_add;
+  totals.xyzz_mixed_add_p_zero_total += profile.xyzz_mixed_add_p_zero_total;
+  totals.xyzz_mixed_add_p_zero_double += profile.xyzz_mixed_add_p_zero_double;
+  totals.xyzz_mixed_add_p_zero_opposite +=
+      profile.xyzz_mixed_add_p_zero_opposite;
+  totals.xyzz_mixed_add_infinity_recoveries +=
+      profile.xyzz_mixed_add_infinity_recoveries;
 }
 
 void bench_cpu_baseline(benchmark::State &state) {
