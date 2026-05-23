@@ -172,6 +172,20 @@ BB_GPU_HD_FORCEINLINE void add_u32_with_carry(uint32_t &limb, uint32_t &carry,
 #endif
 }
 
+BB_GPU_HD_FORCEINLINE void mul_u32_wide(const uint32_t lhs, const uint32_t rhs,
+                                        uint32_t &low, uint32_t &high) {
+#if defined(__CUDA_ARCH__)
+  asm volatile("mul.lo.u32 %0, %2, %3;\n\t"
+               "mul.hi.u32 %1, %2, %3;\n\t"
+               : "=r"(low), "=r"(high)
+               : "r"(lhs), "r"(rhs));
+#else
+  const uint64_t product = static_cast<uint64_t>(lhs) * rhs;
+  low = static_cast<uint32_t>(product);
+  high = static_cast<uint32_t>(product >> 32);
+#endif
+}
+
 BB_GPU_HD_FORCEINLINE uint32_t add_u32_return_carry(uint32_t &limb,
                                                     const uint32_t addend) {
   uint32_t carry = 0;
@@ -313,6 +327,151 @@ mul_wide_straightline(const fq32_t &lhs, const fq32_t &rhs, uint32_t out[16]) {
   mul_wide_row<5>(lhs, rhs, out);
   mul_wide_row<6>(lhs, rhs, out);
   mul_wide_row<7>(lhs, rhs, out);
+}
+
+BB_GPU_HD_FORCEINLINE void sqr_add_product_to_acc(uint32_t &acc0,
+                                                  uint32_t &acc1,
+                                                  uint32_t &acc2,
+                                                  const uint32_t lhs,
+                                                  const uint32_t rhs) {
+  uint32_t low = 0;
+  uint32_t high = 0;
+  mul_u32_wide(lhs, rhs, low, high);
+  uint32_t carry = add_u32_with_carry_in(acc0, low, 0);
+  carry = add_u32_with_carry_in(acc1, high, carry);
+  add_u32_with_carry_in(acc2, 0, carry);
+}
+
+BB_GPU_HD_FORCEINLINE void sqr_add_double_product_to_acc(uint32_t &acc0,
+                                                         uint32_t &acc1,
+                                                         uint32_t &acc2,
+                                                         const uint32_t lhs,
+                                                         const uint32_t rhs) {
+  uint32_t low = 0;
+  uint32_t high = 0;
+  mul_u32_wide(lhs, rhs, low, high);
+  const uint32_t top = high >> 31;
+  high = (high << 1) | (low >> 31);
+  low <<= 1;
+  uint32_t carry = add_u32_with_carry_in(acc0, low, 0);
+  carry = add_u32_with_carry_in(acc1, high, carry);
+  add_u32_with_carry_in(acc2, top, carry);
+}
+
+template <int INDEX>
+BB_GPU_HD_FORCEINLINE void sqr_emit_column(uint32_t out[16], uint32_t &acc0,
+                                           uint32_t &acc1, uint32_t &acc2) {
+  out[INDEX] = acc0;
+  acc0 = acc1;
+  acc1 = acc2;
+  acc2 = 0;
+}
+
+BB_GPU_HD_FORCEINLINE void sqr_wide_straightline(const fq32_t &value,
+                                                 uint32_t out[16]) {
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    out[i] = 0;
+  }
+
+  uint32_t acc0 = 0;
+  uint32_t acc1 = 0;
+  uint32_t acc2 = 0;
+
+  sqr_add_product_to_acc(acc0, acc1, acc2, value.limbs[0], value.limbs[0]);
+  sqr_emit_column<0>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[0],
+                                value.limbs[1]);
+  sqr_emit_column<1>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[0],
+                                value.limbs[2]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, value.limbs[1], value.limbs[1]);
+  sqr_emit_column<2>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[0],
+                                value.limbs[3]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[1],
+                                value.limbs[2]);
+  sqr_emit_column<3>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[0],
+                                value.limbs[4]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[1],
+                                value.limbs[3]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, value.limbs[2], value.limbs[2]);
+  sqr_emit_column<4>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[0],
+                                value.limbs[5]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[1],
+                                value.limbs[4]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[2],
+                                value.limbs[3]);
+  sqr_emit_column<5>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[0],
+                                value.limbs[6]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[1],
+                                value.limbs[5]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[2],
+                                value.limbs[4]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, value.limbs[3], value.limbs[3]);
+  sqr_emit_column<6>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[0],
+                                value.limbs[7]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[1],
+                                value.limbs[6]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[2],
+                                value.limbs[5]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[3],
+                                value.limbs[4]);
+  sqr_emit_column<7>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[1],
+                                value.limbs[7]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[2],
+                                value.limbs[6]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[3],
+                                value.limbs[5]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, value.limbs[4], value.limbs[4]);
+  sqr_emit_column<8>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[2],
+                                value.limbs[7]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[3],
+                                value.limbs[6]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[4],
+                                value.limbs[5]);
+  sqr_emit_column<9>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[3],
+                                value.limbs[7]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[4],
+                                value.limbs[6]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, value.limbs[5], value.limbs[5]);
+  sqr_emit_column<10>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[4],
+                                value.limbs[7]);
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[5],
+                                value.limbs[6]);
+  sqr_emit_column<11>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[5],
+                                value.limbs[7]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, value.limbs[6], value.limbs[6]);
+  sqr_emit_column<12>(out, acc0, acc1, acc2);
+
+  sqr_add_double_product_to_acc(acc0, acc1, acc2, value.limbs[6],
+                                value.limbs[7]);
+  sqr_emit_column<13>(out, acc0, acc1, acc2);
+
+  sqr_add_product_to_acc(acc0, acc1, acc2, value.limbs[7], value.limbs[7]);
+  sqr_emit_column<14>(out, acc0, acc1, acc2);
+  out[15] = acc0;
 }
 
 template <int I>
@@ -602,7 +761,13 @@ BB_GPU_HD_FORCEINLINE fq32_t sqr(const fq32_t &value) {
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t sqr_straightline(const fq32_t &value) {
+#if defined(BB_GPU_FQ32_DEDICATED_SQR)
+  uint32_t wide[16] = {};
+  sqr_wide_straightline(value, wide);
+  return reduce_straightline(wide);
+#else
   return mul_straightline(value, value);
+#endif
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t normalize(fq32_t value) {

@@ -212,9 +212,9 @@ bn254::projective_t icicle_v4_backend_msm(const RawInput &raw,
                                           const bool points_montgomery_form) {
   static_assert(sizeof(bn254::scalar_t) == sizeof(RawField));
   static_assert(sizeof(bn254::affine_t) == sizeof(RawAffine));
-  icicle::MSMConfig config = make_msm_config(
-      bits_per_slice, false, scalars_montgomery_form, false,
-      points_montgomery_form, false);
+  icicle::MSMConfig config =
+      make_msm_config(bits_per_slice, false, scalars_montgomery_form, false,
+                      points_montgomery_form, false);
 
   bn254::projective_t result{};
   check_icicle(
@@ -320,9 +320,9 @@ DeviceRawInput make_device_raw_input(const RawInput &raw, double &h2d_ms) {
 
 void icicle_v4_device_backend_msm(const DeviceRawInput &raw,
                                   const uint32_t bits_per_slice) {
-  icicle::MSMConfig config = make_msm_config(
-      bits_per_slice, true, icicle_scalars_montgomery_form(), true,
-      icicle_points_montgomery_form(), true);
+  icicle::MSMConfig config =
+      make_msm_config(bits_per_slice, true, icicle_scalars_montgomery_form(),
+                      true, icicle_points_montgomery_form(), true);
   check_icicle(icicle::msm(raw.scalars, raw.points, static_cast<int>(raw.count),
                            config, raw.projective_result),
                "device-resident MSM");
@@ -376,8 +376,7 @@ void bench_icicle_v4_e2e(benchmark::State &state) {
     totals.backend_ms += elapsed_ms([&]() {
       bb::gpu::ScopedNvtxRange range("icicle.v4.e2e.backend");
       backend_result = icicle_v4_backend_msm(
-          raw, bits_per_slice, scalars_montgomery_form,
-          points_montgomery_form);
+          raw, bits_per_slice, scalars_montgomery_form, points_montgomery_form);
     });
     totals.postprocess_ms += elapsed_ms([&]() {
       bb::gpu::ScopedNvtxRange range("icicle.v4.e2e.postprocess");
@@ -421,8 +420,7 @@ void bench_icicle_v4_prepared_host(benchmark::State &state) {
     totals.backend_ms += elapsed_ms([&]() {
       bb::gpu::ScopedNvtxRange range("icicle.v4.prepared_host.backend");
       backend_result = icicle_v4_backend_msm(
-          raw, bits_per_slice, scalars_montgomery_form,
-          points_montgomery_form);
+          raw, bits_per_slice, scalars_montgomery_form, points_montgomery_form);
     });
     totals.postprocess_ms += elapsed_ms([&]() {
       bb::gpu::ScopedNvtxRange range("icicle.v4.prepared_host.postprocess");
@@ -436,9 +434,8 @@ void bench_icicle_v4_prepared_host(benchmark::State &state) {
     return;
   }
   const auto expected = msm_bench::cpu_msm(*input);
-  bn254::projective_t actual_projective =
-      icicle_v4_backend_msm(raw, bits_per_slice, scalars_montgomery_form,
-                            points_montgomery_form);
+  bn254::projective_t actual_projective = icicle_v4_backend_msm(
+      raw, bits_per_slice, scalars_montgomery_form, points_montgomery_form);
   const auto actual = finalize_icicle_v4_result(actual_projective);
   msm_bench::assert_equal("Icicle v4 prepared host", log_num_points, expected,
                           actual);
@@ -495,6 +492,8 @@ BENCHMARK(bench_icicle_v4_device_resident)
     ->Name("BN254/Baseline/IcicleV4/DeviceResident")
     ->DenseRange(msm_bench::MIN_LOG_NUM_POINTS, msm_bench::MAX_LOG_NUM_POINTS,
                  2)
+    ->Arg(21)
+    ->Arg(23)
     ->Unit(benchmark::kMillisecond);
 
 } // namespace

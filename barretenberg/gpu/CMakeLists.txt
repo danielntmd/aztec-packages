@@ -176,6 +176,39 @@ if(NOT FUZZING)
                 benchmark::benchmark
                 CUDA::cudart
                 ${BB_GPU_STDCXX_LIBRARY})
+
+        add_executable(gpu_msm_icicle_v28_profiled_pipeline_bench
+            benchmark/msm_benchmark_common.cpp
+            benchmark/msm_icicle_v28_profiled_pipeline.bench.cpp
+            benchmark/msm_icicle_v28_profiled_pipeline.cu)
+        target_include_directories(gpu_msm_icicle_v28_profiled_pipeline_bench
+            PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/benchmark"
+                "${BB_GPU_INCLUDE_DIR}"
+                "${BB_GPU_CPP_SOURCE_DIR}"
+                ${MSGPACK_INCLUDE}
+                ${TRACY_INCLUDE}
+                ${LMDB_INCLUDE}
+                ${LIBDEFLATE_INCLUDE}
+                ${HTTPLIB_INCLUDE}
+                ${BACKWARD_INCLUDE}
+                ${NLOHMANN_JSON_INCLUDE}
+                "${ICICLE_V28_ROOT}/include"
+                "${ICICLE_V28_ROOT}/icicle/include"
+                "${ICICLE_V28_ROOT}/icicle/src")
+        target_compile_definitions(gpu_msm_icicle_v28_profiled_pipeline_bench
+            PRIVATE
+                FIELD_ID=1
+                CURVE_ID=1)
+        target_link_libraries(gpu_msm_icicle_v28_profiled_pipeline_bench
+            PRIVATE
+                commitment_schemes
+                benchmark::benchmark
+                CUDA::cudart
+                ${BB_GPU_STDCXX_LIBRARY})
+        if(TARGET msgpack-c)
+            add_dependencies(gpu_msm_icicle_v28_profiled_pipeline_bench msgpack-c)
+        endif()
     endif()
 
     add_executable(gpu_field_arithmetic_bench

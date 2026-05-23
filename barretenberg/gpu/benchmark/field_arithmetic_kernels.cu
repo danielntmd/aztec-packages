@@ -678,49 +678,10 @@ __device__ __noinline__ exp_fq32_t fq32_callable_sqr(const exp_fq32_t &value) {
   return bb::gpu::bn254::experimental::sqr_straightline(value);
 }
 
-__device__ __forceinline__ void fq32_add_wide_product(uint32_t wide[16],
-                                                      const int index,
-                                                      const uint32_t lhs,
-                                                      const uint32_t rhs) {
-#if defined(__CUDA_ARCH__)
-  const uint32_t lo = lhs * rhs;
-  const uint32_t hi = __umulhi(lhs, rhs);
-#else
-  const uint64_t product = static_cast<uint64_t>(lhs) * rhs;
-  const uint32_t lo = static_cast<uint32_t>(product);
-  const uint32_t hi = static_cast<uint32_t>(product >> 32);
-#endif
-  uint32_t carry =
-      bb::gpu::bn254::experimental::add_u32_with_carry_in(wide[index], lo, 0);
-  carry = bb::gpu::bn254::experimental::add_u32_with_carry_in(wide[index + 1],
-                                                              hi, carry);
-  for (int limb = index + 2; carry != 0 && limb < 16; ++limb) {
-    carry = bb::gpu::bn254::experimental::add_u32_with_carry_in(wide[limb], 0,
-                                                                carry);
-  }
-}
-
-__device__ __forceinline__ void fq32_sqr_wide_dedicated(const exp_fq32_t &value,
-                                                        uint32_t wide[16]) {
-#pragma unroll
-  for (int i = 0; i < 16; ++i) {
-    wide[i] = 0;
-  }
-#pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    fq32_add_wide_product(wide, i + i, value.limbs[i], value.limbs[i]);
-#pragma unroll
-    for (int j = i + 1; j < 8; ++j) {
-      fq32_add_wide_product(wide, i + j, value.limbs[i], value.limbs[j]);
-      fq32_add_wide_product(wide, i + j, value.limbs[i], value.limbs[j]);
-    }
-  }
-}
-
 __device__ __forceinline__ exp_fq32_t
 fq32_dedicated_sqr(const exp_fq32_t &value) {
   uint32_t wide[16] = {};
-  fq32_sqr_wide_dedicated(value, wide);
+  bb::gpu::bn254::experimental::sqr_wide_straightline(value, wide);
   return bb::gpu::bn254::experimental::reduce_straightline(wide);
 }
 
