@@ -56,6 +56,14 @@ BB_GPU_HD inline fq_t fq_sub(const fq_t &lhs, const fq_t &rhs) {
   return lhs - rhs;
 }
 
+BB_GPU_HD inline fq_t fq_add_canonical(const fq_t &lhs, const fq_t &rhs) {
+  return lhs.add_assume_canonical(rhs);
+}
+
+BB_GPU_HD inline fq_t fq_sub_canonical(const fq_t &lhs, const fq_t &rhs) {
+  return lhs.sub_assume_canonical(rhs);
+}
+
 BB_GPU_HD inline fq_t fq_mul_canonical(const fq_t &lhs, const fq_t &rhs) {
   return lhs.mul_assume_canonical(rhs);
 }
@@ -139,7 +147,7 @@ BB_GPU_HD inline void self_double(xyzz_g1_t &point) {
     return;
   }
 
-  fq_t u = fq_add(point.y, point.y);
+  fq_t u = fq_add_canonical(point.y, point.y);
   if (u.is_zero()) {
     point = xyzz_infinity();
     return;
@@ -149,11 +157,11 @@ BB_GPU_HD inline void self_double(xyzz_g1_t &point) {
   const fq_t w = fq_mul_canonical(u, v);
   const fq_t s = fq_mul_canonical(point.x, v);
   fq_t m = fq_sqr_canonical(point.x);
-  m = fq_add(fq_add(m, m), m);
-  const fq_t two_s = fq_add(s, s);
-  const fq_t x3 = fq_sub(fq_sqr_canonical(m), two_s);
-  point.y =
-      fq_sub(fq_mul_canonical(m, fq_sub(s, x3)), fq_mul_canonical(w, point.y));
+  m = fq_add_canonical(fq_add_canonical(m, m), m);
+  const fq_t two_s = fq_add_canonical(s, s);
+  const fq_t x3 = fq_sub_canonical(fq_sqr_canonical(m), two_s);
+  point.y = fq_sub_canonical(fq_mul_canonical(m, fq_sub_canonical(s, x3)),
+                             fq_mul_canonical(w, point.y));
   point.x = x3;
   point.zz = fq_mul_canonical(v, point.zz);
   point.zzz = fq_mul_canonical(w, point.zzz);
@@ -269,13 +277,13 @@ BB_GPU_HD inline void xyzz_mixed_add(xyzz_g1_t &lhs, const affine_g1_t &rhs) {
   lhs.zzz = fq_mul_canonical(lhs.zzz, ppp);
   fq_t q = fq_mul_canonical(lhs.x, pp);
   fq_t x3 = fq_sqr_canonical(r);
-  x3 = fq_sub(x3, ppp);
-  pp = fq_add(q, q);
-  x3 = fq_sub(x3, pp);
-  q = fq_sub(q, x3);
+  x3 = fq_sub_canonical(x3, ppp);
+  pp = fq_add_canonical(q, q);
+  x3 = fq_sub_canonical(x3, pp);
+  q = fq_sub_canonical(q, x3);
   q = fq_mul_canonical(r, q);
   ppp = fq_mul_canonical(lhs.y, ppp);
-  lhs.y = fq_sub(q, ppp);
+  lhs.y = fq_sub_canonical(q, ppp);
   lhs.x = x3;
 }
 
@@ -303,13 +311,13 @@ BB_GPU_HD inline void xyzz_mixed_add_zz1_equals_one(xyzz_g1_t &lhs,
   lhs.zzz = ppp;
   fq_t q = fq_mul_canonical(lhs.x, pp);
   fq_t x3 = fq_sqr_canonical(r);
-  x3 = fq_sub(x3, ppp);
-  pp = fq_add(q, q);
-  x3 = fq_sub(x3, pp);
-  q = fq_sub(q, x3);
+  x3 = fq_sub_canonical(x3, ppp);
+  pp = fq_add_canonical(q, q);
+  x3 = fq_sub_canonical(x3, pp);
+  q = fq_sub_canonical(q, x3);
   q = fq_mul_canonical(r, q);
   ppp = fq_mul_canonical(lhs.y, ppp);
-  lhs.y = fq_sub(q, ppp);
+  lhs.y = fq_sub_canonical(q, ppp);
   lhs.x = x3;
 }
 
@@ -332,14 +340,14 @@ BB_GPU_HD inline void xyzz_mixed_add_assume_finite(xyzz_g1_t &lhs,
   fq_t ppp = fq_mul_canonical(p, pp);
   lhs.zz = fq_mul_canonical(lhs.zz, pp);
   fq_t x3 = fq_sqr_canonical(r);
-  x3 = fq_sub(x3, ppp);
-  pp = fq_add(q, q);
-  x3 = fq_sub(x3, pp);
+  x3 = fq_sub_canonical(x3, ppp);
+  pp = fq_add_canonical(q, q);
+  x3 = fq_sub_canonical(x3, pp);
   lhs.zzz = fq_mul_canonical(lhs.zzz, ppp);
-  q = fq_sub(q, x3);
+  q = fq_sub_canonical(q, x3);
   q = fq_mul_canonical(r, q);
   ppp = fq_mul_canonical(lhs.y, ppp);
-  lhs.y = fq_sub(q, ppp);
+  lhs.y = fq_sub_canonical(q, ppp);
   lhs.x = x3;
 }
 
@@ -362,14 +370,14 @@ xyzz_mixed_add_zz1_equals_one_assume_finite(xyzz_g1_t &lhs,
   fq_t ppp = fq_mul_canonical(p, pp);
   lhs.zz = pp;
   fq_t x3 = fq_sqr_canonical(r);
-  x3 = fq_sub(x3, ppp);
-  pp = fq_add(q, q);
-  x3 = fq_sub(x3, pp);
+  x3 = fq_sub_canonical(x3, ppp);
+  pp = fq_add_canonical(q, q);
+  x3 = fq_sub_canonical(x3, pp);
   lhs.zzz = ppp;
-  q = fq_sub(q, x3);
+  q = fq_sub_canonical(q, x3);
   q = fq_mul_canonical(r, q);
   ppp = fq_mul_canonical(lhs.y, ppp);
-  lhs.y = fq_sub(q, ppp);
+  lhs.y = fq_sub_canonical(q, ppp);
   lhs.x = x3;
 }
 
@@ -433,13 +441,13 @@ BB_GPU_HD inline void xyzz_mixed_add_unchecked(xyzz_g1_t &lhs,
   lhs.zzz = fq_mul_canonical(lhs.zzz, ppp);
   fq_t q = fq_mul_canonical(lhs.x, pp);
   fq_t x3 = fq_sqr_canonical(r);
-  x3 = fq_sub(x3, ppp);
-  pp = fq_add(q, q);
-  x3 = fq_sub(x3, pp);
-  q = fq_sub(q, x3);
+  x3 = fq_sub_canonical(x3, ppp);
+  pp = fq_add_canonical(q, q);
+  x3 = fq_sub_canonical(x3, pp);
+  q = fq_sub_canonical(q, x3);
   q = fq_mul_canonical(r, q);
   ppp = fq_mul_canonical(lhs.y, ppp);
-  lhs.y = fq_sub(q, ppp);
+  lhs.y = fq_sub_canonical(q, ppp);
   lhs.x = x3;
 }
 
@@ -454,13 +462,13 @@ xyzz_mixed_add_zz1_equals_one_unchecked(xyzz_g1_t &lhs,
   lhs.zzz = ppp;
   fq_t q = fq_mul_canonical(lhs.x, pp);
   fq_t x3 = fq_sqr_canonical(r);
-  x3 = fq_sub(x3, ppp);
-  pp = fq_add(q, q);
-  x3 = fq_sub(x3, pp);
-  q = fq_sub(q, x3);
+  x3 = fq_sub_canonical(x3, ppp);
+  pp = fq_add_canonical(q, q);
+  x3 = fq_sub_canonical(x3, pp);
+  q = fq_sub_canonical(q, x3);
   q = fq_mul_canonical(r, q);
   ppp = fq_mul_canonical(lhs.y, ppp);
-  lhs.y = fq_sub(q, ppp);
+  lhs.y = fq_sub_canonical(q, ppp);
   lhs.x = x3;
 }
 

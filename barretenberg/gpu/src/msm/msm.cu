@@ -10,6 +10,10 @@
 #include "barretenberg/gpu/curves/bn254/fq32.cuh"
 #include "barretenberg/gpu/msm/msm_profile.cuh"
 
+#ifdef BB_GPU_HAVE_ICICLE_V28
+#include "curves/params/bn254.cuh"
+#endif
+
 #include <cuda_runtime.h>
 
 #include <array>
@@ -60,6 +64,8 @@ struct Fq32ShiftedSrsCache {
   uint32_t shift_bits = 0;
   uint32_t precompute_factor = 1;
 };
+
+using IcicleShiftedSrsCache = Fq32ShiftedSrsCache;
 
 bool xyzz_fallback_profile_enabled() {
   const char *value = std::getenv("MSM_BENCH_COUNT_XYZZ_FALLBACKS");
@@ -931,6 +937,264 @@ __global__ void convert_fq32_xyzz_to_xyzz_kernel(const fq32_xyzz_g1_t *points,
                              fq32_to_fq_montgomery(point.zzz), false};
 }
 
+#ifdef BB_GPU_HAVE_ICICLE_V28
+using icicle_fq_t = ::bn254::point_field_t;
+
+struct alignas(64) icicle_affine_g1_t {
+  icicle_fq_t x;
+  icicle_fq_t y;
+};
+
+struct alignas(32) icicle_xyzz_g1_t {
+  icicle_fq_t x;
+  icicle_fq_t y;
+  icicle_fq_t zz;
+  icicle_fq_t zzz;
+  bool infinity;
+};
+
+BB_GPU_HD_FORCEINLINE icicle_fq_t icicle_add(const icicle_fq_t &lhs,
+                                             const icicle_fq_t &rhs) {
+  return lhs + rhs;
+}
+
+BB_GPU_HD_FORCEINLINE icicle_fq_t icicle_sub(const icicle_fq_t &lhs,
+                                             const icicle_fq_t &rhs) {
+  return lhs - rhs;
+}
+
+BB_GPU_HD_FORCEINLINE icicle_fq_t icicle_mul(const icicle_fq_t &lhs,
+                                             const icicle_fq_t &rhs) {
+  return lhs * rhs;
+}
+
+BB_GPU_HD_FORCEINLINE icicle_fq_t icicle_sqr(const icicle_fq_t &value) {
+  return icicle_fq_t::sqr(value);
+}
+
+BB_GPU_HD_FORCEINLINE bool icicle_is_zero(const icicle_fq_t &value) {
+  return value == icicle_fq_t::zero();
+}
+
+BB_GPU_HD_FORCEINLINE icicle_fq_t icicle_from_fq_standard(const fq_t &value) {
+  const fq_t standard = value.from_montgomery_form_reduced();
+  icicle_fq_t out{};
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    out.limbs_storage.limbs[2 * i] = static_cast<uint32_t>(standard.data[i]);
+    out.limbs_storage.limbs[2 * i + 1] =
+        static_cast<uint32_t>(standard.data[i] >> 32);
+  }
+  return out;
+}
+
+BB_GPU_HD_FORCEINLINE fq_t icicle_to_fq_montgomery(const icicle_fq_t &value) {
+  return fq_t::raw(static_cast<uint64_t>(value.limbs_storage.limbs[0]) |
+                       (static_cast<uint64_t>(value.limbs_storage.limbs[1])
+                        << 32),
+                   static_cast<uint64_t>(value.limbs_storage.limbs[2]) |
+                       (static_cast<uint64_t>(value.limbs_storage.limbs[3])
+                        << 32),
+                   static_cast<uint64_t>(value.limbs_storage.limbs[4]) |
+                       (static_cast<uint64_t>(value.limbs_storage.limbs[5])
+                        << 32),
+                   static_cast<uint64_t>(value.limbs_storage.limbs[6]) |
+                       (static_cast<uint64_t>(value.limbs_storage.limbs[7])
+                        << 32))
+      .to_montgomery_form();
+}
+
+BB_GPU_HD_FORCEINLINE icicle_affine_g1_t icicle_affine_infinity() {
+  return {icicle_fq_t::zero(), icicle_fq_t::zero()};
+}
+
+BB_GPU_HD_FORCEINLINE icicle_xyzz_g1_t icicle_xyzz_infinity() {
+  return {icicle_fq_t::zero(), icicle_fq_t::zero(), icicle_fq_t::zero(),
+          icicle_fq_t::zero(), true};
+}
+
+BB_GPU_HD_FORCEINLINE void self_double(icicle_xyzz_g1_t &point) {
+  if (point.infinity) {
+    return;
+  }
+
+  icicle_fq_t u = icicle_add(point.y, point.y);
+  if (icicle_is_zero(u)) {
+    point = icicle_xyzz_infinity();
+    return;
+  }
+
+  const icicle_fq_t v = icicle_sqr(u);
+  const icicle_fq_t w = icicle_mul(u, v);
+  const icicle_fq_t s = icicle_mul(point.x, v);
+  icicle_fq_t m = icicle_sqr(point.x);
+  m = icicle_add(icicle_add(m, m), m);
+  const icicle_fq_t two_s = icicle_add(s, s);
+  const icicle_fq_t x3 = icicle_sub(icicle_sqr(m), two_s);
+  point.y = icicle_sub(icicle_mul(m, icicle_sub(s, x3)),
+                       icicle_mul(w, point.y));
+  point.x = x3;
+  point.zz = icicle_mul(v, point.zz);
+  point.zzz = icicle_mul(w, point.zzz);
+}
+
+BB_GPU_HD_FORCEINLINE void
+icicle_xyzz_mixed_add_assume_finite(icicle_xyzz_g1_t &lhs,
+                                    const icicle_affine_g1_t &rhs) {
+  icicle_fq_t p = icicle_sub(icicle_mul(rhs.x, lhs.zz), lhs.x);
+  icicle_fq_t r = icicle_sub(icicle_mul(rhs.y, lhs.zzz), lhs.y);
+
+  if (icicle_is_zero(p)) {
+    if (icicle_is_zero(r)) {
+      self_double(lhs);
+    } else {
+      lhs = icicle_xyzz_infinity();
+    }
+    return;
+  }
+
+  icicle_fq_t pp = icicle_sqr(p);
+  icicle_fq_t q = icicle_mul(lhs.x, pp);
+  icicle_fq_t ppp = icicle_mul(p, pp);
+  lhs.zz = icicle_mul(lhs.zz, pp);
+  icicle_fq_t x3 = icicle_sqr(r);
+  x3 = icicle_sub(x3, ppp);
+  pp = icicle_add(q, q);
+  x3 = icicle_sub(x3, pp);
+  lhs.zzz = icicle_mul(lhs.zzz, ppp);
+  q = icicle_sub(q, x3);
+  q = icicle_mul(r, q);
+  ppp = icicle_mul(lhs.y, ppp);
+  lhs.y = icicle_sub(q, ppp);
+  lhs.x = x3;
+}
+
+BB_GPU_HD_FORCEINLINE void
+icicle_xyzz_mixed_add_zz1_equals_one_assume_finite(
+    icicle_xyzz_g1_t &lhs, const icicle_affine_g1_t &rhs) {
+  icicle_fq_t p = icicle_sub(rhs.x, lhs.x);
+  icicle_fq_t r = icicle_sub(rhs.y, lhs.y);
+  if (icicle_is_zero(p)) {
+    if (icicle_is_zero(r)) {
+      self_double(lhs);
+    } else {
+      lhs = icicle_xyzz_infinity();
+    }
+    return;
+  }
+
+  icicle_fq_t pp = icicle_sqr(p);
+  icicle_fq_t q = icicle_mul(lhs.x, pp);
+  icicle_fq_t ppp = icicle_mul(p, pp);
+  lhs.zz = pp;
+  icicle_fq_t x3 = icicle_sqr(r);
+  x3 = icicle_sub(x3, ppp);
+  pp = icicle_add(q, q);
+  x3 = icicle_sub(x3, pp);
+  lhs.zzz = ppp;
+  q = icicle_sub(q, x3);
+  q = icicle_mul(r, q);
+  ppp = icicle_mul(lhs.y, ppp);
+  lhs.y = icicle_sub(q, ppp);
+  lhs.x = x3;
+}
+
+BB_GPU_HD_FORCEINLINE void icicle_xyzz_add_assign(icicle_xyzz_g1_t &lhs,
+                                                  const icicle_xyzz_g1_t &rhs) {
+  if (lhs.infinity) {
+    lhs = rhs;
+    return;
+  }
+  if (rhs.infinity) {
+    return;
+  }
+
+  icicle_fq_t u1 = icicle_mul(lhs.x, rhs.zz);
+  icicle_fq_t u2 = icicle_mul(rhs.x, lhs.zz);
+  icicle_fq_t s1 = icicle_mul(lhs.y, rhs.zzz);
+  icicle_fq_t s2 = icicle_mul(rhs.y, lhs.zzz);
+  icicle_fq_t p = icicle_sub(u2, u1);
+  icicle_fq_t r = icicle_sub(s2, s1);
+
+  if (icicle_is_zero(p)) {
+    if (icicle_is_zero(r)) {
+      self_double(lhs);
+    } else {
+      lhs = icicle_xyzz_infinity();
+    }
+    return;
+  }
+
+  icicle_fq_t pp = icicle_sqr(p);
+  p = icicle_mul(p, pp);
+  u1 = icicle_mul(u1, pp);
+  icicle_fq_t x3 = icicle_sub(icicle_sqr(r), p);
+  x3 = icicle_sub(x3, icicle_add(u1, u1));
+  s1 = icicle_mul(s1, p);
+  u1 = icicle_mul(r, icicle_sub(u1, x3));
+  lhs.y = icicle_sub(u1, s1);
+  lhs.x = x3;
+  lhs.zz = icicle_mul(icicle_mul(lhs.zz, rhs.zz), pp);
+  lhs.zzz = icicle_mul(icicle_mul(lhs.zzz, rhs.zzz), p);
+}
+
+BB_GPU_HD_FORCEINLINE void icicle_chained_xyzz_mixed_add_indexed_nonzero(
+    icicle_xyzz_g1_t &accumulator, const icicle_affine_g1_t *points,
+    const uint32_t *point_indices, const int start, const int count) {
+  if (count <= 0) {
+    accumulator = icicle_xyzz_infinity();
+    return;
+  }
+
+  int offset = 0;
+  icicle_affine_g1_t point = points[point_indices[start + offset]];
+  accumulator = {point.x, point.y, icicle_fq_t::one(), icicle_fq_t::one(),
+                 false};
+  ++offset;
+  if (offset < count) {
+    icicle_xyzz_mixed_add_zz1_equals_one_assume_finite(
+        accumulator, points[point_indices[start + offset]]);
+    ++offset;
+  }
+  for (; offset < count; ++offset) {
+    point = points[point_indices[start + offset]];
+    if (accumulator.infinity) {
+      accumulator = {point.x, point.y, icicle_fq_t::one(), icicle_fq_t::one(),
+                     false};
+    } else {
+      icicle_xyzz_mixed_add_assume_finite(accumulator, point);
+    }
+  }
+}
+
+BB_GPU_HD_FORCEINLINE affine_g1_t
+icicle_xyzz_to_affine_montgomery(const icicle_xyzz_g1_t &point) {
+  if (point.infinity) {
+    return affine_infinity();
+  }
+  const icicle_fq_t zzz_inv = icicle_fq_t::inverse(point.zzz);
+  const icicle_fq_t zz_inv = icicle_sqr(icicle_mul(point.zz, zzz_inv));
+  return {icicle_to_fq_montgomery(icicle_mul(point.x, zz_inv)),
+          icicle_to_fq_montgomery(icicle_mul(point.y, zzz_inv))};
+}
+
+__global__ void convert_points_to_icicle_kernel(const affine_g1_t *points,
+                                                icicle_affine_g1_t *out,
+                                                const size_t num_points) {
+  const size_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx >= num_points) {
+    return;
+  }
+  const affine_g1_t point = points[idx];
+  if (is_infinity(point)) {
+    out[idx] = icicle_affine_infinity();
+  } else {
+    out[idx] = {icicle_from_fq_standard(point.x),
+                icicle_from_fq_standard(point.y)};
+  }
+}
+#endif
+
 __global__ void init_bucket_storage_kernel(jacobian_g1_t *buckets,
                                            const size_t num_buckets) {
   const size_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -954,6 +1218,17 @@ __global__ void init_fq32_xyzz_bucket_storage_kernel(fq32_xyzz_g1_t *buckets,
     buckets[idx] = fq32_xyzz_infinity();
   }
 }
+
+#ifdef BB_GPU_HAVE_ICICLE_V28
+__global__ void
+init_icicle_xyzz_bucket_storage_kernel(icicle_xyzz_g1_t *buckets,
+                                       const size_t num_buckets) {
+  const size_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (idx < num_buckets) {
+    buckets[idx] = icicle_xyzz_infinity();
+  }
+}
+#endif
 
 __global__ void accumulate_normal_buckets_kernel(
     const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
@@ -1058,6 +1333,58 @@ __global__ void __launch_bounds__(BUCKET_THREADS, 2)
       accumulator, points, sorted_point_indices, start, count);
   buckets[unique_bucket_indices[run_idx]] = accumulator;
 }
+
+#ifdef BB_GPU_HAVE_ICICLE_V28
+__global__ void __launch_bounds__(BUCKET_THREADS, 2)
+    accumulate_normal_buckets_icicle_xyzz_kernel(
+        const int *sorted_bucket_run_indices,
+        const uint32_t *unique_bucket_indices, const int *bucket_sizes,
+        const int *bucket_offsets, const uint32_t *sorted_point_indices,
+        const icicle_affine_g1_t *points, icicle_xyzz_g1_t *buckets,
+        const int num_active_buckets, const int large_bucket_threshold) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  const int count = bucket_sizes[run_idx];
+  if (count > large_bucket_threshold) {
+    return;
+  }
+
+  const int start = bucket_offsets[run_idx];
+  icicle_xyzz_g1_t accumulator;
+  icicle_chained_xyzz_mixed_add_indexed_nonzero(
+      accumulator, points, sorted_point_indices, start, count);
+  buckets[unique_bucket_indices[run_idx]] = accumulator;
+}
+
+__global__ void __launch_bounds__(BUCKET_THREADS, 2)
+    accumulate_large_buckets_icicle_xyzz_kernel(
+        const int *sorted_bucket_run_indices,
+        const uint32_t *unique_bucket_indices, const int *bucket_sizes,
+        const int *bucket_offsets, const uint32_t *sorted_point_indices,
+        const icicle_affine_g1_t *points, icicle_xyzz_g1_t *buckets,
+        const int num_active_buckets, const int large_bucket_threshold) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  const int count = bucket_sizes[run_idx];
+  if (count <= large_bucket_threshold) {
+    return;
+  }
+
+  const int start = bucket_offsets[run_idx];
+  icicle_xyzz_g1_t accumulator;
+  icicle_chained_xyzz_mixed_add_indexed_nonzero(
+      accumulator, points, sorted_point_indices, start, count);
+  buckets[unique_bucket_indices[run_idx]] = accumulator;
+}
+#endif
 
 __global__ void __launch_bounds__(BUCKET_THREADS, 2)
     accumulate_normal_buckets_xyzz_profiled_kernel(
@@ -1519,6 +1846,27 @@ __global__ void __launch_bounds__(BUCKET_THREADS, 2)
   chunk_partials[exec_chunk_partial_indices[chunk_idx]] = accumulator;
 }
 
+#ifdef BB_GPU_HAVE_ICICLE_V28
+__global__ void __launch_bounds__(BUCKET_THREADS, 2)
+    accumulate_large_bucket_segments_icicle_xyzz_kernel(
+        const int *exec_chunk_point_offsets, const int *exec_chunk_point_counts,
+        const int *exec_chunk_partial_indices,
+        const uint32_t *sorted_point_indices, const icicle_affine_g1_t *points,
+        icicle_xyzz_g1_t *chunk_partials, const int num_chunks) {
+  const int chunk_idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (chunk_idx >= num_chunks) {
+    return;
+  }
+
+  const int start = exec_chunk_point_offsets[chunk_idx];
+  const int count = exec_chunk_point_counts[chunk_idx];
+  icicle_xyzz_g1_t accumulator;
+  icicle_chained_xyzz_mixed_add_indexed_nonzero(
+      accumulator, points, sorted_point_indices, start, count);
+  chunk_partials[exec_chunk_partial_indices[chunk_idx]] = accumulator;
+}
+#endif
+
 __global__ void __launch_bounds__(BUCKET_THREADS, 2)
     accumulate_large_bucket_segments_xyzz_profiled_kernel(
         const int *exec_chunk_point_offsets, const int *exec_chunk_point_counts,
@@ -1601,6 +1949,39 @@ __global__ void reduce_large_bucket_chunk_partials_tree_fq32_xyzz_kernel(
   }
 }
 
+#ifdef BB_GPU_HAVE_ICICLE_V28
+__global__ void reduce_large_bucket_chunk_partials_tree_icicle_xyzz_kernel(
+    int *large_bucket_chunk_counts, const int *large_bucket_chunk_offsets,
+    icicle_xyzz_g1_t *chunk_partials, const int *chunk_bucket_job_indices,
+    const int num_chunks) {
+  const int chunk_idx =
+      static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (chunk_idx >= num_chunks) {
+    return;
+  }
+
+  const int job_idx = chunk_bucket_job_indices[chunk_idx];
+  const int count = large_bucket_chunk_counts[job_idx];
+  if (count <= 1) {
+    return;
+  }
+
+  const int chunk_offset = large_bucket_chunk_offsets[job_idx];
+  const int local_idx = chunk_idx - chunk_offset;
+  if (local_idx >= count) {
+    return;
+  }
+
+  const int upper_offset = (count + 1) >> 1;
+  if (local_idx < (count >> 1)) {
+    icicle_xyzz_g1_t partial = chunk_partials[chunk_idx];
+    icicle_xyzz_add_assign(
+        partial, chunk_partials[chunk_offset + upper_offset + local_idx]);
+    chunk_partials[chunk_idx] = partial;
+  }
+}
+#endif
+
 __global__ void
 update_large_bucket_chunk_counts_kernel(int *large_bucket_chunk_counts,
                                         const int num_active_buckets) {
@@ -1662,6 +2043,32 @@ __global__ void reduce_large_bucket_chunk_partials_fq32_xyzz_kernel(
   buckets[unique_bucket_indices[run_idx]] = local;
 }
 
+#ifdef BB_GPU_HAVE_ICICLE_V28
+__global__ void reduce_large_bucket_chunk_partials_icicle_xyzz_kernel(
+    const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *large_bucket_chunk_counts, const int *large_bucket_chunk_offsets,
+    const icicle_xyzz_g1_t *chunk_partials, icicle_xyzz_g1_t *buckets,
+    const int num_active_buckets) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  const int chunk_count = large_bucket_chunk_counts[job_idx];
+  if (chunk_count == 0) {
+    return;
+  }
+
+  const int chunk_offset = large_bucket_chunk_offsets[job_idx];
+  icicle_xyzz_g1_t local = icicle_xyzz_infinity();
+  for (int chunk = 0; chunk < chunk_count; ++chunk) {
+    icicle_xyzz_add_assign(local, chunk_partials[chunk_offset + chunk]);
+  }
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  buckets[unique_bucket_indices[run_idx]] = local;
+}
+#endif
+
 __global__ void scatter_large_bucket_chunk_partials_xyzz_kernel(
     const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
     const int *large_bucket_chunk_counts, const int *large_bucket_chunk_offsets,
@@ -1699,6 +2106,27 @@ __global__ void scatter_large_bucket_chunk_partials_fq32_xyzz_kernel(
   buckets[unique_bucket_indices[run_idx]] =
       chunk_partials[large_bucket_chunk_offsets[job_idx]];
 }
+
+#ifdef BB_GPU_HAVE_ICICLE_V28
+__global__ void scatter_large_bucket_chunk_partials_icicle_xyzz_kernel(
+    const int *sorted_bucket_run_indices, const uint32_t *unique_bucket_indices,
+    const int *large_bucket_chunk_counts, const int *large_bucket_chunk_offsets,
+    const icicle_xyzz_g1_t *chunk_partials, icicle_xyzz_g1_t *buckets,
+    const int num_active_buckets) {
+  const int job_idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (job_idx >= num_active_buckets) {
+    return;
+  }
+
+  if (large_bucket_chunk_counts[job_idx] == 0) {
+    return;
+  }
+
+  const int run_idx = sorted_bucket_run_indices[job_idx];
+  buckets[unique_bucket_indices[run_idx]] =
+      chunk_partials[large_bucket_chunk_offsets[job_idx]];
+}
+#endif
 
 __global__ void reduce_bucket_bit_kernel(jacobian_g1_t *buckets,
                                          jacobian_g1_t *bit_sums,
@@ -1907,6 +2335,91 @@ __global__ void __launch_bounds__(CHUNKED_REDUCTION_THREADS, 2)
   }
 }
 
+#ifdef BB_GPU_HAVE_ICICLE_V28
+__global__ void __launch_bounds__(CHUNKED_REDUCTION_THREADS, 2)
+    reduce_icicle_xyzz_bucket_bit_chunks_kernel(
+        icicle_xyzz_g1_t *buckets, icicle_xyzz_g1_t *chunk_sums,
+        const uint32_t bit, const uint32_t bits_per_slice,
+        const uint32_t num_windows, const uint32_t chunks_per_window) {
+  const uint32_t window = blockIdx.x / chunks_per_window;
+  if (window >= num_windows) {
+    return;
+  }
+  const uint32_t chunk = blockIdx.x - (window * chunks_per_window);
+  const uint32_t bucket_stride = uint32_t{1} << bits_per_slice;
+  const uint32_t half = uint32_t{1} << bit;
+  const uint32_t base = window * bucket_stride;
+  const uint32_t chunk_start = chunk * CHUNKED_REDUCTION_CHUNK_SIZE;
+  if (chunk_start >= half) {
+    return;
+  }
+  const uint32_t chunk_end = chunk_start + CHUNKED_REDUCTION_CHUNK_SIZE < half
+                                 ? chunk_start + CHUNKED_REDUCTION_CHUNK_SIZE
+                                 : half;
+
+  icicle_xyzz_g1_t local = icicle_xyzz_infinity();
+  for (uint32_t i = chunk_start + threadIdx.x; i < chunk_end; i += blockDim.x) {
+    const icicle_xyzz_g1_t upper = buckets[base + half + i];
+    icicle_xyzz_add_assign(local, upper);
+    icicle_xyzz_g1_t lower = buckets[base + i];
+    icicle_xyzz_add_assign(lower, upper);
+    buckets[base + i] = lower;
+  }
+
+  __shared__ icicle_xyzz_g1_t partials[CHUNKED_REDUCTION_THREADS];
+  partials[threadIdx.x] = local;
+  __syncthreads();
+
+  for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      local = partials[threadIdx.x];
+      icicle_xyzz_add_assign(local, partials[threadIdx.x + stride]);
+      partials[threadIdx.x] = local;
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    chunk_sums[(window * chunks_per_window) + chunk] = partials[0];
+  }
+}
+
+__global__ void __launch_bounds__(CHUNKED_REDUCTION_THREADS, 2)
+    reduce_icicle_xyzz_bucket_bit_chunk_sums_kernel(
+        const icicle_xyzz_g1_t *chunk_sums, icicle_xyzz_g1_t *bit_sums,
+        const uint32_t bit, const uint32_t bits_per_slice,
+        const uint32_t num_windows, const uint32_t chunks_per_window) {
+  const uint32_t window = blockIdx.x;
+  if (window >= num_windows) {
+    return;
+  }
+
+  icicle_xyzz_g1_t local = icicle_xyzz_infinity();
+  for (uint32_t chunk = threadIdx.x; chunk < chunks_per_window;
+       chunk += blockDim.x) {
+    icicle_xyzz_add_assign(local,
+                           chunk_sums[(window * chunks_per_window) + chunk]);
+  }
+
+  __shared__ icicle_xyzz_g1_t partials[CHUNKED_REDUCTION_THREADS];
+  partials[threadIdx.x] = local;
+  __syncthreads();
+
+  for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      local = partials[threadIdx.x];
+      icicle_xyzz_add_assign(local, partials[threadIdx.x + stride]);
+      partials[threadIdx.x] = local;
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    bit_sums[(window * bits_per_slice) + bit] = partials[0];
+  }
+}
+#endif
+
 __global__ void compose_window_sums_kernel(const jacobian_g1_t *bit_sums,
                                            jacobian_g1_t *window_sums,
                                            const uint32_t bits_per_slice,
@@ -1963,6 +2476,27 @@ __global__ void compose_fq32_xyzz_window_sums_kernel(
   }
   window_sums[window] = accumulator;
 }
+
+#ifdef BB_GPU_HAVE_ICICLE_V28
+__global__ void compose_icicle_xyzz_window_sums_kernel(
+    const icicle_xyzz_g1_t *bit_sums, icicle_xyzz_g1_t *window_sums,
+    const uint32_t bits_per_slice, const uint32_t num_windows) {
+  const uint32_t window = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (window >= num_windows) {
+    return;
+  }
+
+  icicle_xyzz_g1_t accumulator =
+      bit_sums[window * bits_per_slice + bits_per_slice - 1];
+  for (int bit = static_cast<int>(bits_per_slice) - 2; bit >= 0; --bit) {
+    self_double(accumulator);
+    icicle_xyzz_add_assign(
+        accumulator,
+        bit_sums[(window * bits_per_slice) + static_cast<uint32_t>(bit)]);
+  }
+  window_sums[window] = accumulator;
+}
+#endif
 
 __global__ void compose_signed_window_sums_kernel(
     const jacobian_g1_t *bit_sums, const jacobian_g1_t *buckets,
@@ -2094,6 +2628,32 @@ __global__ void final_xyzz_accumulation_kernel(const xyzz_g1_t *window_sums,
   *result = to_affine(accumulator);
 }
 
+#ifdef BB_GPU_HAVE_ICICLE_V28
+__global__ void
+final_icicle_xyzz_accumulation_kernel(const icicle_xyzz_g1_t *window_sums,
+                                      affine_g1_t *result,
+                                      const uint32_t bits_per_slice,
+                                      const uint32_t num_windows,
+                                      const uint32_t remainder) {
+  const uint32_t msm_index = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (msm_index > 0) {
+    return;
+  }
+
+  icicle_xyzz_g1_t accumulator = icicle_xyzz_infinity();
+  for (uint32_t window = 0; window < num_windows; ++window) {
+    const uint32_t num_doublings = (window == num_windows - 1 && remainder != 0)
+                                       ? remainder
+                                       : bits_per_slice;
+    for (uint32_t i = 0; i < num_doublings; ++i) {
+      self_double(accumulator);
+    }
+    icicle_xyzz_add_assign(accumulator, window_sums[window]);
+  }
+  *result = icicle_xyzz_to_affine_montgomery(accumulator);
+}
+#endif
+
 affine_g1_t affine_infinity_host() {
   affine_g1_t out{fq_t::zero(), fq_t::zero()};
   out.x.self_set_msb();
@@ -2172,6 +2732,15 @@ Fq32ShiftedSrsCache &fq32_shifted_srs_cache_ref() {
 }
 
 void invalidate_fq32_shifted_srs_cache() { fq32_shifted_srs_cache_ref() = {}; }
+
+IcicleShiftedSrsCache &icicle_shifted_srs_cache_ref() {
+  static IcicleShiftedSrsCache cache;
+  return cache;
+}
+
+void invalidate_icicle_shifted_srs_cache() {
+  icicle_shifted_srs_cache_ref() = {};
+}
 
 uint32_t &msm_precompute_factor_ref() {
   static uint32_t factor = 1;
@@ -2606,6 +3175,105 @@ void accumulate_large_buckets_fq32_xyzz_chunked(
              "scatter_large_bucket_chunk_partials_fq32_xyzz_kernel launch");
 }
 
+#ifdef BB_GPU_HAVE_ICICLE_V28
+template <typename Recorder>
+void accumulate_large_buckets_icicle_xyzz_chunked(
+    DeviceBuffer<std::byte> &temp_storage, const int *sorted_bucket_run_indices,
+    const uint32_t *unique_bucket_indices, const int *bucket_sizes,
+    const int *bucket_offsets, const uint32_t *sorted_point_indices,
+    const icicle_affine_g1_t *points, icicle_xyzz_g1_t *dense_buckets,
+    const int num_active_buckets, const int large_bucket_threshold,
+    const uint32_t bucket_job_blocks, const uint32_t chunk_size,
+    const int num_chunks, const int num_full_chunks, const int max_chunk_count,
+    DeviceBuffer<int> &large_bucket_chunk_counts,
+    DeviceBuffer<int> &large_bucket_chunk_offsets,
+    DeviceBuffer<int> &large_bucket_full_chunk_counts,
+    DeviceBuffer<int> &large_bucket_full_chunk_offsets,
+    DeviceBuffer<int> &chunk_bucket_job_indices,
+    DeviceBuffer<int> &exec_chunk_partial_indices,
+    DeviceBuffer<int> &exec_chunk_point_offsets,
+    DeviceBuffer<int> &exec_chunk_point_counts,
+    DeviceBuffer<icicle_xyzz_g1_t> &chunk_partials,
+    const cudaStream_t cuda_stream, void *stream, Recorder &recorder) {
+  if (num_chunks == 0) {
+    recorder.set_large_bucket_config(msm_large_bucket_mode::SINGLE_WARP,
+                                     chunk_size, 0);
+    return;
+  }
+
+  count_large_bucket_chunks_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
+                                     cuda_stream>>>(
+      sorted_bucket_run_indices, bucket_sizes, large_bucket_chunk_counts.data(),
+      large_bucket_full_chunk_counts.data(), num_active_buckets,
+      large_bucket_threshold, chunk_size);
+  check_cuda(cudaGetLastError(), "count_large_bucket_chunks_kernel launch");
+  cub_exclusive_sum(temp_storage, large_bucket_chunk_counts.data(),
+                    large_bucket_chunk_offsets.data(), num_active_buckets,
+                    stream);
+  cub_exclusive_sum(temp_storage, large_bucket_full_chunk_counts.data(),
+                    large_bucket_full_chunk_offsets.data(), num_active_buckets,
+                    stream);
+
+  build_large_bucket_chunk_jobs_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
+                                         cuda_stream>>>(
+      sorted_bucket_run_indices, bucket_sizes, bucket_offsets,
+      large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
+      large_bucket_full_chunk_counts.data(),
+      large_bucket_full_chunk_offsets.data(), chunk_bucket_job_indices.data(),
+      exec_chunk_partial_indices.data(), exec_chunk_point_offsets.data(),
+      exec_chunk_point_counts.data(), num_active_buckets, num_full_chunks,
+      chunk_size);
+  check_cuda(cudaGetLastError(), "build_large_bucket_chunk_jobs_kernel launch");
+
+  const uint32_t chunk_blocks =
+      ceil_div_u32(static_cast<size_t>(num_chunks), BUCKET_THREADS);
+  accumulate_large_bucket_segments_icicle_xyzz_kernel<<<
+      chunk_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+      exec_chunk_point_offsets.data(), exec_chunk_point_counts.data(),
+      exec_chunk_partial_indices.data(), sorted_point_indices, points,
+      chunk_partials.data(), num_chunks);
+  check_cuda(cudaGetLastError(),
+             "accumulate_large_bucket_segments_icicle_xyzz_kernel launch");
+
+  if (max_chunk_count < LARGE_BUCKET_TREE_REDUCTION_MIN_CHUNKS) {
+    reduce_large_bucket_chunk_partials_icicle_xyzz_kernel<<<
+        bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+        sorted_bucket_run_indices, unique_bucket_indices,
+        large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
+        chunk_partials.data(), dense_buckets, num_active_buckets);
+    check_cuda(
+        cudaGetLastError(),
+        "reduce_large_bucket_chunk_partials_icicle_xyzz_kernel launch");
+    return;
+  }
+
+  for (int active_chunk_count = max_chunk_count; active_chunk_count > 1;
+       active_chunk_count = (active_chunk_count + 1) >> 1) {
+    reduce_large_bucket_chunk_partials_tree_icicle_xyzz_kernel<<<
+        chunk_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+        large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
+        chunk_partials.data(), chunk_bucket_job_indices.data(), num_chunks);
+    check_cuda(
+        cudaGetLastError(),
+        "reduce_large_bucket_chunk_partials_tree_icicle_xyzz_kernel launch");
+    update_large_bucket_chunk_counts_kernel<<<bucket_job_blocks, BUCKET_THREADS,
+                                              0, cuda_stream>>>(
+        large_bucket_chunk_counts.data(), num_active_buckets);
+    check_cuda(cudaGetLastError(),
+               "update_large_bucket_chunk_counts_kernel launch");
+  }
+
+  scatter_large_bucket_chunk_partials_icicle_xyzz_kernel<<<
+      bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+      sorted_bucket_run_indices, unique_bucket_indices,
+      large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
+      chunk_partials.data(), dense_buckets, num_active_buckets);
+  check_cuda(
+      cudaGetLastError(),
+      "scatter_large_bucket_chunk_partials_icicle_xyzz_kernel launch");
+}
+#endif
+
 template <typename Recorder>
 void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
                                const size_t point_start_index_size,
@@ -2622,7 +3290,8 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
   const msm_field_backend field_backend = current_msm_field_backend();
   recorder.set_field_backend(field_backend);
   check_condition(field_backend == msm_field_backend::FQ64_MONTGOMERY ||
-                      field_backend == msm_field_backend::FQ32_BARRETT,
+                      field_backend == msm_field_backend::FQ32_BARRETT ||
+                      field_backend == msm_field_backend::ICICLE_V28_BARRETT,
                   "bb::gpu::bn254::msm: invalid field backend");
   if (field_backend == msm_field_backend::FQ32_BARRETT) {
     check_condition(digit_mode == msm_digit_mode::UNSIGNED,
@@ -2631,6 +3300,19 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
     check_condition(coordinate_mode == msm_coordinate_mode::XYZZ,
                     "bb::gpu::bn254::msm: FQ32 backend requires XYZZ "
                     "coordinate mode");
+  }
+  if (field_backend == msm_field_backend::ICICLE_V28_BARRETT) {
+#ifndef BB_GPU_HAVE_ICICLE_V28
+    check_condition(false,
+                    "bb::gpu::bn254::msm: Icicle v2.8 field backend requires "
+                    "ICICLE_V28_ROOT at build time");
+#endif
+    check_condition(digit_mode == msm_digit_mode::UNSIGNED,
+                    "bb::gpu::bn254::msm: Icicle v2.8 field backend requires "
+                    "unsigned digit mode");
+    check_condition(coordinate_mode == msm_coordinate_mode::XYZZ,
+                    "bb::gpu::bn254::msm: Icicle v2.8 field backend requires "
+                    "XYZZ coordinate mode");
   }
   const bool unsafe_xyzz_unchecked_mixed_add =
       coordinate_mode == msm_coordinate_mode::XYZZ &&
@@ -2716,8 +3398,11 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
   uint32_t split_point_start_index = point_start_index;
   uint32_t split_srs_size = static_cast<uint32_t>(srs_size);
   bool shifted_srs_already_fq32 = false;
+  bool shifted_srs_already_icicle = false;
   if (precompute_factor > 1) {
     Fq32ShiftedSrsCache &fq32_shifted_srs_cache = fq32_shifted_srs_cache_ref();
+    IcicleShiftedSrsCache &icicle_shifted_srs_cache =
+        icicle_shifted_srs_cache_ref();
     shifted_srs_already_fq32 =
         field_backend == msm_field_backend::FQ32_BARRETT &&
         fq32_shifted_srs_cache.valid &&
@@ -2726,10 +3411,22 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
         fq32_shifted_srs_cache.shift_bits == shift_bits &&
         fq32_shifted_srs_cache.precompute_factor == precompute_factor &&
         !context.shifted_srs_points().empty();
-    if (!shifted_srs_already_fq32) {
+    shifted_srs_already_icicle =
+        field_backend == msm_field_backend::ICICLE_V28_BARRETT &&
+        icicle_shifted_srs_cache.valid &&
+        icicle_shifted_srs_cache.point_start_index == point_start_index &&
+        icicle_shifted_srs_cache.num_points == num_scalars &&
+        icicle_shifted_srs_cache.shift_bits == shift_bits &&
+        icicle_shifted_srs_cache.precompute_factor == precompute_factor &&
+        !context.shifted_srs_points().empty();
+    if (!shifted_srs_already_fq32 && !shifted_srs_already_icicle) {
       if (field_backend == msm_field_backend::FQ32_BARRETT) {
         context.release_shifted_srs();
         invalidate_fq32_shifted_srs_cache();
+      }
+      if (field_backend == msm_field_backend::ICICLE_V28_BARRETT) {
+        context.release_shifted_srs();
+        invalidate_icicle_shifted_srs_cache();
       }
       recorder.time(msm_stage::precompute_bases, [&]() {
         context.ensure_shifted_srs_uploaded(point_start_index, num_scalars,
@@ -2772,6 +3469,37 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
     }
     points_fq32_device = points_fq32_output;
   }
+#ifdef BB_GPU_HAVE_ICICLE_V28
+  DeviceBuffer<icicle_affine_g1_t> points_icicle;
+  const icicle_affine_g1_t *points_icicle_device = nullptr;
+  if (field_backend == msm_field_backend::ICICLE_V28_BARRETT) {
+    icicle_affine_g1_t *points_icicle_output = nullptr;
+    if (precompute_factor > 1) {
+      points_icicle_output = reinterpret_cast<icicle_affine_g1_t *>(
+          const_cast<affine_g1_t *>(points_device));
+    } else {
+      points_icicle.resize(points_device_count);
+      points_icicle_output = points_icicle.data();
+    }
+    const uint32_t point_convert_blocks =
+        ceil_div_u32(points_device_count, BUCKET_THREADS);
+    if (!shifted_srs_already_icicle) {
+      recorder.time(msm_stage::field_backend_convert, [&]() {
+        convert_points_to_icicle_kernel<<<point_convert_blocks, BUCKET_THREADS,
+                                          0, cuda_stream>>>(
+            points_device, points_icicle_output, points_device_count);
+        check_cuda(cudaGetLastError(),
+                   "convert_points_to_icicle_kernel launch");
+      });
+      if (precompute_factor > 1) {
+        icicle_shifted_srs_cache_ref() =
+            IcicleShiftedSrsCache{true, point_start_index, num_scalars,
+                                  shift_bits, precompute_factor};
+      }
+    }
+    points_icicle_device = points_icicle_output;
+  }
+#endif
 
   DeviceBuffer<fr_t> scalars_montgomery;
   DeviceBuffer<uint32_t> bucket_indices;
@@ -3097,6 +3825,169 @@ void bucket_pippenger_msm_impl(const fr_t *scalars, const size_t num_scalars,
           active_num_windows, final_remainder);
       check_cuda(cudaGetLastError(), "final_xyzz_accumulation_kernel launch");
     });
+#ifdef BB_GPU_HAVE_ICICLE_V28
+  } else if (field_backend == msm_field_backend::ICICLE_V28_BARRETT) {
+    DeviceBuffer<icicle_xyzz_g1_t> dense_buckets;
+    DeviceBuffer<icicle_xyzz_g1_t> bit_sums;
+    DeviceBuffer<icicle_xyzz_g1_t> window_sums;
+    DeviceBuffer<icicle_xyzz_g1_t> reduction_chunk_sums;
+    dense_buckets.resize(total_dense_buckets);
+    bit_sums.resize(static_cast<size_t>(active_num_windows) * bucket_bits);
+    window_sums.resize(active_num_windows);
+    const uint32_t max_reduction_chunks_per_window =
+        bucket_bits == 0 ? 0
+                         : ceil_div_u32(uint32_t{1} << (bucket_bits - 1),
+                                        CHUNKED_REDUCTION_CHUNK_SIZE);
+    if (max_reduction_chunks_per_window != 0) {
+      reduction_chunk_sums.resize(static_cast<size_t>(active_num_windows) *
+                                  max_reduction_chunks_per_window);
+    }
+
+    recorder.time(msm_stage::init_buckets, [&]() {
+      init_icicle_xyzz_bucket_storage_kernel<<<init_blocks, BUCKET_THREADS, 0,
+                                               cuda_stream>>>(
+          dense_buckets.data(), total_dense_buckets);
+      check_cuda(cudaGetLastError(),
+                 "init_icicle_xyzz_bucket_storage_kernel launch");
+    });
+
+    if (use_chunked_large_buckets) {
+      check_condition(bucket_stats[BUCKET_STAT_LARGE_CHUNKS] <=
+                          static_cast<uint64_t>(INT32_MAX),
+                      "bb::gpu::bn254::msm: large bucket chunk count exceeds "
+                      "CUB int range");
+      check_condition(bucket_stats[BUCKET_STAT_LARGE_FULL_CHUNKS] <=
+                          static_cast<uint64_t>(INT32_MAX),
+                      "bb::gpu::bn254::msm: large bucket full chunk count "
+                      "exceeds CUB int range");
+      const int num_large_bucket_chunks =
+          static_cast<int>(bucket_stats[BUCKET_STAT_LARGE_CHUNKS]);
+      const int num_large_bucket_full_chunks =
+          static_cast<int>(bucket_stats[BUCKET_STAT_LARGE_FULL_CHUNKS]);
+      const int max_large_bucket_chunk_count = static_cast<int>(
+          (bucket_stats[BUCKET_STAT_MAX_SIZE] + large_bucket_segment_size - 1) /
+          large_bucket_segment_size);
+      DeviceBuffer<int> large_bucket_chunk_counts;
+      DeviceBuffer<int> large_bucket_chunk_offsets;
+      DeviceBuffer<int> large_bucket_full_chunk_counts;
+      DeviceBuffer<int> large_bucket_full_chunk_offsets;
+      DeviceBuffer<int> chunk_bucket_job_indices;
+      DeviceBuffer<int> exec_chunk_partial_indices;
+      DeviceBuffer<int> exec_chunk_point_offsets;
+      DeviceBuffer<int> exec_chunk_point_counts;
+      DeviceBuffer<icicle_xyzz_g1_t> chunk_partials;
+      large_bucket_chunk_counts.resize(static_cast<size_t>(num_active_buckets));
+      large_bucket_chunk_offsets.resize(
+          static_cast<size_t>(num_active_buckets));
+      large_bucket_full_chunk_counts.resize(
+          static_cast<size_t>(num_active_buckets));
+      large_bucket_full_chunk_offsets.resize(
+          static_cast<size_t>(num_active_buckets));
+      chunk_bucket_job_indices.resize(
+          static_cast<size_t>(num_large_bucket_chunks));
+      exec_chunk_partial_indices.resize(
+          static_cast<size_t>(num_large_bucket_chunks));
+      exec_chunk_point_offsets.resize(
+          static_cast<size_t>(num_large_bucket_chunks));
+      exec_chunk_point_counts.resize(
+          static_cast<size_t>(num_large_bucket_chunks));
+      chunk_partials.resize(static_cast<size_t>(num_large_bucket_chunks));
+      recorder.set_large_bucket_config(msm_large_bucket_mode::CHUNKED_XYZZ,
+                                       large_bucket_segment_size,
+                                       bucket_stats[BUCKET_STAT_LARGE_CHUNKS]);
+      recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
+        accumulate_normal_buckets_icicle_xyzz_kernel<<<
+            bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), points_icicle_device,
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+        check_cuda(cudaGetLastError(),
+                   "accumulate_normal_buckets_icicle_xyzz_kernel launch");
+      });
+      recorder.time(msm_stage::accumulate_large_buckets, [&]() {
+        accumulate_large_buckets_icicle_xyzz_chunked(
+            temp_storage, sorted_bucket_run_indices.data(),
+            single_bucket_indices.data(), bucket_sizes.data(),
+            bucket_offsets.data(), sorted_point_indices.data(),
+            points_icicle_device, dense_buckets.data(), num_active_buckets,
+            large_bucket_threshold, bucket_job_blocks,
+            large_bucket_segment_size, num_large_bucket_chunks,
+            num_large_bucket_full_chunks, max_large_bucket_chunk_count,
+            large_bucket_chunk_counts, large_bucket_chunk_offsets,
+            large_bucket_full_chunk_counts, large_bucket_full_chunk_offsets,
+            chunk_bucket_job_indices, exec_chunk_partial_indices,
+            exec_chunk_point_offsets, exec_chunk_point_counts, chunk_partials,
+            cuda_stream, stream, recorder);
+        check_cuda(cudaGetLastError(),
+                   "accumulate_large_buckets_icicle_xyzz_chunked launch");
+      });
+    } else {
+      recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
+        accumulate_normal_buckets_icicle_xyzz_kernel<<<
+            bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), points_icicle_device,
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+        check_cuda(cudaGetLastError(),
+                   "accumulate_normal_buckets_icicle_xyzz_kernel launch");
+      });
+
+      recorder.time(msm_stage::accumulate_large_buckets, [&]() {
+        accumulate_large_buckets_icicle_xyzz_kernel<<<
+            bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+            sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+            bucket_sizes.data(), bucket_offsets.data(),
+            sorted_point_indices.data(), points_icicle_device,
+            dense_buckets.data(), num_active_buckets, large_bucket_threshold);
+        check_cuda(cudaGetLastError(),
+                   "accumulate_large_buckets_icicle_xyzz_kernel launch");
+      });
+    }
+
+    recorder.time(msm_stage::reduce_buckets, [&]() {
+      for (int bit = static_cast<int>(bucket_bits) - 1; bit >= 0; --bit) {
+        const uint32_t half = uint32_t{1} << static_cast<uint32_t>(bit);
+        const uint32_t chunks_per_window =
+            ceil_div_u32(half, CHUNKED_REDUCTION_CHUNK_SIZE);
+        const uint32_t chunk_blocks = active_num_windows * chunks_per_window;
+        reduce_icicle_xyzz_bucket_bit_chunks_kernel<<<
+            chunk_blocks, CHUNKED_REDUCTION_THREADS, 0, cuda_stream>>>(
+            dense_buckets.data(), reduction_chunk_sums.data(),
+            static_cast<uint32_t>(bit), bucket_bits, active_num_windows,
+            chunks_per_window);
+        check_cuda(cudaGetLastError(),
+                   "reduce_icicle_xyzz_bucket_bit_chunks_kernel launch");
+        reduce_icicle_xyzz_bucket_bit_chunk_sums_kernel<<<
+            active_num_windows, CHUNKED_REDUCTION_THREADS, 0, cuda_stream>>>(
+            reduction_chunk_sums.data(), bit_sums.data(),
+            static_cast<uint32_t>(bit), bucket_bits, active_num_windows,
+            chunks_per_window);
+        check_cuda(cudaGetLastError(),
+                   "reduce_icicle_xyzz_bucket_bit_chunk_sums_kernel launch");
+      }
+    });
+
+    const uint32_t window_blocks =
+        ceil_div_u32(active_num_windows, BUCKET_THREADS);
+    recorder.time(msm_stage::compose_windows, [&]() {
+      compose_icicle_xyzz_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
+                                               cuda_stream>>>(
+          bit_sums.data(), window_sums.data(), bits_per_slice,
+          active_num_windows);
+      check_cuda(cudaGetLastError(),
+                 "compose_icicle_xyzz_window_sums_kernel launch");
+    });
+
+    recorder.time(msm_stage::final_accumulation, [&]() {
+      final_icicle_xyzz_accumulation_kernel<<<1, 32, 0, cuda_stream>>>(
+          window_sums.data(), result_device.data(), bits_per_slice,
+          active_num_windows, final_remainder);
+      check_cuda(cudaGetLastError(),
+                 "final_icicle_xyzz_accumulation_kernel launch");
+    });
+#endif
   } else if (coordinate_mode == msm_coordinate_mode::XYZZ) {
     DeviceBuffer<xyzz_g1_t> dense_buckets;
     DeviceBuffer<xyzz_g1_t> bit_sums;
@@ -3532,12 +4423,18 @@ void set_msm_coordinate_mode(const msm_coordinate_mode mode) {
 
 void set_msm_field_backend(const msm_field_backend backend) {
   check_condition(backend == msm_field_backend::FQ64_MONTGOMERY ||
-                      backend == msm_field_backend::FQ32_BARRETT,
+                      backend == msm_field_backend::FQ32_BARRETT ||
+                      backend == msm_field_backend::ICICLE_V28_BARRETT,
                   "bb::gpu::bn254::msm: invalid field backend");
-  if (backend == msm_field_backend::FQ64_MONTGOMERY &&
+  if (backend != msm_field_backend::FQ32_BARRETT &&
       msm_field_backend_ref() == msm_field_backend::FQ32_BARRETT) {
     bb::gpu::default_context().release_shifted_srs();
     invalidate_fq32_shifted_srs_cache();
+  }
+  if (backend != msm_field_backend::ICICLE_V28_BARRETT &&
+      msm_field_backend_ref() == msm_field_backend::ICICLE_V28_BARRETT) {
+    bb::gpu::default_context().release_shifted_srs();
+    invalidate_icicle_shifted_srs_cache();
   }
   msm_field_backend_ref() = backend;
 }

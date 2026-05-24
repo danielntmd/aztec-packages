@@ -13,7 +13,8 @@ enum class msm_digit_mode : uint32_t { UNSIGNED = 0, SIGNED = 1 };
 enum class msm_coordinate_mode : uint32_t { JACOBIAN = 0, XYZZ = 1 };
 enum class msm_field_backend : uint32_t {
   FQ64_MONTGOMERY = 0,
-  FQ32_BARRETT = 1
+  FQ32_BARRETT = 1,
+  ICICLE_V28_BARRETT = 2
 };
 enum class msm_large_bucket_mode : uint32_t {
   SINGLE_WARP = 0,

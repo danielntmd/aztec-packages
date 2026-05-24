@@ -50,6 +50,13 @@ target_include_directories(gpu_objects
         ${HTTPLIB_INCLUDE}
         ${BACKWARD_INCLUDE}
         ${NLOHMANN_JSON_INCLUDE})
+if(ICICLE_V28_ROOT)
+    target_compile_definitions(gpu_objects PRIVATE BB_GPU_HAVE_ICICLE_V28)
+    target_include_directories(gpu_objects
+        PRIVATE
+            "${ICICLE_V28_ROOT}/include"
+            "${ICICLE_V28_ROOT}/icicle/include")
+endif()
 
 add_library(gpu STATIC $<TARGET_OBJECTS:gpu_objects>)
 target_include_directories(gpu
@@ -102,6 +109,9 @@ target_link_libraries(gpu_test_objects
         gpu
         GTest::gtest
         GTest::gmock_main)
+if(ICICLE_V28_ROOT)
+    target_compile_definitions(gpu_test_objects PRIVATE BB_GPU_HAVE_ICICLE_V28)
+endif()
 
 add_executable(gpu_tests $<TARGET_OBJECTS:gpu_test_objects>)
 target_link_libraries(gpu_tests

@@ -68,6 +68,9 @@ bb::gpu::bn254::msm_field_backend configured_field_backend() {
   if (value != nullptr && std::strcmp(value, "fq32") == 0) {
     return bb::gpu::bn254::msm_field_backend::FQ32_BARRETT;
   }
+  if (value != nullptr && std::strcmp(value, "icicle_v28") == 0) {
+    return bb::gpu::bn254::msm_field_backend::ICICLE_V28_BARRETT;
+  }
   return bb::gpu::bn254::msm_field_backend::FQ64_MONTGOMERY;
 }
 
