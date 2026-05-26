@@ -42,6 +42,13 @@ struct fq32_ops_output {
   experimental::fq32_t straightline_chain;
   experimental::fq32_t karatsuba_mul;
   experimental::fq32_t karatsuba_chain;
+  experimental::fq32_t karatsuba_fused_mul;
+  experimental::fq32_t karatsuba_fused_chain;
+  experimental::fq32_t half_product_mul;
+  experimental::fq32_t half_product_chain;
+  uint32_t straightline_wide[16];
+  uint32_t karatsuba_fused_wide[16];
+  uint32_t half_product_wide[16];
 };
 
 struct fr_ops_output {

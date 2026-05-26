@@ -206,6 +206,13 @@ void expect_same_wide(const uint64_t actual[9],
   }
 }
 
+void expect_same_wide_u32(const uint32_t actual[16],
+                          const uint32_t expected[16]) {
+  for (size_t i = 0; i < 16; ++i) {
+    EXPECT_EQ(actual[i], expected[i]) << "limb=" << i;
+  }
+}
+
 void expect_same_standard_field(const experimental::fq32_t &actual,
                                 const fq &expected) {
   const fq standard = expected.from_montgomery_form_reduced();
@@ -219,6 +226,13 @@ void expect_same_standard_field(const experimental::fq32_t &actual,
 void expect_fq32_zero(const experimental::fq32_t &actual) {
   for (uint32_t limb : actual.limbs) {
     EXPECT_EQ(limb, 0U);
+  }
+}
+
+void expect_same_fq32(const experimental::fq32_t &actual,
+                      const experimental::fq32_t &expected) {
+  for (size_t i = 0; i < 8; ++i) {
+    EXPECT_EQ(actual.limbs[i], expected.limbs[i]) << "limb=" << i;
   }
 }
 
@@ -439,6 +453,13 @@ TEST(GpuBn254, ExperimentalFq32OpsMatchCpu) {
     expect_same_standard_field(output.straightline_sqr, lhs_values[i].sqr());
     expect_same_standard_field(output.karatsuba_mul,
                                lhs_values[i] * rhs_values[i]);
+    expect_same_standard_field(output.karatsuba_fused_mul,
+                               lhs_values[i] * rhs_values[i]);
+    expect_same_standard_field(output.half_product_mul,
+                               lhs_values[i] * rhs_values[i]);
+    expect_same_wide_u32(output.karatsuba_fused_wide,
+                         output.straightline_wide);
+    expect_same_wide_u32(output.half_product_wide, output.straightline_wide);
     expect_same_standard_field(output.normalized_lhs, lhs_values[i]);
     expect_same_standard_field(
         output.chain, fq32_chain_reference(lhs_values[i], rhs_values[i]));
@@ -447,6 +468,12 @@ TEST(GpuBn254, ExperimentalFq32OpsMatchCpu) {
         fq32_chain_reference(lhs_values[i], rhs_values[i]));
     expect_same_standard_field(
         output.karatsuba_chain,
+        fq32_chain_reference(lhs_values[i], rhs_values[i]));
+    expect_same_standard_field(
+        output.karatsuba_fused_chain,
+        fq32_chain_reference(lhs_values[i], rhs_values[i]));
+    expect_same_standard_field(
+        output.half_product_chain,
         fq32_chain_reference(lhs_values[i], rhs_values[i]));
   }
 }
@@ -468,6 +495,61 @@ TEST(GpuBn254, ExperimentalFq32NormalizesModulus) {
   expect_same_standard_field(output.sub, -fq::one());
   expect_fq32_zero(output.mul);
   expect_fq32_zero(output.karatsuba_mul);
+  expect_fq32_zero(output.karatsuba_fused_mul);
+  expect_fq32_zero(output.half_product_mul);
+  expect_same_wide_u32(output.karatsuba_fused_wide, output.straightline_wide);
+  expect_same_wide_u32(output.half_product_wide, output.straightline_wide);
+}
+
+TEST(GpuBn254, ExperimentalFq32KaratsubaFusedEdgeCasesMatchStraightline) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto make_value = [](const std::array<uint32_t, 8> &limbs) {
+    experimental::fq32_t value{};
+    for (size_t i = 0; i < limbs.size(); ++i) {
+      value.limbs[i] = limbs[i];
+    }
+    return value;
+  };
+
+  experimental::fq32_t p_minus_one{};
+  for (size_t i = 0; i < 8; ++i) {
+    p_minus_one.limbs[i] = experimental::modulus_limb(static_cast<int>(i));
+  }
+  p_minus_one.limbs[0] -= 1;
+
+  const std::array<std::pair<experimental::fq32_t, experimental::fq32_t>, 6>
+      cases = {{
+          {experimental::fq32_t::zero(), experimental::fq32_t::from_u32(1)},
+          {experimental::fq32_t::from_u32(1), p_minus_one},
+          {make_value({0xfffffff0U, 0xfffffff1U, 0xfffffff2U, 0xfffffff3U,
+                       1U, 2U, 3U, 4U}),
+           make_value({5U, 6U, 7U, 8U, 0x0ffffff0U, 0x0ffffff1U,
+                       0x0ffffff2U, 0x0ffffff3U})},
+          {make_value({1U, 2U, 3U, 4U, 0xfffffff0U, 0xfffffff1U,
+                       0xfffffff2U, 0x10000000U}),
+           make_value({0xfffffff0U, 0xfffffff1U, 0xfffffff2U, 0x10000000U,
+                       1U, 2U, 3U, 4U})},
+          {make_value({0xffffffffU, 0xffffffffU, 0xffffffffU, 0xffffffffU,
+                       0xffffffffU, 0xffffffffU, 0xffffffffU, 0x10000000U}),
+           make_value({0xfffffffeU, 0xfffffffdU, 0xfffffffcU, 0xfffffffbU,
+                       0xfffffffaU, 0xfffffff9U, 0xfffffff8U, 0x10000000U})},
+          {make_value({0x01234567U, 0x89abcdefU, 0xfedcba98U, 0x76543210U,
+                       0x0badcafeU, 0x10203040U, 0x55667788U, 0x01020304U}),
+           make_value({0xdeadbeefU, 0xc001d00dU, 0x12345678U, 0x9abcdef0U,
+                       0x01010101U, 0x02020202U, 0x03030303U, 0x04040404U})},
+      }};
+
+  for (const auto &[lhs, rhs] : cases) {
+    gpu_testing::fq32_ops_output output{};
+    gpu_testing::run_fq32_ops(lhs, rhs, output);
+
+    expect_same_wide_u32(output.karatsuba_fused_wide,
+                         output.straightline_wide);
+    expect_same_fq32(output.karatsuba_fused_mul, output.straightline_mul);
+    expect_same_fq32(output.karatsuba_fused_chain,
+                     output.straightline_chain);
+  }
 }
 
 TEST(GpuBn254, FrMontgomeryAndScalarSliceMatchCpu) {

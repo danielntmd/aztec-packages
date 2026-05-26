@@ -42,10 +42,19 @@ __global__ void fq32_ops_kernel(experimental::fq32_t lhs,
   output->straightline_mul = experimental::mul_straightline(lhs, rhs);
   output->straightline_sqr = experimental::sqr_straightline(lhs);
   output->karatsuba_mul = experimental::mul_karatsuba(lhs, rhs);
+  output->karatsuba_fused_mul = experimental::mul_karatsuba_fused(lhs, rhs);
+  output->half_product_mul = experimental::mul_half_product_direct(lhs, rhs);
+  experimental::mul_wide_straightline(lhs, rhs, output->straightline_wide);
+  experimental::mul_wide_karatsuba_fused(lhs, rhs,
+                                         output->karatsuba_fused_wide);
+  experimental::mul_wide_half_product_direct(lhs, rhs,
+                                             output->half_product_wide);
   output->normalized_lhs = experimental::normalize(lhs);
   experimental::fq32_t accumulator = lhs;
   experimental::fq32_t straightline_accumulator = lhs;
   experimental::fq32_t karatsuba_accumulator = lhs;
+  experimental::fq32_t karatsuba_fused_accumulator = lhs;
+  experimental::fq32_t half_product_accumulator = lhs;
   experimental::fq32_t step = rhs;
   for (uint32_t i = 0; i < 8; ++i) {
     accumulator = experimental::mul(accumulator, step);
@@ -53,15 +62,25 @@ __global__ void fq32_ops_kernel(experimental::fq32_t lhs,
         experimental::mul_straightline(straightline_accumulator, step);
     karatsuba_accumulator =
         experimental::mul_karatsuba(karatsuba_accumulator, step);
+    karatsuba_fused_accumulator =
+        experimental::mul_karatsuba_fused(karatsuba_fused_accumulator, step);
+    half_product_accumulator =
+        experimental::mul_half_product_direct(half_product_accumulator, step);
     step = experimental::add(step, experimental::fq32_t::from_u32(i + 1));
     accumulator = experimental::add(accumulator, step);
     straightline_accumulator =
         experimental::add(straightline_accumulator, step);
     karatsuba_accumulator = experimental::add(karatsuba_accumulator, step);
+    karatsuba_fused_accumulator =
+        experimental::add(karatsuba_fused_accumulator, step);
+    half_product_accumulator =
+        experimental::add(half_product_accumulator, step);
   }
   output->chain = accumulator;
   output->straightline_chain = straightline_accumulator;
   output->karatsuba_chain = karatsuba_accumulator;
+  output->karatsuba_fused_chain = karatsuba_fused_accumulator;
+  output->half_product_chain = half_product_accumulator;
 }
 
 __global__ void fr_ops_kernel(fr_t scalar, size_t round, size_t slice_size,

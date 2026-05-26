@@ -8,7 +8,11 @@
 
 namespace bb::gpu::bn254::experimental {
 
-struct alignas(32) fq32_t {
+#ifndef BB_GPU_FQ32_ALIGNMENT
+#define BB_GPU_FQ32_ALIGNMENT 32
+#endif
+
+struct alignas(BB_GPU_FQ32_ALIGNMENT) fq32_t {
   uint32_t limbs[8];
 
   BB_GPU_HD static fq32_t zero() { return {}; }
@@ -101,41 +105,155 @@ BB_GPU_HD_FORCEINLINE uint32_t sub_modulus_in_place(fq32_t &value) {
   return borrow;
 }
 
-BB_GPU_HD_FORCEINLINE fq32_t add(const fq32_t &lhs, const fq32_t &rhs) {
+BB_GPU_HD_FORCEINLINE fq32_t modulus() {
   fq32_t out{};
-  uint32_t carry = 0;
+#pragma unroll
   for (int i = 0; i < 8; ++i) {
-    out.limbs[i] = lhs.limbs[i];
-    carry = add_u32_with_carry_in(out.limbs[i], rhs.limbs[i], carry);
-  }
-  if (carry != 0 || ge_modulus(out)) {
-    sub_modulus_in_place(out);
+    out.limbs[i] = modulus_limb(i);
   }
   return out;
+}
+
+BB_GPU_HD_FORCEINLINE fq32_t select_by_mask(const fq32_t &if_zero,
+                                            const fq32_t &if_one,
+                                            const uint32_t mask) {
+  fq32_t out{};
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    out.limbs[i] = (if_zero.limbs[i] & ~mask) | (if_one.limbs[i] & mask);
+  }
+  return out;
+}
+
+BB_GPU_HD_FORCEINLINE uint32_t add_raw(fq32_t &out, const fq32_t &lhs,
+                                       const fq32_t &rhs) {
+#if defined(__CUDA_ARCH__)
+  uint32_t o0 = 0;
+  uint32_t o1 = 0;
+  uint32_t o2 = 0;
+  uint32_t o3 = 0;
+  uint32_t o4 = 0;
+  uint32_t o5 = 0;
+  uint32_t o6 = 0;
+  uint32_t o7 = 0;
+  uint32_t carry = 0;
+  asm volatile("add.cc.u32 %0, %9, %17;\n\t"
+               "addc.cc.u32 %1, %10, %18;\n\t"
+               "addc.cc.u32 %2, %11, %19;\n\t"
+               "addc.cc.u32 %3, %12, %20;\n\t"
+               "addc.cc.u32 %4, %13, %21;\n\t"
+               "addc.cc.u32 %5, %14, %22;\n\t"
+               "addc.cc.u32 %6, %15, %23;\n\t"
+               "addc.cc.u32 %7, %16, %24;\n\t"
+               "addc.u32 %8, 0, 0;\n\t"
+               : "=&r"(o0), "=&r"(o1), "=&r"(o2), "=&r"(o3), "=&r"(o4),
+                 "=&r"(o5), "=&r"(o6), "=&r"(o7), "=&r"(carry)
+               : "r"(lhs.limbs[0]), "r"(lhs.limbs[1]), "r"(lhs.limbs[2]),
+                 "r"(lhs.limbs[3]), "r"(lhs.limbs[4]), "r"(lhs.limbs[5]),
+                 "r"(lhs.limbs[6]), "r"(lhs.limbs[7]), "r"(rhs.limbs[0]),
+                 "r"(rhs.limbs[1]), "r"(rhs.limbs[2]), "r"(rhs.limbs[3]),
+                 "r"(rhs.limbs[4]), "r"(rhs.limbs[5]), "r"(rhs.limbs[6]),
+                 "r"(rhs.limbs[7]));
+  out.limbs[0] = o0;
+  out.limbs[1] = o1;
+  out.limbs[2] = o2;
+  out.limbs[3] = o3;
+  out.limbs[4] = o4;
+  out.limbs[5] = o5;
+  out.limbs[6] = o6;
+  out.limbs[7] = o7;
+  return carry;
+#else
+  uint64_t carry = 0;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const uint64_t sum =
+        static_cast<uint64_t>(lhs.limbs[i]) + rhs.limbs[i] + carry;
+    out.limbs[i] = static_cast<uint32_t>(sum);
+    carry = sum >> 32;
+  }
+  return static_cast<uint32_t>(carry);
+#endif
+}
+
+BB_GPU_HD_FORCEINLINE uint32_t sub_raw(fq32_t &out, const fq32_t &lhs,
+                                       const fq32_t &rhs) {
+#if defined(__CUDA_ARCH__)
+  uint32_t o0 = 0;
+  uint32_t o1 = 0;
+  uint32_t o2 = 0;
+  uint32_t o3 = 0;
+  uint32_t o4 = 0;
+  uint32_t o5 = 0;
+  uint32_t o6 = 0;
+  uint32_t o7 = 0;
+  uint32_t borrow = 0;
+  asm volatile("sub.cc.u32 %0, %9, %17;\n\t"
+               "subc.cc.u32 %1, %10, %18;\n\t"
+               "subc.cc.u32 %2, %11, %19;\n\t"
+               "subc.cc.u32 %3, %12, %20;\n\t"
+               "subc.cc.u32 %4, %13, %21;\n\t"
+               "subc.cc.u32 %5, %14, %22;\n\t"
+               "subc.cc.u32 %6, %15, %23;\n\t"
+               "subc.cc.u32 %7, %16, %24;\n\t"
+               "subc.u32 %8, 0, 0;\n\t"
+               : "=&r"(o0), "=&r"(o1), "=&r"(o2), "=&r"(o3), "=&r"(o4),
+                 "=&r"(o5), "=&r"(o6), "=&r"(o7), "=&r"(borrow)
+               : "r"(lhs.limbs[0]), "r"(lhs.limbs[1]), "r"(lhs.limbs[2]),
+                 "r"(lhs.limbs[3]), "r"(lhs.limbs[4]), "r"(lhs.limbs[5]),
+                 "r"(lhs.limbs[6]), "r"(lhs.limbs[7]), "r"(rhs.limbs[0]),
+                 "r"(rhs.limbs[1]), "r"(rhs.limbs[2]), "r"(rhs.limbs[3]),
+                 "r"(rhs.limbs[4]), "r"(rhs.limbs[5]), "r"(rhs.limbs[6]),
+                 "r"(rhs.limbs[7]));
+  out.limbs[0] = o0;
+  out.limbs[1] = o1;
+  out.limbs[2] = o2;
+  out.limbs[3] = o3;
+  out.limbs[4] = o4;
+  out.limbs[5] = o5;
+  out.limbs[6] = o6;
+  out.limbs[7] = o7;
+  return borrow & 1U;
+#else
+  uint64_t borrow = 0;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const uint64_t subtrahend = static_cast<uint64_t>(rhs.limbs[i]) + borrow;
+    const uint64_t limb = lhs.limbs[i];
+    out.limbs[i] = static_cast<uint32_t>(limb - subtrahend);
+    borrow = limb < subtrahend ? 1U : 0U;
+  }
+  return static_cast<uint32_t>(borrow);
+#endif
+}
+
+BB_GPU_HD_FORCEINLINE fq32_t canonicalize_once(const fq32_t &value) {
+  fq32_t reduced{};
+  const uint32_t borrow = sub_raw(reduced, value, modulus());
+  const uint32_t keep_original = 0U - borrow;
+  return select_by_mask(reduced, value, keep_original);
+}
+
+BB_GPU_HD_FORCEINLINE fq32_t add(const fq32_t &lhs, const fq32_t &rhs) {
+  fq32_t sum{};
+  (void)add_raw(sum, lhs, rhs);
+  return canonicalize_once(sum);
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t sub(const fq32_t &lhs, const fq32_t &rhs) {
-  fq32_t out{};
-  uint32_t borrow = 0;
-  for (int i = 0; i < 8; ++i) {
-    out.limbs[i] = lhs.limbs[i];
-    borrow = sub_u32_with_borrow_in(out.limbs[i], rhs.limbs[i], borrow);
-  }
-  if (borrow != 0) {
-    uint32_t carry = 0;
-    for (int i = 0; i < 8; ++i) {
-      carry = add_u32_with_carry_in(out.limbs[i], modulus_limb(i), carry);
-    }
-  }
-  return out;
+  fq32_t diff{};
+  const uint32_t borrow = sub_raw(diff, lhs, rhs);
+  fq32_t adjusted{};
+  (void)add_raw(adjusted, diff, modulus());
+  const uint32_t use_adjusted = 0U - borrow;
+  return select_by_mask(diff, adjusted, use_adjusted);
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t neg(const fq32_t &value) {
-  uint32_t any = 0;
-  for (int i = 0; i < 8; ++i) {
-    any |= value.limbs[i];
-  }
-  return any == 0 ? value : sub(fq32_t::zero(), value);
+  fq32_t negated{};
+  (void)sub_raw(negated, modulus(), value);
+  const uint32_t keep_zero = 0U - static_cast<uint32_t>(is_zero(value));
+  return select_by_mask(negated, fq32_t::zero(), keep_zero);
 }
 
 BB_GPU_HD_FORCEINLINE void
@@ -151,6 +269,23 @@ mad_u32_with_carry(uint32_t &low, uint32_t &carry_out, const uint32_t a,
                : "r"(a), "r"(b), "r"(addend), "r"(carry_in));
 #else
   const uint64_t product = static_cast<uint64_t>(a) * b + addend + carry_in;
+  low = static_cast<uint32_t>(product);
+  carry_out = static_cast<uint32_t>(product >> 32);
+#endif
+}
+
+BB_GPU_HD_FORCEINLINE void mad_u32_no_carry(uint32_t &low,
+                                            uint32_t &carry_out,
+                                            const uint32_t a,
+                                            const uint32_t b,
+                                            const uint32_t addend) {
+#if defined(__CUDA_ARCH__)
+  asm volatile("mad.lo.cc.u32 %0, %2, %3, %4;\n\t"
+               "madc.hi.u32 %1, %2, %3, 0;\n\t"
+               : "=r"(low), "=r"(carry_out)
+               : "r"(a), "r"(b), "r"(addend));
+#else
+  const uint64_t product = static_cast<uint64_t>(a) * b + addend;
   low = static_cast<uint32_t>(product);
   carry_out = static_cast<uint32_t>(product >> 32);
 #endif
@@ -277,9 +412,11 @@ template <int I>
 BB_GPU_HD_FORCEINLINE void mul_wide_row(const fq32_t &lhs, const fq32_t &rhs,
                                         uint32_t out[16]) {
   uint32_t carry = 0;
+  uint32_t low = 0;
+  mad_u32_no_carry(low, carry, lhs.limbs[I], rhs.limbs[0], out[I]);
+  out[I] = low;
 #pragma unroll
-  for (int j = 0; j < 8; ++j) {
-    uint32_t low = 0;
+  for (int j = 1; j < 8; ++j) {
     uint32_t next_carry = 0;
     mad_u32_with_carry(low, next_carry, lhs.limbs[I], rhs.limbs[j], out[I + j],
                        carry);
@@ -298,9 +435,11 @@ BB_GPU_HD_FORCEINLINE void mul_wide(const fq32_t &lhs, const fq32_t &rhs,
 #pragma unroll
   for (int i = 0; i < 8; ++i) {
     uint32_t carry = 0;
+    uint32_t low = 0;
+    mad_u32_no_carry(low, carry, lhs.limbs[i], rhs.limbs[0], out[i]);
+    out[i] = low;
 #pragma unroll
-    for (int j = 0; j < 8; ++j) {
-      uint32_t low = 0;
+    for (int j = 1; j < 8; ++j) {
       uint32_t next_carry = 0;
       mad_u32_with_carry(low, next_carry, lhs.limbs[i], rhs.limbs[j],
                          out[i + j], carry);
@@ -478,9 +617,11 @@ template <int I>
 BB_GPU_HD_FORCEINLINE void mul_4x4_row(const uint32_t lhs[4],
                                        const uint32_t rhs[4], uint32_t out[8]) {
   uint32_t carry = 0;
+  uint32_t low = 0;
+  mad_u32_no_carry(low, carry, lhs[I], rhs[0], out[I]);
+  out[I] = low;
 #pragma unroll
-  for (int j = 0; j < 4; ++j) {
-    uint32_t low = 0;
+  for (int j = 1; j < 4; ++j) {
     uint32_t next_carry = 0;
     mad_u32_with_carry(low, next_carry, lhs[I], rhs[j], out[I + j], carry);
     out[I + j] = low;
@@ -499,6 +640,56 @@ BB_GPU_HD_FORCEINLINE void mul_4x4(const uint32_t lhs[4], const uint32_t rhs[4],
   mul_4x4_row<1>(lhs, rhs, out);
   mul_4x4_row<2>(lhs, rhs, out);
   mul_4x4_row<3>(lhs, rhs, out);
+}
+
+template <int INDEX>
+BB_GPU_HD_FORCEINLINE void mul_4x4_emit_column(uint32_t out[8],
+                                               uint32_t &acc0,
+                                               uint32_t &acc1,
+                                               uint32_t &acc2) {
+  out[INDEX] = acc0;
+  acc0 = acc1;
+  acc1 = acc2;
+  acc2 = 0;
+}
+
+BB_GPU_HD_FORCEINLINE void mul_4x4_comba(const uint32_t lhs[4],
+                                         const uint32_t rhs[4],
+                                         uint32_t out[8]) {
+  uint32_t acc0 = 0;
+  uint32_t acc1 = 0;
+  uint32_t acc2 = 0;
+
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[0], rhs[0]);
+  mul_4x4_emit_column<0>(out, acc0, acc1, acc2);
+
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[0], rhs[1]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[1], rhs[0]);
+  mul_4x4_emit_column<1>(out, acc0, acc1, acc2);
+
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[0], rhs[2]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[1], rhs[1]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[2], rhs[0]);
+  mul_4x4_emit_column<2>(out, acc0, acc1, acc2);
+
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[0], rhs[3]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[1], rhs[2]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[2], rhs[1]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[3], rhs[0]);
+  mul_4x4_emit_column<3>(out, acc0, acc1, acc2);
+
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[1], rhs[3]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[2], rhs[2]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[3], rhs[1]);
+  mul_4x4_emit_column<4>(out, acc0, acc1, acc2);
+
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[2], rhs[3]);
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[3], rhs[2]);
+  mul_4x4_emit_column<5>(out, acc0, acc1, acc2);
+
+  sqr_add_product_to_acc(acc0, acc1, acc2, lhs[3], rhs[3]);
+  mul_4x4_emit_column<6>(out, acc0, acc1, acc2);
+  out[7] = acc0;
 }
 
 BB_GPU_HD_FORCEINLINE bool ge_4(const uint32_t lhs[4], const uint32_t rhs[4]) {
@@ -545,6 +736,35 @@ BB_GPU_HD_FORCEINLINE void sub_shifted(uint32_t out[16],
   propagate_borrow_16<SHIFT + LEN>(out, borrow);
 }
 
+BB_GPU_HD_FORCEINLINE void add_8_to_9(uint32_t out[9], const uint32_t value[8]) {
+  uint32_t carry = 0;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    carry = add_u32_with_carry_in(out[i], value[i], carry);
+  }
+  (void)add_u32_with_carry_in(out[8], 0, carry);
+}
+
+BB_GPU_HD_FORCEINLINE void sub_8_from_9(uint32_t out[9],
+                                        const uint32_t value[8]) {
+  uint32_t borrow = 0;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    borrow = sub_u32_with_borrow_in(out[i], value[i], borrow);
+  }
+  (void)sub_u32_with_borrow_in(out[8], 0, borrow);
+}
+
+BB_GPU_HD_FORCEINLINE void add_9_shifted_4(uint32_t out[16],
+                                           const uint32_t value[9]) {
+  uint32_t carry = 0;
+#pragma unroll
+  for (int i = 0; i < 9; ++i) {
+    carry = add_u32_with_carry_in(out[4 + i], value[i], carry);
+  }
+  propagate_carry_16<13>(out, carry);
+}
+
 BB_GPU_HD_FORCEINLINE void
 mul_wide_karatsuba(const fq32_t &lhs, const fq32_t &rhs, uint32_t out[16]) {
   uint32_t z0[8] = {};
@@ -579,6 +799,102 @@ mul_wide_karatsuba(const fq32_t &lhs, const fq32_t &rhs, uint32_t out[16]) {
   }
 }
 
+BB_GPU_HD_FORCEINLINE void
+mul_wide_karatsuba_fused(const fq32_t &lhs, const fq32_t &rhs,
+                         uint32_t out[16]) {
+  uint32_t z0[8] = {};
+  uint32_t z2[8] = {};
+  uint32_t lhs_diff[4] = {};
+  uint32_t rhs_diff[4] = {};
+  uint32_t diff_product[8] = {};
+
+  mul_4x4_comba(&lhs.limbs[0], &rhs.limbs[0], z0);
+  mul_4x4_comba(&lhs.limbs[4], &rhs.limbs[4], z2);
+
+  const bool lhs_high_ge_low = ge_4(&lhs.limbs[4], &lhs.limbs[0]);
+  const bool rhs_low_ge_high = ge_4(&rhs.limbs[0], &rhs.limbs[4]);
+  sub_4(lhs_diff, lhs_high_ge_low ? &lhs.limbs[4] : &lhs.limbs[0],
+        lhs_high_ge_low ? &lhs.limbs[0] : &lhs.limbs[4]);
+  sub_4(rhs_diff, rhs_low_ge_high ? &rhs.limbs[0] : &rhs.limbs[4],
+        rhs_low_ge_high ? &rhs.limbs[4] : &rhs.limbs[0]);
+  mul_4x4_comba(lhs_diff, rhs_diff, diff_product);
+
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    out[i] = 0;
+  }
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    out[i] = z0[i];
+    out[i + 8] = z2[i];
+  }
+
+  uint32_t middle[9] = {};
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    middle[i] = z0[i];
+  }
+  add_8_to_9(middle, z2);
+  if (lhs_high_ge_low == rhs_low_ge_high) {
+    add_8_to_9(middle, diff_product);
+  } else {
+    sub_8_from_9(middle, diff_product);
+  }
+  add_9_shifted_4(out, middle);
+}
+
+BB_GPU_HD_FORCEINLINE void mul_wide_half_product_direct(const fq32_t &lhs,
+                                                        const fq32_t &rhs,
+                                                        uint32_t out[16]) {
+  uint32_t z0[8] = {};
+  uint32_t z2[8] = {};
+  uint32_t lhs_diff[4] = {};
+  uint32_t rhs_diff[4] = {};
+  uint32_t diff_product[8] = {};
+
+  mul_4x4(&lhs.limbs[0], &rhs.limbs[0], z0);
+  mul_4x4(&lhs.limbs[4], &rhs.limbs[4], z2);
+
+  const bool lhs_high_ge_low = ge_4(&lhs.limbs[4], &lhs.limbs[0]);
+  const bool rhs_low_ge_high = ge_4(&rhs.limbs[0], &rhs.limbs[4]);
+  sub_4(lhs_diff, lhs_high_ge_low ? &lhs.limbs[4] : &lhs.limbs[0],
+        lhs_high_ge_low ? &lhs.limbs[0] : &lhs.limbs[4]);
+  sub_4(rhs_diff, rhs_low_ge_high ? &rhs.limbs[0] : &rhs.limbs[4],
+        rhs_low_ge_high ? &rhs.limbs[4] : &rhs.limbs[0]);
+  mul_4x4(lhs_diff, rhs_diff, diff_product);
+
+  uint64_t carry = 0;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    uint64_t sum = carry;
+    if (i < 8) {
+      sum += z0[i];
+    }
+    if (i >= 4 && i < 12) {
+      sum += z0[i - 4];
+      sum += z2[i - 4];
+      if (lhs_high_ge_low == rhs_low_ge_high) {
+        sum += diff_product[i - 4];
+      }
+    }
+    if (i >= 8) {
+      sum += z2[i - 8];
+    }
+    out[i] = static_cast<uint32_t>(sum);
+    carry = sum >> 32;
+  }
+
+  if (lhs_high_ge_low != rhs_low_ge_high) {
+    uint32_t borrow = 0;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      const uint32_t subtrahend =
+          (i >= 4 && i < 12) ? diff_product[i - 4] : 0;
+      borrow = sub_u32_with_borrow_in(out[i], subtrahend, borrow);
+    }
+  }
+}
+
 BB_GPU_HD_FORCEINLINE fq32_t high_with_slack(const uint32_t wide[16]) {
   fq32_t out{};
 #pragma unroll
@@ -593,8 +909,14 @@ BB_GPU_HD_FORCEINLINE void mul_high_truncated_barrett_row(const fq32_t &lhs,
                                                           uint32_t wide[16]) {
   uint32_t carry = 0;
   constexpr int START = I < 6 ? 6 - I : 0;
+  if constexpr (START < 8) {
+    uint32_t low = 0;
+    mad_u32_no_carry(low, carry, lhs.limbs[I], barrett_m_limb(START),
+                     wide[I + START]);
+    wide[I + START] = low;
+  }
 #pragma unroll
-  for (int j = START; j < 8; ++j) {
+  for (int j = START + 1; j < 8; ++j) {
     uint32_t low = 0;
     uint32_t next_carry = 0;
     mad_u32_with_carry(low, next_carry, lhs.limbs[I], barrett_m_limb(j),
@@ -612,9 +934,12 @@ mul_high_truncated_by_barrett_m(const fq32_t &lhs) {
   for (int i = 0; i < 8; ++i) {
     uint32_t carry = 0;
     const int start = i < 6 ? 6 - i : 0;
+    uint32_t low = 0;
+    mad_u32_no_carry(low, carry, lhs.limbs[i], barrett_m_limb(start),
+                     wide[i + start]);
+    wide[i + start] = low;
 #pragma unroll
-    for (int j = start; j < 8; ++j) {
-      uint32_t low = 0;
+    for (int j = start + 1; j < 8; ++j) {
       uint32_t next_carry = 0;
       mad_u32_with_carry(low, next_carry, lhs.limbs[i], barrett_m_limb(j),
                          wide[i + j], carry);
@@ -658,9 +983,12 @@ template <int I>
 BB_GPU_HD_FORCEINLINE void low_mul_add_neg_modulus_row(const fq32_t &quotient,
                                                        fq32_t &out) {
   uint32_t carry = 0;
+  uint32_t out_limb = 0;
+  mad_u32_no_carry(out_limb, carry, quotient.limbs[I], neg_modulus_limb(0),
+                   out.limbs[I]);
+  out.limbs[I] = out_limb;
 #pragma unroll
-  for (int j = 0; j < 8 - I; ++j) {
-    uint32_t out_limb = 0;
+  for (int j = 1; j < 8 - I; ++j) {
     uint32_t next_carry = 0;
     mad_u32_with_carry(out_limb, next_carry, quotient.limbs[I],
                        neg_modulus_limb(j), out.limbs[I + j], carry);
@@ -679,9 +1007,12 @@ BB_GPU_HD_FORCEINLINE fq32_t low_mul_add_neg_modulus(const fq32_t &quotient,
 #pragma unroll
   for (int i = 0; i < 8; ++i) {
     uint32_t carry = 0;
+    uint32_t out_limb = 0;
+    mad_u32_no_carry(out_limb, carry, quotient.limbs[i], neg_modulus_limb(0),
+                     out.limbs[i]);
+    out.limbs[i] = out_limb;
 #pragma unroll
-    for (int j = 0; i + j < 8; ++j) {
-      uint32_t out_limb = 0;
+    for (int j = 1; i + j < 8; ++j) {
       uint32_t next_carry = 0;
       mad_u32_with_carry(out_limb, next_carry, quotient.limbs[i],
                          neg_modulus_limb(j), out.limbs[i + j], carry);
@@ -714,12 +1045,8 @@ BB_GPU_HD_FORCEINLINE fq32_t reduce(const uint32_t wide[16]) {
   const fq32_t high = high_with_slack(wide);
   const fq32_t quotient = mul_high_truncated_by_barrett_m(high);
   fq32_t reduced = low_mul_add_neg_modulus(quotient, wide);
-  if (ge_modulus(reduced)) {
-    sub_modulus_in_place(reduced);
-  }
-  if (ge_modulus(reduced)) {
-    sub_modulus_in_place(reduced);
-  }
+  reduced = canonicalize_once(reduced);
+  reduced = canonicalize_once(reduced);
   return reduced;
 }
 
@@ -727,12 +1054,8 @@ BB_GPU_HD_FORCEINLINE fq32_t reduce_straightline(const uint32_t wide[16]) {
   const fq32_t high = high_with_slack(wide);
   const fq32_t quotient = mul_high_truncated_by_barrett_m_straightline(high);
   fq32_t reduced = low_mul_add_neg_modulus_straightline(quotient, wide);
-  if (ge_modulus(reduced)) {
-    sub_modulus_in_place(reduced);
-  }
-  if (ge_modulus(reduced)) {
-    sub_modulus_in_place(reduced);
-  }
+  reduced = canonicalize_once(reduced);
+  reduced = canonicalize_once(reduced);
   return reduced;
 }
 
@@ -756,6 +1079,20 @@ BB_GPU_HD_FORCEINLINE fq32_t mul_karatsuba(const fq32_t &lhs,
   return reduce(wide);
 }
 
+BB_GPU_HD_FORCEINLINE fq32_t mul_karatsuba_fused(const fq32_t &lhs,
+                                                 const fq32_t &rhs) {
+  uint32_t wide[16] = {};
+  mul_wide_karatsuba_fused(lhs, rhs, wide);
+  return reduce(wide);
+}
+
+BB_GPU_HD_FORCEINLINE fq32_t mul_half_product_direct(const fq32_t &lhs,
+                                                     const fq32_t &rhs) {
+  uint32_t wide[16] = {};
+  mul_wide_half_product_direct(lhs, rhs, wide);
+  return reduce_straightline(wide);
+}
+
 BB_GPU_HD_FORCEINLINE fq32_t sqr(const fq32_t &value) {
   return mul(value, value);
 }
@@ -771,13 +1108,8 @@ BB_GPU_HD_FORCEINLINE fq32_t sqr_straightline(const fq32_t &value) {
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t normalize(fq32_t value) {
-  if (ge_modulus(value)) {
-    sub_modulus_in_place(value);
-  }
-  if (ge_modulus(value)) {
-    sub_modulus_in_place(value);
-  }
-  return value;
+  value = canonicalize_once(value);
+  return canonicalize_once(value);
 }
 
 } // namespace bb::gpu::bn254::experimental
