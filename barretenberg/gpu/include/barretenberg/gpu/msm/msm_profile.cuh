@@ -21,11 +21,13 @@ struct msm_profile {
   float scalar_chunk1_copy_ms = 0.0F;
   float scalar_chunk1_split_ms = 0.0F;
   float split_scalars_ms = 0.0F;
+  float precompute_bases_ms = 0.0F;
   float sort_records_ms = 0.0F;
   float encode_buckets_ms = 0.0F;
   float scan_bucket_offsets_ms = 0.0F;
   float build_bucket_jobs_ms = 0.0F;
   float sort_bucket_jobs_ms = 0.0F;
+  float bucket_distribution_ms = 0.0F;
   float init_buckets_ms = 0.0F;
   float accumulate_normal_buckets_ms = 0.0F;
   float accumulate_large_buckets_ms = 0.0F;
@@ -40,8 +42,12 @@ struct msm_profile {
   uint32_t active_buckets = 0;
   uint32_t zero_bucket_offset = 0;
   uint32_t large_bucket_threshold = 0;
-  uint32_t scalar_split_first_chunk_percent = 0;
-  uint32_t digit_mode = 0;
+  uint32_t precompute_factor = 0;
+  uint32_t folded_windows = 0;
+  uint32_t large_bucket_mode = 0;
+  uint32_t large_bucket_chunk_size = 0;
+  uint64_t precomputed_srs_bytes = 0;
+  uint64_t large_bucket_chunk_count = 0;
   uint64_t normal_bucket_count = 0;
   uint64_t large_bucket_count = 0;
   uint64_t normal_bucket_point_count = 0;
@@ -51,13 +57,12 @@ struct msm_profile {
 };
 
 // Profiled raw MSM entry point for callers that have already uploaded an SRS
-// into the default device context. point_start_index is an offset into that
-// cached SRS.
-void msm_raw_profiled(const fr_t *scalars, size_t num_scalars,
-                      size_t point_start_index, uint32_t bits_per_slice,
-                      affine_g1_t *result, msm_profile *profile);
-
-void set_scalar_split_first_chunk_percent(uint32_t percent);
+// into the default MSM context. point_start_index is an offset into that cached
+// SRS.
+void msm_raw_profiled_fq32(const host_fr_montgomery_t *scalars,
+                           size_t num_scalars, size_t point_start_index,
+                           uint32_t bits_per_slice, fq32_affine_g1_t *result,
+                           msm_profile *profile);
 
 } // namespace bb::gpu::bn254
 
