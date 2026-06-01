@@ -1,6 +1,7 @@
 #include "barretenberg/common/throw_or_abort.hpp"
 #include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
 #include "barretenberg/gpu/common/gpu_msm_context.hpp"
+#include "barretenberg/gpu/msm/msm_heuristics.hpp"
 #include "barretenberg/gpu/msm/msm_profile.cuh"
 #include "barretenberg/gpu/msm/msm_raw.cuh"
 #include "barretenberg/numeric/random/engine.hpp"
@@ -42,29 +43,6 @@ public:
 bool cuda_available() {
   int device_count = 0;
   return cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0;
-}
-
-uint32_t auto_bits_per_slice(const size_t num_points) {
-  constexpr uint32_t NUM_BITS_IN_FIELD = 254;
-  constexpr uint32_t MAX_SLICE_BITS = 20;
-  constexpr size_t BUCKET_ACCUMULATION_COST = 5;
-
-  auto compute_cost = [&](uint32_t bits) {
-    const size_t rounds = (NUM_BITS_IN_FIELD + bits - 1) / bits;
-    const size_t buckets = size_t{1} << bits;
-    return rounds * (num_points + buckets * BUCKET_ACCUMULATION_COST);
-  };
-
-  uint32_t best_bits = 1;
-  size_t best_cost = compute_cost(1);
-  for (uint32_t bits = 2; bits < MAX_SLICE_BITS; ++bits) {
-    const size_t cost = compute_cost(bits);
-    if (cost < best_cost) {
-      best_cost = cost;
-      best_bits = bits;
-    }
-  }
-  return best_bits;
 }
 
 struct BenchInput {
@@ -235,7 +213,8 @@ void bench_gpu_msm_profiled(benchmark::State &state) {
       reinterpret_cast<const bb::gpu::bn254::host_affine_g1_montgomery_t *>(
           input->points.data()),
       input->points.size());
-  const uint32_t bits_per_slice = auto_bits_per_slice(num_points);
+  const uint32_t bits_per_slice =
+      bb::gpu::bn254::get_auto_bits_per_slice(num_points, precompute_factor);
 
   bb::gpu::bn254::msm_profile warmup_profile{};
   auto warmup_result = gpu_profiled_msm(*input, bits_per_slice, warmup_profile);

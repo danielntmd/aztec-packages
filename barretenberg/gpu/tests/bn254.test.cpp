@@ -592,6 +592,36 @@ TEST(GpuBn254, MsmLargeBucketAccumulationMatchesCpu) {
   EXPECT_EQ(actual, expected);
 }
 
+TEST(GpuBn254, MsmLargeBucketUsesChunkedAccumulation) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 600; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    scalars.emplace_back(fr(5));
+  }
+  upload_test_srs(points);
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+
+  const auto expected =
+      reference_msm_with_explicit_window(points, scalar_span, 4);
+  const size_t point_start_index = default_msm_context().get_srs_offset(
+      reinterpret_cast<const host_affine_g1_montgomery_t *>(points.data()),
+      points.size());
+
+  fq32_affine_g1_t result{};
+  msm_profile profile{};
+  msm_raw_profiled_fq32(
+      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
+      scalars.size(), point_start_index, 4, &result, &profile);
+  expect_same_point(result, expected);
+  EXPECT_EQ(profile.large_bucket_mode, MSM_LARGE_BUCKET_CHUNKED_FQ32_XYZZ);
+  EXPECT_GT(profile.large_bucket_chunk_count, 0U);
+}
+
 TEST(GpuBn254, MsmAutoWindowMatchesCpuSafePippenger) {
   BB_REQUIRE_CUDA_DEVICE();
 

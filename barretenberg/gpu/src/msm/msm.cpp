@@ -5,6 +5,7 @@
 #include "barretenberg/common/assert.hpp"
 #include "barretenberg/common/throw_or_abort.hpp"
 #include "barretenberg/gpu/common/gpu_msm_context.hpp"
+#include "barretenberg/gpu/msm/msm_heuristics.hpp"
 #include "barretenberg/gpu/msm/msm_raw.cuh"
 
 #include <cstdint>
@@ -13,35 +14,14 @@
 namespace bb::gpu::bn254 {
 namespace {
 
-constexpr uint32_t NUM_BITS_IN_FIELD = 254;
-constexpr uint32_t MAX_SLICE_BITS = 20;
-constexpr size_t BUCKET_ACCUMULATION_COST = 5;
-
-uint32_t get_auto_bits_per_slice(const size_t num_points) {
-  auto compute_cost = [&](uint32_t bits) {
-    const size_t rounds = (NUM_BITS_IN_FIELD + bits - 1) / bits;
-    const size_t buckets = size_t{1} << bits;
-    return rounds * (num_points + buckets * BUCKET_ACCUMULATION_COST);
-  };
-
-  uint32_t best_bits = 1;
-  size_t best_cost = compute_cost(1);
-  for (uint32_t bits = 2; bits < MAX_SLICE_BITS; ++bits) {
-    const size_t cost = compute_cost(bits);
-    if (cost < best_cost) {
-      best_cost = cost;
-      best_bits = bits;
-    }
-  }
-  return best_bits;
-}
-
 uint32_t resolve_bits_per_slice(const size_t num_points,
                                 const uint32_t requested_bits) {
-  const uint32_t bits = requested_bits == 0
-                            ? get_auto_bits_per_slice(num_points)
-                            : requested_bits;
-  if (bits == 0 || bits > MAX_SLICE_BITS || bits > NUM_BITS_IN_FIELD) {
+  const uint32_t bits =
+      requested_bits == 0
+          ? get_auto_bits_per_slice(num_points, get_msm_precompute_factor())
+          : requested_bits;
+  if (bits == 0 || bits > GPU_MSM_MAX_SLICE_BITS ||
+      bits > GPU_MSM_NUM_BITS_IN_FIELD) {
     throw_or_abort("bb::gpu::bn254::msm: bits_per_slice must be in [1, 20]");
   }
   return bits;

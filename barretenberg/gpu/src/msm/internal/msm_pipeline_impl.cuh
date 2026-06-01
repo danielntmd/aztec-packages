@@ -11,7 +11,7 @@ void bucket_pippenger_msm_impl(const host_fr_montgomery_t *scalars,
   recorder.start(cuda_stream, bits_per_slice);
 
   constexpr uint32_t large_bucket_chunk_size = DEFAULT_LARGE_BUCKET_CHUNK_SIZE;
-  recorder.set_large_bucket_config(MSM_LARGE_BUCKET_SINGLE_WARP,
+  recorder.set_large_bucket_config(MSM_LARGE_BUCKET_NONE,
                                    large_bucket_chunk_size, 0);
 
   // Resolve the window schedule and optional precomputed SRS folding.
@@ -173,7 +173,8 @@ void bucket_pippenger_msm_impl(const host_fr_montgomery_t *scalars,
   DeviceBuffer<fq32_affine_g1_t> result_device;
   result_device.resize(1);
 
-  // Estimate large-bucket thresholds and choose the chunked path when useful.
+  // Estimate large-bucket thresholds and route above-threshold buckets to the
+  // chunked path.
   const uint32_t init_blocks =
       ceil_div_u32(total_dense_buckets, BUCKET_THREADS);
   const int estimated_average_bucket_size =
@@ -190,18 +191,20 @@ void bucket_pippenger_msm_impl(const host_fr_montgomery_t *scalars,
           : 1;
   recorder.set_large_bucket_threshold(
       static_cast<uint32_t>(large_bucket_threshold));
-  const bool chunked_large_bucket_candidate =
-      estimated_average_bucket_size >=
-          LARGE_BUCKET_CHUNKED_MIN_AVERAGE_BUCKET_SIZE &&
-      num_active_buckets >= LARGE_BUCKET_CHUNKED_MIN_ACTIVE_BUCKETS;
+  uint32_t largest_bucket_size_sort_key = 0;
+  copy_device_to_host(&largest_bucket_size_sort_key,
+                      sorted_bucket_size_sort_keys.data(), sizeof(uint32_t),
+                      stream);
+  context.sync();
+  const uint32_t max_bucket_size = ~largest_bucket_size_sort_key;
+  const bool has_large_buckets =
+      max_bucket_size > static_cast<uint32_t>(large_bucket_threshold);
   std::array<uint64_t, BUCKET_STAT_COUNT> bucket_stats =
       collect_bucket_distribution(
           sorted_bucket_run_indices.data(), bucket_sizes.data(),
           num_active_buckets, large_bucket_threshold, large_bucket_segment_size,
-          bucket_job_blocks, cuda_stream, stream, recorder,
-          chunked_large_bucket_candidate);
-  if (chunked_large_bucket_candidate &&
-      bucket_stats[BUCKET_STAT_NORMAL_JOBS] != 0) {
+          bucket_job_blocks, cuda_stream, stream, recorder, has_large_buckets);
+  if (has_large_buckets && bucket_stats[BUCKET_STAT_NORMAL_JOBS] != 0) {
     const uint64_t normal_jobs = bucket_stats[BUCKET_STAT_NORMAL_JOBS];
     const uint64_t observed_average_bucket_size =
         (bucket_stats[BUCKET_STAT_NORMAL_POINTS] + normal_jobs - 1) /
@@ -219,15 +222,13 @@ void bucket_pippenger_msm_impl(const host_fr_montgomery_t *scalars,
       bucket_stats = collect_bucket_distribution(
           sorted_bucket_run_indices.data(), bucket_sizes.data(),
           num_active_buckets, large_bucket_threshold, large_bucket_segment_size,
-          bucket_job_blocks, cuda_stream, stream, recorder,
-          chunked_large_bucket_candidate);
+          bucket_job_blocks, cuda_stream, stream, recorder, has_large_buckets);
     }
   }
-  const bool has_large_buckets = bucket_stats[BUCKET_STAT_LARGE_JOBS] != 0;
   const bool use_chunked_large_buckets =
-      chunked_large_bucket_candidate && has_large_buckets;
+      has_large_buckets && bucket_stats[BUCKET_STAT_LARGE_JOBS] != 0;
   if (!use_chunked_large_buckets) {
-    recorder.set_large_bucket_config(MSM_LARGE_BUCKET_SINGLE_WARP,
+    recorder.set_large_bucket_config(MSM_LARGE_BUCKET_NONE,
                                      large_bucket_chunk_size, 0);
   }
 
@@ -256,8 +257,18 @@ void bucket_pippenger_msm_impl(const host_fr_montgomery_t *scalars,
                "init_fq32_xyzz_bucket_storage_kernel launch");
   });
 
-  // Accumulate point runs into dense buckets, splitting large buckets if
-  // needed.
+  // Accumulate point runs into dense buckets.
+  recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
+    accumulate_normal_buckets_fq32_xyzz_kernel<<<
+        bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
+        sorted_bucket_run_indices.data(), single_bucket_indices.data(),
+        bucket_sizes.data(), bucket_offsets.data(), sorted_point_indices.data(),
+        selected_points_device, dense_buckets.data(), num_active_buckets,
+        large_bucket_threshold);
+    check_cuda(cudaGetLastError(),
+               "accumulate_normal_buckets_fq32_xyzz_kernel launch");
+  });
+
   if (use_chunked_large_buckets) {
     check_condition(bucket_stats[BUCKET_STAT_LARGE_CHUNKS] <=
                         static_cast<uint64_t>(INT32_MAX),
@@ -301,16 +312,6 @@ void bucket_pippenger_msm_impl(const host_fr_montgomery_t *scalars,
     recorder.set_large_bucket_config(MSM_LARGE_BUCKET_CHUNKED_FQ32_XYZZ,
                                      large_bucket_segment_size,
                                      bucket_stats[BUCKET_STAT_LARGE_CHUNKS]);
-    recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
-      accumulate_normal_buckets_fq32_xyzz_kernel<<<
-          bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
-          sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-          bucket_sizes.data(), bucket_offsets.data(),
-          sorted_point_indices.data(), selected_points_device,
-          dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-      check_cuda(cudaGetLastError(),
-                 "accumulate_normal_buckets_fq32_xyzz_kernel launch");
-    });
     recorder.time(msm_stage::accumulate_large_buckets, [&]() {
       accumulate_large_buckets_fq32_xyzz_chunked(
           temp_storage, sorted_bucket_run_indices.data(),
@@ -327,28 +328,6 @@ void bucket_pippenger_msm_impl(const host_fr_montgomery_t *scalars,
           recorder);
       check_cuda(cudaGetLastError(),
                  "accumulate_large_buckets_fq32_xyzz_chunked launch");
-    });
-  } else {
-    recorder.time(msm_stage::accumulate_normal_buckets, [&]() {
-      accumulate_normal_buckets_fq32_xyzz_kernel<<<
-          bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
-          sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-          bucket_sizes.data(), bucket_offsets.data(),
-          sorted_point_indices.data(), selected_points_device,
-          dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-      check_cuda(cudaGetLastError(),
-                 "accumulate_normal_buckets_fq32_xyzz_kernel launch");
-    });
-
-    recorder.time(msm_stage::accumulate_large_buckets, [&]() {
-      accumulate_large_buckets_fq32_xyzz_kernel<<<
-          bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
-          sorted_bucket_run_indices.data(), single_bucket_indices.data(),
-          bucket_sizes.data(), bucket_offsets.data(),
-          sorted_point_indices.data(), selected_points_device,
-          dense_buckets.data(), num_active_buckets, large_bucket_threshold);
-      check_cuda(cudaGetLastError(),
-                 "accumulate_large_buckets_fq32_xyzz_kernel launch");
     });
   }
 
