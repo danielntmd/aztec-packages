@@ -10,6 +10,8 @@
 namespace bb::gpu::bn254 {
 
 constexpr size_t MSM_BUCKET_HISTOGRAM_BINS = 10;
+constexpr uint32_t MSM_LARGE_BUCKET_NONE = 0;
+constexpr uint32_t MSM_LARGE_BUCKET_CHUNKED_FQ32_XYZZ = 1;
 
 struct msm_profile {
   float h2d_points_ms = 0.0F;

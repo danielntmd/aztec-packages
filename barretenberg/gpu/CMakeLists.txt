@@ -18,6 +18,7 @@ set(BB_GPU_HEADERS
     include/barretenberg/gpu/curves/bn254/bn254.cuh
     include/barretenberg/gpu/curves/bn254/fq32_g1.cuh
     include/barretenberg/gpu/msm/msm.hpp
+    include/barretenberg/gpu/msm/msm_heuristics.hpp
     include/barretenberg/gpu/msm/msm_profile.cuh
     include/barretenberg/gpu/msm/msm_raw.cuh)
 
@@ -78,7 +79,8 @@ endif()
 
 add_library(gpu_test_objects OBJECT
     tests/bn254.test.cpp
-    tests/bn254_test_kernels.cu)
+    tests/bn254_test_kernels.cu
+    tests/msm_heuristics.test.cpp)
 target_include_directories(gpu_test_objects
     PRIVATE
         "${BB_GPU_INCLUDE_DIR}"

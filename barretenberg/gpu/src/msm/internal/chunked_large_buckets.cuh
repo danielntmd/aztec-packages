@@ -18,8 +18,7 @@ void accumulate_large_buckets_fq32_xyzz_chunked(
     DeviceBuffer<fq32_xyzz_g1_t> &chunk_partials,
     const cudaStream_t cuda_stream, void *stream, Recorder &recorder) {
   if (num_chunks == 0) {
-    recorder.set_large_bucket_config(MSM_LARGE_BUCKET_SINGLE_WARP, chunk_size,
-                                     0);
+    recorder.set_large_bucket_config(MSM_LARGE_BUCKET_NONE, chunk_size, 0);
     return;
   }
 

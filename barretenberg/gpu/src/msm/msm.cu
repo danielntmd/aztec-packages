@@ -9,6 +9,7 @@
 #include "barretenberg/gpu/common/nvtx.hpp"
 #include "barretenberg/gpu/fields/bn254/fq32.cuh"
 #include "barretenberg/gpu/fields/bn254/fr32.cuh"
+#include "barretenberg/gpu/msm/msm_heuristics.hpp"
 #include "barretenberg/gpu/msm/msm_profile.cuh"
 
 #include <cuda_runtime.h>
