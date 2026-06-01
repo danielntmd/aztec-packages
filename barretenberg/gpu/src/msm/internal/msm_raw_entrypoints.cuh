@@ -37,3 +37,5 @@ void set_msm_precompute_factor(const uint32_t factor) {
     msm_precompute_factor_ref() = factor;
   }
 }
+
+uint32_t get_msm_precompute_factor() { return current_msm_precompute_factor(); }
