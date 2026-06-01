@@ -78,8 +78,11 @@ if(TARGET msgpack-c)
 endif()
 
 add_library(gpu_test_objects OBJECT
-    tests/bn254.test.cpp
+    tests/bn254_field.test.cpp
+    tests/bn254_g1.test.cpp
     tests/bn254_test_kernels.cu
+    tests/msm.test.cpp
+    tests/device_buffer.test.cpp
     tests/msm_heuristics.test.cpp)
 target_include_directories(gpu_test_objects
     PRIVATE
