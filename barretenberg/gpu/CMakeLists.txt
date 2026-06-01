@@ -8,14 +8,15 @@ set(BB_GPU_HEADERS
     include/barretenberg/gpu/common/cuda_error.cuh
     include/barretenberg/gpu/common/cub_helpers.cuh
     include/barretenberg/gpu/common/device_buffer.hpp
-    include/barretenberg/gpu/common/device_context.hpp
+    include/barretenberg/gpu/common/gpu_msm_context.hpp
+    include/barretenberg/gpu/common/nvtx.hpp
     include/barretenberg/gpu/commitment_schemes/commitment_key_msm.hpp
     include/barretenberg/gpu/fields/field.cuh
-    include/barretenberg/gpu/curves/bn254/params.cuh
-    include/barretenberg/gpu/curves/bn254/fq.cuh
-    include/barretenberg/gpu/curves/bn254/fr.cuh
-    include/barretenberg/gpu/curves/bn254/g1.cuh
+    include/barretenberg/gpu/fields/bn254/params.cuh
+    include/barretenberg/gpu/fields/bn254/fq32.cuh
+    include/barretenberg/gpu/fields/bn254/fr32.cuh
     include/barretenberg/gpu/curves/bn254/bn254.cuh
+    include/barretenberg/gpu/curves/bn254/fq32_g1.cuh
     include/barretenberg/gpu/msm/msm.hpp
     include/barretenberg/gpu/msm/msm_profile.cuh
     include/barretenberg/gpu/msm/msm_raw.cuh)
@@ -28,7 +29,7 @@ if(TARGET barretenberg_headers)
 endif()
 
 add_library(gpu_objects OBJECT EXCLUDE_FROM_ALL
-    src/common/device_context.cu
+    src/common/gpu_msm_context.cu
     src/msm/msm.cpp
     src/msm/msm.cu)
 set_target_properties(gpu_objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
