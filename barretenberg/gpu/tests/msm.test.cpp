@@ -10,6 +10,8 @@
 #include "barretenberg/numeric/random/engine.hpp"
 
 #include <span>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -38,6 +40,45 @@ TEST(GpuBn254, MsmAllZeroAndEmptyReturnInfinity) {
             curve::BN254::AffineElement::infinity());
 }
 
+TEST(GpuBn254, MsmScalarEdgeValuesMatchCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  for (size_t i = 0; i < 12; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+  }
+  gpu_testing::upload_test_srs(points);
+
+  std::vector<fr> ones(points.size(), fr::one());
+  curve::BN254::Element expected_sum = curve::BN254::Group::point_at_infinity;
+  for (const auto &point : points) {
+    expected_sum += point;
+  }
+  EXPECT_EQ(bb::gpu::bn254::msm(
+                {0, std::span<const fr>(ones.data(), ones.size())}, points, 4),
+            curve::BN254::AffineElement(expected_sum));
+
+  std::vector<fr> minus_ones(points.size(), -fr::one());
+  curve::BN254::Element expected_neg_sum =
+      curve::BN254::Group::point_at_infinity;
+  for (const auto &point : points) {
+    expected_neg_sum -= point;
+  }
+  EXPECT_EQ(bb::gpu::bn254::msm(
+                {0, std::span<const fr>(minus_ones.data(), minus_ones.size())},
+                points, 4),
+            curve::BN254::AffineElement(expected_neg_sum));
+
+  std::vector<curve::BN254::AffineElement> single_point = {points[0]};
+  std::vector<fr> single_scalar = {fr::random_element(&engine)};
+  gpu_testing::upload_test_srs(single_point);
+  EXPECT_EQ(bb::gpu::bn254::msm({0, std::span<const fr>(single_scalar.data(),
+                                                        single_scalar.size())},
+                                single_point, 4),
+            curve::BN254::AffineElement(single_point[0] * single_scalar[0]));
+}
+
 TEST(GpuBn254, MsmExplicitWindowsMatchCpu) {
   BB_REQUIRE_CUDA_DEVICE();
 
@@ -59,6 +100,26 @@ TEST(GpuBn254, MsmExplicitWindowsMatchCpu) {
         bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
     EXPECT_EQ(actual, expected) << "bits_per_slice=" << bits_per_slice;
   }
+}
+
+TEST(GpuBn254, MsmLeavesInputScalarsUnchanged) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 64; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    scalars.emplace_back(i % 8 == 0 ? fr::zero() : fr::random_element(&engine));
+  }
+  const std::vector<fr> scalars_copy = scalars;
+
+  gpu_testing::upload_test_srs(points);
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+  bb::gpu::bn254::msm(scalar_span, points, 8);
+
+  EXPECT_EQ(scalars, scalars_copy);
 }
 
 TEST(GpuBn254, MsmStartIndexAndPrecomputeFactorsMatchCpu) {
@@ -208,6 +269,54 @@ TEST(GpuBn254, MsmSameBucketNormalAccumulationAndReductionMatchCpu) {
   EXPECT_EQ(actual, expected);
 }
 
+TEST(GpuBn254, MsmDuplicatePointEdgeCasesMatchCpu) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  const curve::BN254::AffineElement base_point =
+      curve::BN254::AffineElement::random_element(&engine);
+  std::vector<curve::BN254::AffineElement> duplicate_points(32, base_point);
+  std::vector<fr> duplicate_scalars;
+  duplicate_scalars.reserve(duplicate_points.size());
+  fr scalar_sum = fr::zero();
+  for (size_t i = 0; i < duplicate_points.size(); ++i) {
+    duplicate_scalars.emplace_back(fr::random_element(&engine));
+    scalar_sum += duplicate_scalars.back();
+  }
+  gpu_testing::upload_test_srs(duplicate_points);
+  EXPECT_EQ(
+      bb::gpu::bn254::msm({0, std::span<const fr>(duplicate_scalars.data(),
+                                                  duplicate_scalars.size())},
+                          duplicate_points, 4),
+      curve::BN254::AffineElement(base_point * scalar_sum));
+
+  std::vector<curve::BN254::AffineElement> mixed_points;
+  std::vector<fr> mixed_scalars;
+  for (size_t i = 0; i < 8; ++i) {
+    mixed_points.emplace_back(base_point);
+    mixed_scalars.emplace_back(fr::random_element(&engine));
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    const auto point = curve::BN254::AffineElement::random_element(&engine);
+    mixed_points.emplace_back(point);
+    mixed_scalars.emplace_back(fr::one());
+    mixed_points.emplace_back(-point);
+    mixed_scalars.emplace_back(fr::one());
+  }
+  for (size_t i = 0; i < 8; ++i) {
+    mixed_points.emplace_back(
+        curve::BN254::AffineElement::random_element(&engine));
+    mixed_scalars.emplace_back(fr::random_element(&engine));
+  }
+  gpu_testing::upload_test_srs(mixed_points);
+  auto mixed_scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(mixed_scalars.data(), mixed_scalars.size())};
+  const auto expected = curve::BN254::AffineElement(
+      scalar_multiplication::pippenger<curve::BN254>(
+          mixed_scalar_span, mixed_points, /*handle_edge_cases=*/true));
+  EXPECT_EQ(bb::gpu::bn254::msm(mixed_scalar_span, mixed_points, 4), expected);
+}
+
 TEST(GpuBn254, MsmLargeBucketAccumulationMatchesCpu) {
   BB_REQUIRE_CUDA_DEVICE();
 
@@ -226,6 +335,30 @@ TEST(GpuBn254, MsmLargeBucketAccumulationMatchesCpu) {
       gpu_testing::reference_msm_with_explicit_window(points, scalar_span, 4);
   const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
   EXPECT_EQ(actual, expected);
+}
+
+TEST(GpuBn254, MsmRejectsInfinityInputPoints) {
+#if defined(__unix__)
+  std::vector<curve::BN254::AffineElement> points = {
+      curve::BN254::AffineElement::random_element(),
+      curve::BN254::AffineElement::infinity(),
+      curve::BN254::AffineElement::random_element(),
+  };
+
+  const pid_t pid = fork();
+  ASSERT_NE(pid, -1);
+  if (pid == 0) {
+    bb::gpu::bn254::init(points);
+    _exit(0);
+  }
+
+  int status = 0;
+  ASSERT_EQ(waitpid(pid, &status, 0), pid);
+  EXPECT_TRUE(WIFSIGNALED(status) ||
+              (WIFEXITED(status) && WEXITSTATUS(status) != 0));
+#else
+  GTEST_SKIP() << "fork is required to assert abort-path SRS validation";
+#endif
 }
 
 TEST(GpuBn254, MsmLargeBucketUsesChunkedAccumulation) {
