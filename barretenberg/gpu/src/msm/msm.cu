@@ -14,6 +14,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -39,9 +40,13 @@ namespace {
 #include "internal/scalar_split_pipeline.cuh"
 #include "internal/bucket_distribution.cuh"
 #include "internal/chunked_large_buckets.cuh"
-#include "internal/msm_pipeline_impl.cuh"
+#include "internal/pippenger_stages.cuh"
+#include "internal/pippenger_impl.cuh"
 #include "internal/msm_raw_entrypoints.cuh"
 // clang-format on
+
+static_assert(sizeof(fq32_xyzz_g1_t) == GPU_MSM_BUCKET_ELEMENT_BYTES,
+              "GPU_MSM_BUCKET_ELEMENT_BYTES out of sync with fq32_xyzz_g1_t");
 } // namespace bb::gpu::bn254
 
 #endif // BB_GPU_NATIVE

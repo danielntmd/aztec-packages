@@ -8,6 +8,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <vector>
 
 namespace bb::gpu {
@@ -76,6 +79,19 @@ __global__ void shift_srs_layer_kernel(const bn254::fq32_affine_g1_t *src,
     bn254::self_double(point);
   }
   dst[idx] = bn254::fq32_xyzz_to_affine(point);
+}
+
+[[noreturn]] void fail_shifted_srs_memory_check(
+    const size_t required_bytes, const size_t available_bytes,
+    const size_t free_bytes, const size_t total_bytes, const size_t num_points,
+    const uint32_t precompute_factor) {
+  std::fprintf(stderr,
+               "bb::gpu: shifted SRS allocation requires %zu bytes for %zu "
+               "points and precompute factor %u, but only %zu bytes are "
+               "available (%zu bytes free, %zu bytes total)\n",
+               required_bytes, num_points, precompute_factor, available_bytes,
+               free_bytes, total_bytes);
+  std::abort();
 }
 
 } // namespace
@@ -206,8 +222,26 @@ void GpuMsmContext::ensure_shifted_srs_uploaded(
     return;
   }
 
+  check_condition(num_points <= std::numeric_limits<size_t>::max() /
+                                    static_cast<size_t>(precompute_factor),
+                  "bb::gpu: shifted SRS size exceeds size_t range");
   const size_t shifted_size =
       num_points * static_cast<size_t>(precompute_factor);
+  check_condition(shifted_size <= std::numeric_limits<size_t>::max() /
+                                      sizeof(bn254::fq32_affine_g1_t),
+                  "bb::gpu: shifted SRS byte size exceeds size_t range");
+  const size_t required_bytes = shifted_size * sizeof(bn254::fq32_affine_g1_t);
+  if (required_bytes > shifted_srs_device_bytes()) {
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo");
+    const size_t reusable_shifted_srs_bytes = shifted_srs_device_bytes();
+    const size_t available_bytes = free_bytes + reusable_shifted_srs_bytes;
+    if (required_bytes > available_bytes) {
+      fail_shifted_srs_memory_check(required_bytes, available_bytes, free_bytes,
+                                    total_bytes, num_points, precompute_factor);
+    }
+  }
   shifted_srs_points_device_.resize(shifted_size);
   shifted_srs_size_ = shifted_size;
   if (num_points != 0) {

@@ -171,3 +171,100 @@ void copy_and_split_scalars_pipeline(
     destroy_event(split_stop_events[i]);
   }
 }
+
+template <typename Recorder>
+void copy_and_split_scalars_batched_pipeline(
+    const host_fr_montgomery_t *const *scalars,
+    DeviceBuffer<host_fr_montgomery_t> &scalars_montgomery_device,
+    uint32_t *bucket_indices, uint32_t *point_indices,
+    const size_t num_scalars_per_msm, const uint32_t batch_size,
+    const uint32_t point_start_index, const uint32_t bits_per_slice,
+    const uint32_t num_windows, const uint32_t precompute_factor,
+    const uint32_t folded_windows, const uint32_t srs_size,
+    const cudaStream_t main_stream, Recorder &recorder) {
+  bb::gpu::ScopedNvtxRange nvtx_range(recorder.scalar_copy_split_range_name());
+
+  const size_t total_scalars =
+      static_cast<size_t>(batch_size) * num_scalars_per_msm;
+  scalars_montgomery_device.resize(total_scalars);
+
+  const bool record_profile = recorder.enabled();
+  cudaEvent_t pipeline_start_event = nullptr;
+  cudaEvent_t pipeline_stop_event = nullptr;
+  cudaEvent_t copy_start_event = nullptr;
+  cudaEvent_t copy_stop_event = nullptr;
+  cudaEvent_t split_start_event = nullptr;
+  cudaEvent_t split_stop_event = nullptr;
+  if (record_profile) {
+    create_timing_event(pipeline_start_event);
+    create_timing_event(pipeline_stop_event);
+    create_timing_event(copy_start_event);
+    create_timing_event(copy_stop_event);
+    create_timing_event(split_start_event);
+    create_timing_event(split_stop_event);
+    record_event(pipeline_start_event, main_stream,
+                 "cudaEventRecord batched scalar pipeline start");
+    record_event(copy_start_event, main_stream,
+                 "cudaEventRecord batched scalar copy start");
+  }
+
+  for (uint32_t batch_id = 0; batch_id < batch_size; ++batch_id) {
+    const size_t dst_offset =
+        static_cast<size_t>(batch_id) * num_scalars_per_msm;
+    copy_host_to_device(scalars_montgomery_device.data() + dst_offset,
+                        scalars[batch_id],
+                        sizeof(host_fr_montgomery_t) * num_scalars_per_msm,
+                        main_stream);
+  }
+
+  if (record_profile) {
+    record_event(copy_stop_event, main_stream,
+                 "cudaEventRecord batched scalar copy stop");
+    record_event(split_start_event, main_stream,
+                 "cudaEventRecord batched scalar split start");
+  }
+
+  const uint32_t split_blocks_x =
+      ceil_div_u32(num_scalars_per_msm, SPLIT_THREADS);
+  const dim3 grid_dim(split_blocks_x, batch_size, 1);
+  const dim3 block_dim(SPLIT_THREADS, 1, 1);
+  if (precompute_factor > 1) {
+    split_scalars_precomputed_batched_kernel<<<grid_dim, block_dim, 0,
+                                                main_stream>>>(
+        scalars_montgomery_device.data(), bucket_indices, point_indices,
+        num_scalars_per_msm, point_start_index, srs_size, bits_per_slice,
+        num_windows, folded_windows, batch_size);
+  } else {
+    split_scalars_batched_kernel<<<grid_dim, block_dim, 0, main_stream>>>(
+        scalars_montgomery_device.data(), bucket_indices, point_indices,
+        num_scalars_per_msm, point_start_index, bits_per_slice, num_windows,
+        batch_size);
+  }
+  check_cuda(cudaGetLastError(), "split_scalars_batched_kernel launch");
+
+  if (record_profile) {
+    record_event(split_stop_event, main_stream,
+                 "cudaEventRecord batched scalar split stop");
+    record_event(pipeline_stop_event, main_stream,
+                 "cudaEventRecord batched scalar pipeline stop");
+    check_cuda(cudaEventSynchronize(pipeline_stop_event),
+               "cudaEventSynchronize batched scalar pipeline stop");
+    const float pipeline_ms =
+        elapsed_ms(pipeline_start_event, pipeline_stop_event);
+    const float copy_ms = elapsed_ms(copy_start_event, copy_stop_event);
+    const float split_ms = elapsed_ms(split_start_event, split_stop_event);
+    recorder.set_scalar_copy_split_pipeline_ms(pipeline_ms);
+    recorder.set_scalar_copy_split_overlap_ms(copy_ms + split_ms - pipeline_ms);
+    recorder.set_scalar_chunk_profile(0, copy_ms, split_ms);
+    recorder.set_scalar_chunk_profile(1, 0.0F, 0.0F);
+    recorder.add_h2d_scalars_ms(copy_ms);
+    recorder.add_split_scalars_ms(split_ms);
+  }
+
+  destroy_event(pipeline_start_event);
+  destroy_event(pipeline_stop_event);
+  destroy_event(copy_start_event);
+  destroy_event(copy_stop_event);
+  destroy_event(split_start_event);
+  destroy_event(split_stop_event);
+}
