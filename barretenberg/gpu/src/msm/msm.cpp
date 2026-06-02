@@ -5,11 +5,14 @@
 #include "barretenberg/common/assert.hpp"
 #include "barretenberg/common/throw_or_abort.hpp"
 #include "barretenberg/gpu/common/gpu_msm_context.hpp"
+#include "barretenberg/gpu/curves/bn254/bn254_conversions.hpp"
 #include "barretenberg/gpu/msm/msm_heuristics.hpp"
 #include "barretenberg/gpu/msm/msm_raw.cuh"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 namespace bb::gpu::bn254 {
 namespace {
@@ -25,27 +28,6 @@ uint32_t resolve_bits_per_slice(const size_t num_points,
     throw_or_abort("bb::gpu::bn254::msm: bits_per_slice must be in [1, 20]");
   }
   return bits;
-}
-
-curve::BN254::BaseField to_cpu_montgomery_field(const fq32_t &value) {
-  curve::BN254::BaseField standard{
-      static_cast<uint64_t>(value.limbs[0]) |
-          (static_cast<uint64_t>(value.limbs[1]) << 32),
-      static_cast<uint64_t>(value.limbs[2]) |
-          (static_cast<uint64_t>(value.limbs[3]) << 32),
-      static_cast<uint64_t>(value.limbs[4]) |
-          (static_cast<uint64_t>(value.limbs[5]) << 32),
-      static_cast<uint64_t>(value.limbs[6]) |
-          (static_cast<uint64_t>(value.limbs[7]) << 32),
-  };
-  return standard.to_montgomery_form();
-}
-
-curve::BN254::AffineElement to_cpu_point(const fq32_affine_g1_t &point) {
-  if (is_msb_set(point.x)) {
-    return curve::BN254::AffineElement::infinity();
-  }
-  return {to_cpu_montgomery_field(point.x), to_cpu_montgomery_field(point.y)};
 }
 
 void validate_srs_points_are_finite(
@@ -102,23 +84,111 @@ msm(PolynomialSpan<const curve::BN254::ScalarField> scalars,
   return to_cpu_point(result);
 }
 
-// todo: danielntmd
 std::vector<curve::BN254::AffineElement>
 batch_msm(std::span<std::span<const curve::BN254::AffineElement>> points,
           std::span<std::span<curve::BN254::ScalarField>> scalars,
-          const bool handle_edge_cases) {
+          const bool handle_edge_cases,
+          const uint32_t requested_bits_per_slice) {
   BB_ASSERT_EQ(points.size(), scalars.size());
   if (handle_edge_cases) {
     throw_or_abort(
         "bb::gpu::bn254::batch_msm: handle_edge_cases is not supported");
   }
-  std::vector<curve::BN254::AffineElement> results;
-  results.reserve(points.size());
-  for (size_t i = 0; i < points.size(); ++i) {
-    results.emplace_back(msm({0, std::span<const curve::BN254::ScalarField>(
-                                     scalars[i].data(), scalars[i].size())},
-                             points[i]));
+  const size_t num_msms = points.size();
+  std::vector<curve::BN254::AffineElement> results(num_msms);
+  if (num_msms == 0) {
+    return results;
   }
+
+  auto &context = bb::gpu::default_msm_context();
+
+  struct EntryShape {
+    size_t input_index;
+    size_t num_scalars;
+    size_t point_start_index;
+  };
+  std::vector<EntryShape> entries;
+  entries.reserve(num_msms);
+  for (size_t i = 0; i < num_msms; ++i) {
+    const size_t n = scalars[i].size();
+    if (n == 0) {
+      results[i] = curve::BN254::AffineElement::infinity();
+      continue;
+    }
+    if (points[i].size() < n) {
+      throw_or_abort("bb::gpu::bn254::batch_msm: point span is smaller than "
+                     "scalar count");
+    }
+    if (n > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+      throw_or_abort("bb::gpu::bn254::batch_msm: point indices exceed uint32 "
+                     "schedule range");
+    }
+    const size_t point_start_index = context.get_srs_offset(
+        reinterpret_cast<const host_affine_g1_montgomery_t *>(points[i].data()),
+        points[i].size());
+    entries.push_back({i, n, point_start_index});
+  }
+
+  std::sort(entries.begin(), entries.end(),
+            [](const EntryShape &a, const EntryShape &b) {
+              if (a.num_scalars != b.num_scalars) {
+                return a.num_scalars < b.num_scalars;
+              }
+              return a.point_start_index < b.point_start_index;
+            });
+
+  size_t group_begin = 0;
+  while (group_begin < entries.size()) {
+    size_t group_end = group_begin + 1;
+    while (group_end < entries.size() &&
+           entries[group_end].num_scalars == entries[group_begin].num_scalars &&
+           entries[group_end].point_start_index ==
+               entries[group_begin].point_start_index) {
+      ++group_end;
+    }
+
+    const size_t group_size = group_end - group_begin;
+    const size_t num_scalars = entries[group_begin].num_scalars;
+    const size_t point_start_index = entries[group_begin].point_start_index;
+    const uint32_t bits_per_slice =
+        requested_bits_per_slice == 0
+            ? get_auto_batched_bits_per_slice(
+                  num_scalars,
+                  static_cast<uint32_t>(std::min<size_t>(
+                      group_size, GPU_MSM_MAX_FUSED_BATCH_SIZE)),
+                  get_msm_precompute_factor())
+            : requested_bits_per_slice;
+    if (bits_per_slice == 0 || bits_per_slice > GPU_MSM_MAX_SLICE_BITS ||
+        bits_per_slice > GPU_MSM_NUM_BITS_IN_FIELD) {
+      throw_or_abort(
+          "bb::gpu::bn254::batch_msm: bits_per_slice must be in [1, 20]");
+    }
+
+    size_t chunk_begin = group_begin;
+    while (chunk_begin < group_end) {
+      const size_t chunk_size = std::min<size_t>(GPU_MSM_MAX_FUSED_BATCH_SIZE,
+                                                 group_end - chunk_begin);
+      std::vector<const host_fr_montgomery_t *> chunk_scalar_pointers(
+          chunk_size);
+      std::vector<fq32_affine_g1_t> chunk_results(chunk_size);
+      for (size_t k = 0; k < chunk_size; ++k) {
+        const auto &entry = entries[chunk_begin + k];
+        chunk_scalar_pointers[k] =
+            reinterpret_cast<const host_fr_montgomery_t *>(
+                scalars[entry.input_index].data());
+      }
+      msm_raw_batch_fq32(chunk_scalar_pointers.data(), num_scalars,
+                         static_cast<uint32_t>(chunk_size), point_start_index,
+                         bits_per_slice, chunk_results.data());
+      for (size_t k = 0; k < chunk_size; ++k) {
+        results[entries[chunk_begin + k].input_index] =
+            to_cpu_point(chunk_results[k]);
+      }
+      chunk_begin += chunk_size;
+    }
+    group_begin = group_end;
+  }
+
   return results;
 }
 

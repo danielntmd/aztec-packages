@@ -121,3 +121,28 @@ __global__ void final_fq32_xyzz_accumulation_kernel(
   }
   *result = fq32_xyzz_to_affine(accumulator);
 }
+
+__global__ void final_fq32_xyzz_accumulation_batched_kernel(
+    const fq32_xyzz_g1_t *window_sums, fq32_affine_g1_t *results,
+    const uint32_t bits_per_slice, const uint32_t num_windows_per_msm,
+    const uint32_t remainder, const uint32_t batch_size) {
+  const uint32_t batch_id = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (batch_id >= batch_size) {
+    return;
+  }
+
+  const fq32_xyzz_g1_t *batch_window_sums =
+      window_sums + (static_cast<size_t>(batch_id) * num_windows_per_msm);
+
+  fq32_xyzz_g1_t accumulator = fq32_xyzz_infinity();
+  for (uint32_t window = 0; window < num_windows_per_msm; ++window) {
+    const uint32_t num_doublings =
+        (window == num_windows_per_msm - 1 && remainder != 0) ? remainder
+                                                              : bits_per_slice;
+    for (uint32_t i = 0; i < num_doublings; ++i) {
+      self_double(accumulator);
+    }
+    fq32_xyzz_add_assign(accumulator, batch_window_sums[window]);
+  }
+  results[batch_id] = fq32_xyzz_to_affine(accumulator);
+}
