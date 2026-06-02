@@ -66,6 +66,13 @@ void msm_raw_profiled_fq32(const host_fr_montgomery_t *scalars,
                            uint32_t bits_per_slice, fq32_affine_g1_t *result,
                            msm_profile *profile);
 
+void msm_raw_batch_profiled_fq32(const host_fr_montgomery_t *const *scalars,
+                                 size_t num_scalars_per_msm,
+                                 uint32_t batch_size, size_t point_start_index,
+                                 uint32_t bits_per_slice,
+                                 fq32_affine_g1_t *results_host,
+                                 msm_profile *profile);
+
 } // namespace bb::gpu::bn254
 
 #endif // BB_GPU_NATIVE

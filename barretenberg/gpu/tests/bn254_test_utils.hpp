@@ -203,6 +203,42 @@ inline curve::BN254::AffineElement reference_msm_with_explicit_window(
   return curve::BN254::AffineElement(result);
 }
 
+inline std::vector<curve::BN254::AffineElement>
+oracle_per_poly_msm(std::span<const curve::BN254::AffineElement> points,
+                    std::span<const std::vector<fr>> per_msm_scalars,
+                    const uint32_t bits_per_slice = 0) {
+  std::vector<curve::BN254::AffineElement> expected;
+  expected.reserve(per_msm_scalars.size());
+  for (const auto &scalars : per_msm_scalars) {
+    auto scalar_span = PolynomialSpan<const fr>{
+        0, std::span<const fr>(scalars.data(), scalars.size())};
+    expected.emplace_back(
+        bb::gpu::bn254::msm(scalar_span, points, bits_per_slice));
+  }
+  return expected;
+}
+
+inline std::vector<std::span<fr>>
+make_scalar_spans(std::vector<std::vector<fr>> &per_msm_scalars) {
+  std::vector<std::span<fr>> spans;
+  spans.reserve(per_msm_scalars.size());
+  for (auto &scalars : per_msm_scalars) {
+    spans.emplace_back(scalars.data(), scalars.size());
+  }
+  return spans;
+}
+
+inline std::vector<std::span<const curve::BN254::AffineElement>>
+make_point_spans(const std::vector<curve::BN254::AffineElement> &points,
+                 const size_t batch_size, const size_t per_msm_size) {
+  std::vector<std::span<const curve::BN254::AffineElement>> spans;
+  spans.reserve(batch_size);
+  for (size_t i = 0; i < batch_size; ++i) {
+    spans.emplace_back(points.data(), per_msm_size);
+  }
+  return spans;
+}
+
 } // namespace bb::gpu::bn254::testing
 
 #endif // BB_GPU_NATIVE

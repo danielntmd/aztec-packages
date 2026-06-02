@@ -15,6 +15,13 @@ void msm_raw_fq32(const host_fr_montgomery_t *scalars, size_t num_scalars,
                   size_t point_start_index, uint32_t bits_per_slice,
                   fq32_affine_g1_t *result);
 
+// Fused batched MSM entry point: K MSMs sharing one SRS slice, uniform length.
+// batch_size must satisfy is_valid_fused_batch_size().
+void msm_raw_batch_fq32(const host_fr_montgomery_t *const *scalars,
+                        size_t num_scalars_per_msm, uint32_t batch_size,
+                        size_t point_start_index, uint32_t bits_per_slice,
+                        fq32_affine_g1_t *results_host);
+
 void set_msm_precompute_factor(uint32_t factor);
 uint32_t get_msm_precompute_factor();
 
