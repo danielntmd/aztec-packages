@@ -7,6 +7,7 @@
 
 #include <cuda_runtime.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -17,6 +18,40 @@
 namespace bb::gpu {
 
 namespace {
+
+bool cache_log_enabled() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("BB_GPU_MSM_CACHE_LOG");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  return enabled;
+}
+
+template <typename... Args> void cache_log(const char *format, Args... args) {
+  if (!cache_log_enabled()) {
+    return;
+  }
+  std::fprintf(stderr, "BB_GPU_MSM_CACHE ");
+  std::fprintf(stderr, format, args...);
+  std::fprintf(stderr, "\n");
+}
+
+void cache_log(const char *message) {
+  if (!cache_log_enabled()) {
+    return;
+  }
+  std::fprintf(stderr, "BB_GPU_MSM_CACHE %s\n", message);
+}
+
+using CacheClock = std::chrono::steady_clock;
+
+double elapsed_ms(const CacheClock::time_point start) {
+  return static_cast<double>(
+             std::chrono::duration_cast<std::chrono::nanoseconds>(
+                 CacheClock::now() - start)
+                 .count()) /
+         1'000'000.0;
+}
 
 // Convert CPU Montgomery affine points into fq32 once per cached SRS upload.
 bn254::fq32_t
@@ -114,8 +149,16 @@ void GpuMsmContext::ensure_srs_uploaded(
     const bn254::host_affine_g1_montgomery_t *srs_points,
     const size_t num_points) {
   if (srs_points == srs_host_base_ && num_points <= srs_size_) {
+    cache_log("srs_hit requested_points=%zu cached_points=%zu host=%p",
+              num_points, srs_size_, static_cast<const void *>(srs_points));
     return;
   }
+  cache_log("srs_upload requested_points=%zu previous_points=%zu old_host=%p "
+            "new_host=%p",
+            num_points, srs_size_, static_cast<const void *>(srs_host_base_),
+            static_cast<const void *>(srs_points));
+  const bool log_enabled = cache_log_enabled();
+  const auto upload_start = CacheClock::now();
   srs_points_device_.resize(num_points);
   if (num_points != 0) {
     std::vector<bn254::fq32_affine_g1_t> srs_fq32(num_points);
@@ -128,12 +171,19 @@ void GpuMsmContext::ensure_srs_uploaded(
   srs_host_base_ = srs_points;
   srs_size_ = num_points;
   clear_shifted_srs_state();
+  if (log_enabled) {
+    sync();
+    cache_log("srs_upload_complete points=%zu bytes=%zu elapsed_ms=%.3f",
+              num_points, num_points * sizeof(bn254::fq32_affine_g1_t),
+              elapsed_ms(upload_start));
+  }
 }
 
 void GpuMsmContext::ensure_shifted_srs_uploaded(
     const size_t point_start_index, const size_t num_points,
     const uint32_t shift_bits, const uint32_t precompute_factor) {
   if (precompute_factor <= 1) {
+    cache_log("shifted_disabled");
     clear_shifted_srs_state();
     return;
   }
@@ -145,8 +195,22 @@ void GpuMsmContext::ensure_shifted_srs_uploaded(
                   "shifted SRS span exceeds cached SRS");
   if (has_shifted_srs(point_start_index, num_points, shift_bits,
                       precompute_factor)) {
+    cache_log("shifted_hit start=%zu points=%zu shift_bits=%u factor=%u "
+              "bytes=%zu",
+              point_start_index, num_points, shift_bits, precompute_factor,
+              shifted_srs_device_bytes());
     return;
   }
+
+  cache_log("shifted_upload start=%zu points=%zu shift_bits=%u factor=%u "
+            "previous_start=%zu previous_points=%zu previous_shift_bits=%u "
+            "previous_factor=%u previous_bytes=%zu",
+            point_start_index, num_points, shift_bits, precompute_factor,
+            shifted_srs_point_start_index_, shifted_srs_original_size_,
+            shifted_srs_shift_bits_, shifted_srs_precompute_factor_,
+            shifted_srs_device_bytes());
+  const bool log_enabled = cache_log_enabled();
+  const auto upload_start = CacheClock::now();
 
   check_condition(num_points <= std::numeric_limits<size_t>::max() /
                                     static_cast<size_t>(precompute_factor),
@@ -197,6 +261,13 @@ void GpuMsmContext::ensure_shifted_srs_uploaded(
   shifted_srs_original_size_ = num_points;
   shifted_srs_shift_bits_ = shift_bits;
   shifted_srs_precompute_factor_ = precompute_factor;
+  if (log_enabled) {
+    sync();
+    cache_log("shifted_upload_complete start=%zu points=%zu shift_bits=%u "
+              "factor=%u bytes=%zu elapsed_ms=%.3f",
+              point_start_index, num_points, shift_bits, precompute_factor,
+              shifted_srs_device_bytes(), elapsed_ms(upload_start));
+  }
 }
 
 bool GpuMsmContext::has_shifted_srs(const size_t point_start_index,
@@ -209,12 +280,21 @@ bool GpuMsmContext::has_shifted_srs(const size_t point_start_index,
       request_starts_in_cache
           ? point_start_index - shifted_srs_point_start_index_
           : 0;
-  return shifted_srs_host_base_ == srs_host_base_ && request_starts_in_cache &&
-         request_offset <= shifted_srs_original_size_ &&
-         num_points <= shifted_srs_original_size_ - request_offset &&
-         shifted_srs_shift_bits_ == shift_bits &&
-         shifted_srs_precompute_factor_ == precompute_factor &&
-         !shifted_srs_points_device_.empty();
+  const bool hit = shifted_srs_host_base_ == srs_host_base_ &&
+                   request_starts_in_cache &&
+                   request_offset <= shifted_srs_original_size_ &&
+                   num_points <= shifted_srs_original_size_ - request_offset &&
+                   shifted_srs_shift_bits_ == shift_bits &&
+                   shifted_srs_precompute_factor_ == precompute_factor &&
+                   !shifted_srs_points_device_.empty();
+  cache_log("shifted_%s start=%zu points=%zu shift_bits=%u factor=%u "
+            "cached_start=%zu cached_points=%zu cached_shift_bits=%u "
+            "cached_factor=%u cached_bytes=%zu",
+            hit ? "hit" : "miss", point_start_index, num_points, shift_bits,
+            precompute_factor, shifted_srs_point_start_index_,
+            shifted_srs_original_size_, shifted_srs_shift_bits_,
+            shifted_srs_precompute_factor_, shifted_srs_device_bytes());
+  return hit;
 }
 
 size_t
@@ -226,6 +306,8 @@ GpuMsmContext::shifted_srs_point_offset(const size_t point_start_index) const {
 
 void GpuMsmContext::release_shifted_srs() {
   sync();
+  cache_log("shifted_release points=%zu bytes=%zu", shifted_srs_original_size_,
+            shifted_srs_device_bytes());
   clear_shifted_srs_state();
 }
 
@@ -262,6 +344,8 @@ GpuMsmContext::get_srs_offset(const bn254::host_affine_g1_montgomery_t *points,
 
 void GpuMsmContext::reset() {
   sync();
+  cache_log("reset srs_points=%zu shifted_points=%zu shifted_bytes=%zu",
+            srs_size_, shifted_srs_original_size_, shifted_srs_device_bytes());
   srs_points_device_.reset();
   msm_buffers_.release();
   srs_host_base_ = nullptr;

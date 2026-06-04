@@ -32,9 +32,11 @@
 #include "barretenberg/srs/global_crs.hpp"
 #include "barretenberg/vm2/api_avm.hpp"
 #include <atomic>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <nlohmann/json.hpp>
 
 namespace bb {
 
@@ -81,6 +83,49 @@ void print_subcommand_options(const CLI::App* sub)
             vinfo("  ", opt->get_name(), ": ", opt->results()[0]);
         }
     }
+}
+
+int run_ultra_honk_worker(const API::Flags& base_flags)
+{
+    UltraHonkAPI api;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        nlohmann::json response;
+        std::string request_id;
+        try {
+            const auto request = nlohmann::json::parse(line);
+            request_id = request.value("id", "");
+            response["id"] = request_id;
+            if (request.value("type", "") == "shutdown") {
+                response["status"] = "ok";
+                std::cout << "BB_WORKER_RESULT " << response.dump() << std::endl;
+                return 0;
+            }
+
+            API::Flags flags = base_flags;
+            flags.scheme = "ultra_honk";
+            flags.oracle_hash_type = request.at("oracle_hash_type").get<std::string>();
+            flags.ipa_accumulation = request.value("ipa_accumulation", false);
+            flags.disable_zk = request.value("disable_zk", true);
+            flags.write_vk = request.value("write_vk", false);
+            flags.output_format = request.value("output_format", "binary");
+
+            const std::filesystem::path bytecode_path = request.at("bytecode_path").get<std::string>();
+            const std::filesystem::path witness_path = request.at("witness_path").get<std::string>();
+            const std::filesystem::path vk_path = request.at("vk_path").get<std::string>();
+            const std::filesystem::path output_path = request.at("output_path").get<std::string>();
+            std::filesystem::create_directories(output_path);
+
+            api.prove(flags, bytecode_path, witness_path, vk_path, output_path);
+            response["status"] = "ok";
+        } catch (const std::exception& err) {
+            response["id"] = request_id;
+            response["status"] = "error";
+            response["reason"] = err.what();
+        }
+        std::cout << "BB_WORKER_RESULT " << response.dump() << std::endl;
+    }
+    return 0;
 }
 
 /**
@@ -456,6 +501,13 @@ int parse_and_run_cli_command(int argc, char* argv[])
 
     prove->add_flag("--verify", "Verify the proof natively, resulting in a boolean output. Useful for testing.");
 
+    CLI::App* prove_ultra_honk_worker = app.add_subcommand(
+        "prove_ultra_honk_worker", "[Internal testing] Run UltraHonk prove jobs from newline-delimited JSON on stdin.");
+    prove_ultra_honk_worker->group(aztec_internal_group);
+    add_verbose_flag(prove_ultra_honk_worker);
+    add_debug_flag(prove_ultra_honk_worker);
+    add_crs_path_option(prove_ultra_honk_worker);
+
     /***************************************************************************************************************
      * Subcommand: write_vk
      ***************************************************************************************************************/
@@ -759,6 +811,10 @@ int parse_and_run_cli_command(int argc, char* argv[])
         vinfo("BB_BENCH enabled via --print_bench or --bench_out");
     }
 #endif
+
+    if (prove_ultra_honk_worker->parsed()) {
+        return run_ultra_honk_worker(flags);
+    }
 
     print_active_subcommands(app);
     info("Scheme is: ", flags.scheme, ", num threads: ", get_num_cpus());

@@ -29,12 +29,19 @@ namespace bb::gpu::bn254 {
   FIELD(float, final_accumulation_ms, 0.0F)                                    \
   FIELD(float, d2h_result_ms, 0.0F)                                            \
   FIELD(float, total_profiled_ms, 0.0F)                                        \
+  FIELD(float, backend_host_preamble_ms, 0.0F)                                 \
+  FIELD(float, backend_host_cleanup_ms, 0.0F)                                  \
+  FIELD(float, backend_host_total_ms, 0.0F)                                    \
   FIELD(uint32_t, bits_per_slice, 0)                                           \
   FIELD(uint32_t, active_buckets, 0)                                           \
   FIELD(uint32_t, large_bucket_threshold, 0)                                   \
+  FIELD(uint32_t, large_bucket_mode, 0)                                        \
   FIELD(uint32_t, precompute_factor, 0)                                        \
   FIELD(uint32_t, folded_windows, 0)                                           \
   FIELD(uint64_t, precomputed_srs_bytes, 0)                                    \
+  FIELD(uint64_t, large_bucket_count, 0)                                       \
+  FIELD(uint64_t, large_bucket_point_count, 0)                                 \
+  FIELD(uint64_t, max_bucket_size, 0)                                          \
   FIELD(uint64_t, large_bucket_chunk_count, 0)
 
 struct msm_profile {

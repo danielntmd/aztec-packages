@@ -342,6 +342,7 @@ LargeBucketPlan plan_large_bucket_strategy(
                       sorted_bucket_size_sort_keys, sizeof(uint32_t), stream);
   context.sync();
   const uint32_t max_bucket_size = ~largest_bucket_size_sort_key;
+  recorder.set_max_bucket_size(max_bucket_size);
   const bool has_large_buckets =
       max_bucket_size > static_cast<uint32_t>(large_bucket_threshold);
 

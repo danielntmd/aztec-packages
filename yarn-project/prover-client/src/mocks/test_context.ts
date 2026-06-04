@@ -41,6 +41,10 @@ import { BrokerCircuitProverFacade } from '../proving_broker/broker_prover_facad
 import { TestBroker } from '../test/mock_prover.js';
 import { getEnvironmentConfig, getSimulator, makeCheckpointConstants, makeGlobals } from './fixtures.js';
 
+function hasStop(prover: ServerCircuitProver): prover is ServerCircuitProver & { stop: () => Promise<void> } {
+  return 'stop' in prover && typeof prover.stop === 'function';
+}
+
 export class TestContext {
   private headers: Map<number, BlockHeader> = new Map();
   private checkpoints: Checkpoint[] = [];
@@ -141,6 +145,9 @@ export class TestContext {
   async cleanup() {
     await this.brokerProverFacade.stop();
     await this.broker.stop();
+    if (hasStop(this.prover)) {
+      await this.prover.stop();
+    }
     for (const dir of this.directoriesToCleanup.filter(x => x !== '')) {
       try {
         await fs.rm(dir, { recursive: true, force: true, maxRetries: 3 });

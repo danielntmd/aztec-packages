@@ -8,6 +8,16 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
                            const size_t point_start_index,
                            const MsmRawOptions &options,
                            fq32_affine_g1_t *results_host, Recorder &recorder) {
+  using HostClock = std::chrono::steady_clock;
+  const auto host_start = HostClock::now();
+  auto host_elapsed_ms = [](const HostClock::time_point start) -> float {
+    const auto elapsed = HostClock::now() - start;
+    return static_cast<float>(
+               std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed)
+                   .count()) /
+           1'000'000.0F;
+  };
+
   check_condition(batch_size >= 1 && batch_size <= GPU_MSM_MAX_FUSED_BATCH_SIZE,
                   "msm: batch size out of fused range");
 
@@ -60,6 +70,7 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
                                    cfg, total_entries_size);
   MsmPippengerBuffers buffers =
       context.msm_buffers().prepare_pippenger(pippenger_layout, stream);
+  recorder.add_backend_host_preamble_ms(host_elapsed_ms(host_start));
 
   if (batch_size == 1) {
     copy_and_split_scalars_pipeline(
@@ -111,6 +122,7 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
       results_host[batch_id] = fq32_affine_infinity();
     }
     recorder.stop();
+    recorder.set_backend_host_total_ms(host_elapsed_ms(host_start));
     return;
   }
 
@@ -181,6 +193,9 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
   });
   context.sync();
   recorder.stop();
+  const auto cleanup_start = HostClock::now();
+  recorder.add_backend_host_cleanup_ms(host_elapsed_ms(cleanup_start));
+  recorder.set_backend_host_total_ms(host_elapsed_ms(host_start));
 }
 
 void bucket_pippenger_msm_fq32(const host_fr_montgomery_t *scalars,

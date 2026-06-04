@@ -104,6 +104,10 @@ public:
   void set_scalar_copy_split_pipeline_ms(float) {}
   void set_precompute_config(uint32_t, uint32_t, uint64_t) {}
   void set_large_bucket_config(bool, uint64_t) {}
+  void set_max_bucket_size(uint64_t) {}
+  void add_backend_host_preamble_ms(float) {}
+  void add_backend_host_cleanup_ms(float) {}
+  void set_backend_host_total_ms(float) {}
   const char *scalar_copy_split_range_name() const {
     return "bb.msm.scalar_copy_split_pipeline";
   }
@@ -189,7 +193,33 @@ public:
                                const uint64_t chunk_count) {
     if (profile_ != nullptr) {
       profile_->has_large_buckets = has_large_buckets;
+      profile_->large_bucket_count = has_large_buckets ? 1 : 0;
+      profile_->large_bucket_mode = has_large_buckets ? 1 : 0;
       profile_->large_bucket_chunk_count = chunk_count;
+    }
+  }
+
+  void set_max_bucket_size(const uint64_t max_bucket_size) {
+    if (profile_ != nullptr) {
+      profile_->max_bucket_size = max_bucket_size;
+    }
+  }
+
+  void add_backend_host_preamble_ms(const float elapsed_ms) {
+    if (profile_ != nullptr) {
+      profile_->backend_host_preamble_ms += elapsed_ms;
+    }
+  }
+
+  void add_backend_host_cleanup_ms(const float elapsed_ms) {
+    if (profile_ != nullptr) {
+      profile_->backend_host_cleanup_ms += elapsed_ms;
+    }
+  }
+
+  void set_backend_host_total_ms(const float elapsed_ms) {
+    if (profile_ != nullptr) {
+      profile_->backend_host_total_ms = elapsed_ms;
     }
   }
 

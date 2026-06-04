@@ -3,6 +3,7 @@ find_package(CUDAToolkit REQUIRED)
 set(BB_GPU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(BB_GPU_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(BB_GPU_CPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cpp/src")
+option(BB_ENABLE_GPU_MSM_EXTERNAL_BENCH "Build optional external GPU MSM comparison benchmark runners" OFF)
 
 set(BB_GPU_HEADERS
     include/barretenberg/gpu/common/cuda_defines.cuh
@@ -147,6 +148,146 @@ if(NOT FUZZING)
             ${BB_GPU_STDCXX_LIBRARY})
     if(TARGET msgpack-c)
         add_dependencies(gpu_msm_bench msgpack-c)
+    endif()
+
+    if(BB_ENABLE_GPU_MSM_EXTERNAL_BENCH)
+        set(BB_GPU_EXTERNAL_MSM_BENCH_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/external_msm")
+
+        add_executable(gpu_msm_external_bb_bench
+            benchmark/external_msm/bb_msm_runner.cpp)
+        target_include_directories(gpu_msm_external_bb_bench
+            PRIVATE
+                "${BB_GPU_EXTERNAL_MSM_BENCH_INCLUDE_DIR}"
+                "${BB_GPU_INCLUDE_DIR}"
+                "${BB_GPU_SRC_DIR}"
+                "${BB_GPU_CPP_SOURCE_DIR}"
+                ${MSGPACK_INCLUDE}
+                ${TRACY_INCLUDE}
+                ${LMDB_INCLUDE}
+                ${LIBDEFLATE_INCLUDE}
+                ${HTTPLIB_INCLUDE}
+                ${BACKWARD_INCLUDE}
+                ${NLOHMANN_JSON_INCLUDE})
+        target_link_libraries(gpu_msm_external_bb_bench
+            PRIVATE
+                gpu
+                commitment_schemes
+                CUDA::cudart
+                ${BB_GPU_STDCXX_LIBRARY})
+        if(TARGET msgpack-c)
+            add_dependencies(gpu_msm_external_bb_bench msgpack-c)
+        endif()
+
+        set(ICICLE_V28_INSTALL_DIR "" CACHE PATH "Icicle v2.8.0 install directory")
+        set(ICICLE_V28_INCLUDE_DIR "" CACHE PATH "Icicle v2.8.0 include directory")
+        set(ICICLE_V28_LIBRARY_DIR "" CACHE PATH "Icicle v2.8.0 library directory")
+        set(ICICLE_V28_LIBRARIES "" CACHE STRING "Icicle v2.8.0 libraries; overrides auto-discovery")
+        if(NOT ICICLE_V28_INCLUDE_DIR AND ICICLE_V28_INSTALL_DIR)
+            set(ICICLE_V28_INCLUDE_DIR "${ICICLE_V28_INSTALL_DIR}/include")
+        endif()
+        if(NOT ICICLE_V28_LIBRARY_DIR AND ICICLE_V28_INSTALL_DIR)
+            set(ICICLE_V28_LIBRARY_DIR "${ICICLE_V28_INSTALL_DIR}/lib")
+        endif()
+        if(ICICLE_V28_INCLUDE_DIR)
+            set(ICICLE_V28_INCLUDE_DIRS "${ICICLE_V28_INCLUDE_DIR}")
+        endif()
+        if(ICICLE_V28_LIBRARY_DIR AND NOT ICICLE_V28_LIBRARIES)
+            find_library(ICICLE_V28_CURVE_LIBRARY
+                NAMES ingo_curve_bn254
+                PATHS "${ICICLE_V28_LIBRARY_DIR}"
+                NO_DEFAULT_PATH)
+            find_library(ICICLE_V28_FIELD_LIBRARY
+                NAMES ingo_field_bn254_scalar ingo_field_bn254
+                PATHS "${ICICLE_V28_LIBRARY_DIR}"
+                NO_DEFAULT_PATH)
+            if(ICICLE_V28_CURVE_LIBRARY AND ICICLE_V28_FIELD_LIBRARY)
+                set(ICICLE_V28_LIBRARIES "${ICICLE_V28_CURVE_LIBRARY};${ICICLE_V28_FIELD_LIBRARY}")
+            endif()
+        endif()
+        if(ICICLE_V28_INCLUDE_DIRS AND ICICLE_V28_LIBRARIES)
+            add_executable(gpu_msm_external_icicle_v2_bench
+                benchmark/external_msm/icicle_v2_msm_adapter.cu
+                benchmark/external_msm/icicle_v2_msm_runner.cpp)
+            target_include_directories(gpu_msm_external_icicle_v2_bench
+                PRIVATE
+                    "${BB_GPU_EXTERNAL_MSM_BENCH_INCLUDE_DIR}"
+                    "${BB_GPU_CPP_SOURCE_DIR}"
+                    ${MSGPACK_INCLUDE}
+                    ${TRACY_INCLUDE}
+                    ${LMDB_INCLUDE}
+                    ${LIBDEFLATE_INCLUDE}
+                    ${HTTPLIB_INCLUDE}
+                    ${BACKWARD_INCLUDE}
+                    ${NLOHMANN_JSON_INCLUDE}
+                    ${ICICLE_V28_INCLUDE_DIRS})
+            target_link_libraries(gpu_msm_external_icicle_v2_bench
+                PRIVATE
+                    ecc
+                    common
+                    ${ICICLE_V28_LIBRARIES}
+                    CUDA::cudart
+                    ${BB_GPU_STDCXX_LIBRARY})
+        else()
+            message(STATUS "Skipping gpu_msm_external_icicle_v2_bench; set ICICLE_V28_INCLUDE_DIR and "
+                           "ICICLE_V28_LIBRARIES or ICICLE_V28_INSTALL_DIR")
+        endif()
+
+        set(ICICLE_V4_INSTALL_DIR "" CACHE PATH "Icicle v4.0.0 install directory")
+        set(ICICLE_V4_INCLUDE_DIR "" CACHE PATH "Icicle v4.0.0 include directory")
+        set(ICICLE_V4_LIBRARY_DIR "" CACHE PATH "Icicle v4.0.0 library directory")
+        set(ICICLE_V4_LIBRARIES "" CACHE STRING "Icicle v4.0.0 libraries; overrides auto-discovery")
+        if(NOT ICICLE_V4_INCLUDE_DIR AND ICICLE_V4_INSTALL_DIR)
+            set(ICICLE_V4_INCLUDE_DIR "${ICICLE_V4_INSTALL_DIR}/include")
+        endif()
+        if(NOT ICICLE_V4_LIBRARY_DIR AND ICICLE_V4_INSTALL_DIR)
+            set(ICICLE_V4_LIBRARY_DIR "${ICICLE_V4_INSTALL_DIR}/lib")
+        endif()
+        if(ICICLE_V4_INCLUDE_DIR)
+            set(ICICLE_V4_INCLUDE_DIRS "${ICICLE_V4_INCLUDE_DIR}")
+        endif()
+        if(ICICLE_V4_LIBRARY_DIR AND NOT ICICLE_V4_LIBRARIES)
+            find_library(ICICLE_V4_CURVE_LIBRARY
+                NAMES icicle_curve_bn254
+                PATHS "${ICICLE_V4_LIBRARY_DIR}"
+                NO_DEFAULT_PATH)
+            find_library(ICICLE_V4_DEVICE_LIBRARY
+                NAMES icicle_device
+                PATHS "${ICICLE_V4_LIBRARY_DIR}"
+                NO_DEFAULT_PATH)
+            find_library(ICICLE_V4_FIELD_LIBRARY
+                NAMES icicle_field_bn254_scalar icicle_field_bn254
+                PATHS "${ICICLE_V4_LIBRARY_DIR}"
+                NO_DEFAULT_PATH)
+            if(ICICLE_V4_CURVE_LIBRARY AND ICICLE_V4_DEVICE_LIBRARY AND ICICLE_V4_FIELD_LIBRARY)
+                set(ICICLE_V4_LIBRARIES
+                    "${ICICLE_V4_CURVE_LIBRARY};${ICICLE_V4_FIELD_LIBRARY};${ICICLE_V4_DEVICE_LIBRARY}")
+            endif()
+        endif()
+        if(ICICLE_V4_INCLUDE_DIRS AND ICICLE_V4_LIBRARIES)
+            add_executable(gpu_msm_external_icicle_v4_bench
+                benchmark/external_msm/icicle_v4_msm_runner.cpp)
+            target_include_directories(gpu_msm_external_icicle_v4_bench
+                PRIVATE
+                    "${BB_GPU_EXTERNAL_MSM_BENCH_INCLUDE_DIR}"
+                    "${BB_GPU_CPP_SOURCE_DIR}"
+                    ${MSGPACK_INCLUDE}
+                    ${TRACY_INCLUDE}
+                    ${LMDB_INCLUDE}
+                    ${LIBDEFLATE_INCLUDE}
+                    ${HTTPLIB_INCLUDE}
+                    ${BACKWARD_INCLUDE}
+                    ${NLOHMANN_JSON_INCLUDE}
+                    ${ICICLE_V4_INCLUDE_DIRS})
+            target_link_libraries(gpu_msm_external_icicle_v4_bench
+                PRIVATE
+                    ecc
+                    common
+                    ${ICICLE_V4_LIBRARIES}
+                    ${BB_GPU_STDCXX_LIBRARY})
+        else()
+            message(STATUS "Skipping gpu_msm_external_icicle_v4_bench; set ICICLE_V4_INCLUDE_DIR and "
+                           "ICICLE_V4_LIBRARIES or ICICLE_V4_INSTALL_DIR")
+        endif()
     endif()
 endif()
 

@@ -131,6 +131,10 @@ export class BBNativeRollupProver implements ServerCircuitProver {
     return this.instrumentation.tracer;
   }
 
+  public async stop(): Promise<void> {
+    await this.bbJsFactory.destroy();
+  }
+
   static async new(config: BBProverConfig, telemetry: TelemetryClient = getTelemetryClient()) {
     await fs.access(config.acvmBinaryPath, fs.constants.R_OK);
     await fs.mkdir(config.acvmWorkingDirectory, { recursive: true });
