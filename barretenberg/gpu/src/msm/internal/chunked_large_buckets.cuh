@@ -22,19 +22,6 @@ void accumulate_large_buckets_fq32_xyzz_chunked(
     return;
   }
 
-  count_large_bucket_chunks_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
-                                     cuda_stream>>>(
-      sorted_bucket_run_indices, bucket_sizes, large_bucket_chunk_counts.data(),
-      large_bucket_full_chunk_counts.data(), num_active_buckets,
-      large_bucket_threshold, chunk_size);
-  check_cuda(cudaGetLastError(), "count_large_bucket_chunks_kernel launch");
-  cub_exclusive_sum(temp_storage, large_bucket_chunk_counts.data(),
-                    large_bucket_chunk_offsets.data(), num_active_buckets,
-                    stream);
-  cub_exclusive_sum(temp_storage, large_bucket_full_chunk_counts.data(),
-                    large_bucket_full_chunk_offsets.data(), num_active_buckets,
-                    stream);
-
   build_large_bucket_chunk_jobs_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
                                          cuda_stream>>>(
       sorted_bucket_run_indices, bucket_sizes, bucket_offsets,

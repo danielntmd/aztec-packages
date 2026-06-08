@@ -66,6 +66,10 @@ BB_GPU_HD_FORCEINLINE fq32_xyzz_g1_t fq32_xyzz_infinity() {
   return {fq32_t::zero(), fq32_t::zero(), fq32_t::zero(), fq32_t::zero(), true};
 }
 
+BB_GPU_HD_FORCEINLINE bool is_infinity(const fq32_xyzz_g1_t &point) {
+  return point.infinity || is_zero(point.zz);
+}
+
 BB_GPU_HD_FORCEINLINE fq32_xyzz_g1_t
 fq32_to_xyzz(const fq32_affine_g1_t &point) {
   return is_infinity(point) ? fq32_xyzz_infinity()
@@ -75,7 +79,7 @@ fq32_to_xyzz(const fq32_affine_g1_t &point) {
 
 BB_GPU_HD_FORCEINLINE fq32_affine_g1_t
 fq32_xyzz_to_affine(const fq32_xyzz_g1_t &point) {
-  if (point.infinity) {
+  if (is_infinity(point)) {
     return fq32_affine_infinity();
   }
   // EFD XYZZ scaling: A = 1 / ZZZ, B = (ZZ * A)^2.
@@ -104,7 +108,7 @@ BB_GPU_HD_FORCEINLINE bool fq32_on_curve(const fq32_affine_g1_t &point) {
 }
 
 BB_GPU_HD_FORCEINLINE void self_double(fq32_xyzz_g1_t &point) {
-  if (point.infinity) {
+  if (is_infinity(point)) {
     return;
   }
 
@@ -196,7 +200,7 @@ BB_GPU_HD_FORCEINLINE void fq32_xyzz_mixed_add(fq32_xyzz_g1_t &lhs,
   if (is_infinity(rhs)) {
     return;
   }
-  if (lhs.infinity) {
+  if (is_infinity(lhs)) {
     lhs = fq32_to_xyzz(rhs);
     return;
   }
@@ -205,15 +209,52 @@ BB_GPU_HD_FORCEINLINE void fq32_xyzz_mixed_add(fq32_xyzz_g1_t &lhs,
 
 BB_GPU_HD_FORCEINLINE void fq32_xyzz_add_assign(fq32_xyzz_g1_t &lhs,
                                                 const fq32_xyzz_g1_t &rhs) {
-  if (lhs.infinity) {
+  if (is_infinity(lhs)) {
     lhs = rhs;
     return;
   }
-  if (rhs.infinity) {
+  if (is_infinity(rhs)) {
     return;
   }
 
   // EFD XYZZ add-2008-s for two arbitrary XYZZ points.
+  fq32_t u1 = fq32_mul(lhs.x, rhs.zz);
+  fq32_t u2 = fq32_mul(rhs.x, lhs.zz);
+  fq32_t s1 = fq32_mul(lhs.y, rhs.zzz);
+  fq32_t s2 = fq32_mul(rhs.y, lhs.zzz);
+  fq32_t p = fq32_sub(u2, u1);
+  fq32_t r = fq32_sub(s2, s1);
+
+  if (is_zero(p)) {
+    if (is_zero(r)) {
+      self_double(lhs);
+    } else {
+      lhs = fq32_xyzz_infinity();
+    }
+    return;
+  }
+
+  fq32_t pp = fq32_sqr(p);
+  p = fq32_mul(p, pp);
+  u1 = fq32_mul(u1, pp);
+  fq32_t x3 = fq32_sub(fq32_sqr(r), p);
+  x3 = fq32_sub(x3, fq32_add(u1, u1));
+  s1 = fq32_mul(s1, p);
+  u1 = fq32_mul(r, fq32_sub(u1, x3));
+  lhs.y = fq32_sub(u1, s1);
+  lhs.x = x3;
+  lhs.zz = fq32_mul(fq32_mul(lhs.zz, rhs.zz), pp);
+  lhs.zzz = fq32_mul(fq32_mul(lhs.zzz, rhs.zzz), p);
+}
+
+BB_GPU_HD_FORCEINLINE void
+fq32_xyzz_add_assign_rhs_finite(fq32_xyzz_g1_t &lhs,
+                                const fq32_xyzz_g1_t &rhs) {
+  if (is_infinity(lhs)) {
+    lhs = rhs;
+    return;
+  }
+
   fq32_t u1 = fq32_mul(lhs.x, rhs.zz);
   fq32_t u2 = fq32_mul(rhs.x, lhs.zz);
   fq32_t s1 = fq32_mul(lhs.y, rhs.zzz);
