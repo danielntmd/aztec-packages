@@ -1,3 +1,4 @@
+template <bool ASSUME_UPPER_BUCKETS_FINITE>
 __global__ void __launch_bounds__(CHUNKED_REDUCTION_THREADS, 2)
     reduce_fq32_xyzz_bucket_bit_chunks_kernel(
         fq32_xyzz_g1_t *buckets, fq32_xyzz_g1_t *chunk_sums, const uint32_t bit,
@@ -22,9 +23,17 @@ __global__ void __launch_bounds__(CHUNKED_REDUCTION_THREADS, 2)
   fq32_xyzz_g1_t local = fq32_xyzz_infinity();
   for (uint32_t i = chunk_start + threadIdx.x; i < chunk_end; i += blockDim.x) {
     const fq32_xyzz_g1_t upper = buckets[base + half + i];
-    fq32_xyzz_add_assign(local, upper);
+    if constexpr (ASSUME_UPPER_BUCKETS_FINITE) {
+      fq32_xyzz_add_assign_rhs_finite(local, upper);
+    } else {
+      fq32_xyzz_add_assign(local, upper);
+    }
     fq32_xyzz_g1_t lower = buckets[base + i];
-    fq32_xyzz_add_assign(lower, upper);
+    if constexpr (ASSUME_UPPER_BUCKETS_FINITE) {
+      fq32_xyzz_add_assign_rhs_finite(lower, upper);
+    } else {
+      fq32_xyzz_add_assign(lower, upper);
+    }
     buckets[base + i] = lower;
   }
 

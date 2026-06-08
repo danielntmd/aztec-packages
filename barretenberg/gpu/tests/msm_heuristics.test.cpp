@@ -49,6 +49,10 @@ TEST(GpuMsmHeuristics, AutoWindowAccountsForPrecomputeFolding) {
   EXPECT_EQ(bb::gpu::bn254::get_auto_bits_per_slice(size_t{1} << 16, 16), 15U);
 }
 
+TEST(GpuMsmHeuristics, LargePrecomputedMsmUsesGeneralHeuristic) {
+  EXPECT_EQ(bb::gpu::bn254::get_auto_bits_per_slice(size_t{1} << 24, 4), 17U);
+}
+
 TEST(GpuMsmHeuristics, FusedBatchSizeValidity) {
   EXPECT_FALSE(bb::gpu::bn254::is_valid_fused_batch_size(0));
   EXPECT_TRUE(bb::gpu::bn254::is_valid_fused_batch_size(1));

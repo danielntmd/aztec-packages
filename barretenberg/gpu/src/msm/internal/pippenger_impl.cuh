@@ -40,9 +40,9 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
                     "bits");
   }
 
-  const size_t total_entries_size = static_cast<size_t>(batch_size) *
-                                    num_scalars_per_msm *
-                                    static_cast<size_t>(cfg.original_num_windows);
+  const size_t total_entries_size =
+      static_cast<size_t>(batch_size) * num_scalars_per_msm *
+      static_cast<size_t>(cfg.original_num_windows);
   check_condition(total_entries_size <= static_cast<size_t>(INT32_MAX),
                   "bb::gpu::bn254::msm: schedule exceeds CUB int range");
   const int total_entries = static_cast<int>(total_entries_size);
@@ -89,8 +89,7 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
   DeviceBuffer<std::byte> temp_storage;
   // Sort records by encoded flat-window/bucket key.
   const uint32_t sort_key_bits =
-      cfg.bucket_bits + WINDOW_KEY_BITS +
-      (batch_size > 1 ? GPU_MSM_BATCH_KEY_BITS : 0);
+      cfg.bucket_bits + ceil_log2_u32(flat_num_windows);
   run_sort_records(temp_storage, bucket_indices.data(),
                    sorted_bucket_indices.data(), point_indices.data(),
                    sorted_point_indices.data(), total_entries, sort_key_bits,
@@ -120,6 +119,10 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
   recorder.set_encoded_buckets(static_cast<uint32_t>(num_encoded_buckets),
                                static_cast<uint32_t>(num_active_buckets),
                                static_cast<uint32_t>(zero_bucket_offset));
+  // Dense-table shortcut derived from bucket coverage.
+  const bool all_nonzero_buckets_active =
+      static_cast<size_t>(num_active_buckets) ==
+      static_cast<size_t>(flat_num_windows) * (cfg.bucket_stride - 1U);
   if (num_active_buckets == 0) {
     for (uint32_t batch_id = 0; batch_id < batch_size; ++batch_id) {
       results_host[batch_id] = fq32_affine_infinity();
@@ -157,8 +160,6 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
 
   // Estimate large-bucket thresholds and route above-threshold buckets to the
   // chunked path.
-  const uint32_t init_blocks =
-      ceil_div_u32(total_dense_buckets, BUCKET_THREADS);
   const size_t batched_num_points =
       static_cast<size_t>(batch_size) * num_scalars_per_msm;
   const LargeBucketPlan plan = plan_large_bucket_strategy(
@@ -175,18 +176,18 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
   bit_sums.resize(static_cast<size_t>(flat_num_windows) * cfg.bucket_bits);
   window_sums.resize(flat_num_windows);
   const uint32_t max_reduction_chunks_per_window =
-      cfg.bucket_bits == 0
-          ? 0
-          : ceil_div_u32(uint32_t{1} << (cfg.bucket_bits - 1),
-                         CHUNKED_REDUCTION_CHUNK_SIZE);
+      cfg.bucket_bits == 0 ? 0
+                           : ceil_div_u32(uint32_t{1} << (cfg.bucket_bits - 1),
+                                          CHUNKED_REDUCTION_CHUNK_SIZE);
   if (max_reduction_chunks_per_window != 0) {
     reduction_chunk_sums.resize(static_cast<size_t>(flat_num_windows) *
                                 max_reduction_chunks_per_window);
   }
 
   // Initialize the dense per-(batch, window) bucket table.
-  run_init_buckets(dense_buckets.data(), total_dense_buckets, init_blocks,
-                   cuda_stream, recorder);
+  run_init_buckets(dense_buckets.data(), total_dense_buckets,
+                   all_nonzero_buckets_active, flat_num_windows,
+                   cfg.bucket_stride, cuda_stream, recorder);
 
   // Accumulate point runs into dense buckets.
   run_accumulate_normal_buckets(
@@ -207,7 +208,7 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
   // Reduce each flat window's dense bucket tree into per-bit sums.
   run_reduce_buckets(dense_buckets.data(), reduction_chunk_sums.data(),
                      bit_sums.data(), cfg.bucket_bits, flat_num_windows,
-                     cuda_stream, recorder);
+                     all_nonzero_buckets_active, cuda_stream, recorder);
 
   // Compose each flat window from its bit sums.
   run_compose_windows(bit_sums.data(), window_sums.data(), bits_per_slice,

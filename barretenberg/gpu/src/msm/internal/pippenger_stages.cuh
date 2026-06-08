@@ -17,9 +17,9 @@ struct SrsBinding {
 };
 
 struct LargeBucketPlan {
-  std::array<uint64_t, BUCKET_STAT_COUNT> bucket_stats;
   int large_bucket_threshold;
   uint32_t large_bucket_segment_size;
+  uint32_t max_bucket_size;
   bool use_chunked_large_buckets;
 };
 
@@ -72,8 +72,7 @@ SrsBinding select_srs(bb::gpu::GpuMsmContext &context, Recorder &recorder,
     recorder.set_precompute_config(
         cfg.precompute_factor, cfg.active_num_windows,
         static_cast<uint64_t>(context.shifted_srs_device_bytes()));
-    binding.selected_points_device =
-        context.shifted_srs_points_device().data();
+    binding.selected_points_device = context.shifted_srs_points_device().data();
     binding.split_point_start_index = 0;
     binding.split_srs_size = static_cast<uint32_t>(num_scalars_per_msm);
   }
@@ -91,6 +90,19 @@ bool add_memory_requirement(size_t &total, const size_t count,
   }
   total += bytes;
   return true;
+}
+
+uint32_t ceil_log2_u32(uint32_t value) {
+  uint32_t bits = 0;
+  if (value == 0) {
+    return bits;
+  }
+  --value;
+  while (value != 0) {
+    ++bits;
+    value >>= 1;
+  }
+  return bits;
 }
 
 size_t query_sort_pairs_temp_bytes(const int num_items, const int begin_bit,
@@ -154,8 +166,8 @@ void preflight_pippenger_transient_memory(
   const size_t total_scalars =
       static_cast<size_t>(batch_size) * num_scalars_per_msm;
   const uint32_t flat_num_windows = batch_size * cfg.active_num_windows;
-  const uint32_t sort_key_bits = cfg.bucket_bits + WINDOW_KEY_BITS +
-                                 (batch_size > 1 ? GPU_MSM_BATCH_KEY_BITS : 0);
+  const uint32_t sort_key_bits =
+      cfg.bucket_bits + ceil_log2_u32(flat_num_windows);
 
   size_t required_bytes = 0;
   const size_t max_encoded_buckets =
@@ -166,32 +178,31 @@ void preflight_pippenger_transient_memory(
           : ceil_div_u32(uint32_t{1} << (cfg.bits_per_slice - 1),
                          CHUNKED_REDUCTION_CHUNK_SIZE);
 
-  bool valid =
-      add_memory_requirement(required_bytes, total_scalars,
-                             sizeof(host_fr_montgomery_t)) &&
-      add_memory_requirement(required_bytes, total_entries_size,
-                             6 * sizeof(uint32_t)) &&
-      add_memory_requirement(required_bytes, max_encoded_buckets,
-                             sizeof(int)) &&
-      add_memory_requirement(required_bytes, max_encoded_buckets,
-                             2 * sizeof(uint32_t)) &&
-      add_memory_requirement(required_bytes, max_encoded_buckets,
-                             2 * sizeof(int)) &&
-      add_memory_requirement(required_bytes, total_dense_buckets,
-                             sizeof(fq32_xyzz_g1_t)) &&
-      add_memory_requirement(required_bytes,
-                             static_cast<size_t>(flat_num_windows) *
-                                 cfg.bits_per_slice,
-                             sizeof(fq32_xyzz_g1_t)) &&
-      add_memory_requirement(required_bytes, flat_num_windows,
-                             sizeof(fq32_xyzz_g1_t)) &&
-      add_memory_requirement(required_bytes,
-                             static_cast<size_t>(flat_num_windows) *
-                                 max_reduction_chunks_per_window,
-                             sizeof(fq32_xyzz_g1_t)) &&
-      add_memory_requirement(required_bytes, batch_size,
-                             sizeof(fq32_affine_g1_t)) &&
-      add_memory_requirement(required_bytes, 1, sizeof(int));
+  bool valid = add_memory_requirement(required_bytes, total_scalars,
+                                      sizeof(host_fr_montgomery_t)) &&
+               add_memory_requirement(required_bytes, total_entries_size,
+                                      6 * sizeof(uint32_t)) &&
+               add_memory_requirement(required_bytes, max_encoded_buckets,
+                                      sizeof(int)) &&
+               add_memory_requirement(required_bytes, max_encoded_buckets,
+                                      2 * sizeof(uint32_t)) &&
+               add_memory_requirement(required_bytes, max_encoded_buckets,
+                                      2 * sizeof(int)) &&
+               add_memory_requirement(required_bytes, total_dense_buckets,
+                                      sizeof(fq32_xyzz_g1_t)) &&
+               add_memory_requirement(required_bytes,
+                                      static_cast<size_t>(flat_num_windows) *
+                                          cfg.bits_per_slice,
+                                      sizeof(fq32_xyzz_g1_t)) &&
+               add_memory_requirement(required_bytes, flat_num_windows,
+                                      sizeof(fq32_xyzz_g1_t)) &&
+               add_memory_requirement(required_bytes,
+                                      static_cast<size_t>(flat_num_windows) *
+                                          max_reduction_chunks_per_window,
+                                      sizeof(fq32_xyzz_g1_t)) &&
+               add_memory_requirement(required_bytes, batch_size,
+                                      sizeof(fq32_affine_g1_t)) &&
+               add_memory_requirement(required_bytes, 1, sizeof(int));
   check_condition(valid,
                   "bb::gpu::bn254::msm: estimated transient allocation exceeds "
                   "size_t range");
@@ -268,11 +279,9 @@ void run_build_and_sort_bucket_jobs(
     Recorder &recorder) {
   recorder.time(msm_stage::build_bucket_jobs, [&]() {
     build_bucket_jobs_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
-                               cuda_stream>>>(bucket_sizes,
-                                              bucket_size_sort_keys,
-                                              bucket_run_indices,
-                                              zero_bucket_offset,
-                                              num_active_buckets);
+                               cuda_stream>>>(
+        bucket_sizes, bucket_size_sort_keys, bucket_run_indices,
+        zero_bucket_offset, num_active_buckets);
     check_cuda(cudaGetLastError(), "build_bucket_jobs_kernel launch");
   });
   recorder.time(msm_stage::sort_bucket_jobs, [&]() {
@@ -301,7 +310,7 @@ LargeBucketPlan plan_large_bucket_strategy(
           : LARGE_BUCKET_MIN_THRESHOLD;
   uint32_t large_bucket_segment_size =
       estimated_average_bucket_size > 0
-          ? static_cast<uint32_t>(estimated_average_bucket_size)
+          ? static_cast<uint32_t>(estimated_average_bucket_size * 16)
           : 1;
   recorder.set_large_bucket_threshold(
       static_cast<uint32_t>(large_bucket_threshold));
@@ -314,66 +323,67 @@ LargeBucketPlan plan_large_bucket_strategy(
   const bool has_large_buckets =
       max_bucket_size > static_cast<uint32_t>(large_bucket_threshold);
 
-  std::array<uint64_t, BUCKET_STAT_COUNT> bucket_stats =
-      collect_bucket_distribution(sorted_bucket_run_indices, bucket_sizes,
-                                  num_active_buckets, large_bucket_threshold,
-                                  large_bucket_segment_size, bucket_job_blocks,
-                                  cuda_stream, stream, recorder,
-                                  has_large_buckets);
-  if (has_large_buckets && bucket_stats[BUCKET_STAT_NORMAL_JOBS] != 0) {
-    const uint64_t normal_jobs = bucket_stats[BUCKET_STAT_NORMAL_JOBS];
-    const uint64_t observed_average_bucket_size =
-        (bucket_stats[BUCKET_STAT_NORMAL_POINTS] + normal_jobs - 1) /
-        normal_jobs;
-    check_condition(observed_average_bucket_size <=
-                        std::numeric_limits<uint32_t>::max(),
-                    "bb::gpu::bn254::msm: observed bucket size exceeds "
-                    "uint32 range");
-    const uint32_t observed_large_bucket_segment_size =
-        observed_average_bucket_size != 0
-            ? static_cast<uint32_t>(observed_average_bucket_size)
-            : large_bucket_segment_size;
-    if (observed_large_bucket_segment_size != large_bucket_segment_size) {
-      large_bucket_segment_size = observed_large_bucket_segment_size;
-      bucket_stats = collect_bucket_distribution(
-          sorted_bucket_run_indices, bucket_sizes, num_active_buckets,
-          large_bucket_threshold, large_bucket_segment_size, bucket_job_blocks,
-          cuda_stream, stream, recorder, has_large_buckets);
-    }
-  }
-  const bool use_chunked_large_buckets =
-      has_large_buckets && bucket_stats[BUCKET_STAT_LARGE_JOBS] != 0;
+  (void)sorted_bucket_run_indices;
+  (void)bucket_sizes;
+  (void)num_active_buckets;
+  (void)bucket_job_blocks;
+  (void)cuda_stream;
+  const bool use_chunked_large_buckets = has_large_buckets;
   if (!use_chunked_large_buckets) {
     recorder.set_large_bucket_config(MSM_LARGE_BUCKET_NONE,
                                      large_bucket_chunk_size_for_none, 0);
   }
   return LargeBucketPlan{
-      .bucket_stats = bucket_stats,
       .large_bucket_threshold = large_bucket_threshold,
       .large_bucket_segment_size = large_bucket_segment_size,
+      .max_bucket_size = max_bucket_size,
       .use_chunked_large_buckets = use_chunked_large_buckets,
   };
+}
+
+__global__ void
+init_zero_buckets_fq32_xyzz_kernel(fq32_xyzz_g1_t *dense_buckets,
+                                   const uint32_t flat_num_windows,
+                                   const uint32_t bucket_stride) {
+  const uint32_t window =
+      static_cast<uint32_t>((blockIdx.x * blockDim.x) + threadIdx.x);
+  if (window >= flat_num_windows) {
+    return;
+  }
+  dense_buckets[static_cast<size_t>(window) * bucket_stride] =
+      fq32_xyzz_infinity();
 }
 
 template <typename Recorder>
 void run_init_buckets(fq32_xyzz_g1_t *dense_buckets,
                       const size_t total_dense_buckets,
-                      const uint32_t init_blocks, cudaStream_t cuda_stream,
+                      const bool all_nonzero_buckets_active,
+                      const uint32_t flat_num_windows,
+                      const uint32_t bucket_stride, cudaStream_t cuda_stream,
                       Recorder &recorder) {
   recorder.time(msm_stage::init_buckets, [&]() {
-    init_fq32_xyzz_bucket_storage_kernel<<<init_blocks, BUCKET_THREADS, 0,
-                                           cuda_stream>>>(dense_buckets,
-                                                          total_dense_buckets);
-    check_cuda(cudaGetLastError(),
-               "init_fq32_xyzz_bucket_storage_kernel launch");
+    if (all_nonzero_buckets_active) {
+      const uint32_t zero_bucket_blocks =
+          ceil_div_u32(flat_num_windows, BUCKET_THREADS);
+      init_zero_buckets_fq32_xyzz_kernel<<<zero_bucket_blocks, BUCKET_THREADS,
+                                           0, cuda_stream>>>(
+          dense_buckets, flat_num_windows, bucket_stride);
+      check_cuda(cudaGetLastError(),
+                 "init_zero_buckets_fq32_xyzz_kernel launch");
+      return;
+    }
+    check_cuda(cudaMemsetAsync(dense_buckets, 0,
+                               total_dense_buckets * sizeof(fq32_xyzz_g1_t),
+                               cuda_stream),
+               "cudaMemsetAsync dense bucket storage");
   });
 }
 
 template <typename Recorder>
 void run_accumulate_normal_buckets(
-    const int *sorted_bucket_run_indices,
-    const uint32_t *single_bucket_indices, const int *bucket_sizes,
-    const int *bucket_offsets, const uint32_t *sorted_point_indices,
+    const int *sorted_bucket_run_indices, const uint32_t *single_bucket_indices,
+    const int *bucket_sizes, const int *bucket_offsets,
+    const uint32_t *sorted_point_indices,
     const fq32_affine_g1_t *selected_points_device,
     fq32_xyzz_g1_t *dense_buckets, const int num_active_buckets,
     const int large_bucket_threshold, const uint32_t bucket_job_blocks,
@@ -391,46 +401,83 @@ void run_accumulate_normal_buckets(
 
 template <typename Recorder>
 void run_chunked_large_buckets(
-    DeviceBuffer<std::byte> &temp_storage,
-    const int *sorted_bucket_run_indices,
+    DeviceBuffer<std::byte> &temp_storage, const int *sorted_bucket_run_indices,
     const uint32_t *single_bucket_indices, const int *bucket_sizes,
     const int *bucket_offsets, const uint32_t *sorted_point_indices,
     const fq32_affine_g1_t *selected_points_device,
     fq32_xyzz_g1_t *dense_buckets, const int num_active_buckets,
     const uint32_t bucket_job_blocks, const LargeBucketPlan &plan,
     cudaStream_t cuda_stream, void *stream, Recorder &recorder) {
-  check_condition(plan.bucket_stats[BUCKET_STAT_LARGE_CHUNKS] <=
-                      static_cast<uint64_t>(INT32_MAX),
-                  "bb::gpu::bn254::msm: large bucket chunk count exceeds CUB "
-                  "int range");
-  check_condition(plan.bucket_stats[BUCKET_STAT_LARGE_FULL_CHUNKS] <=
-                      static_cast<uint64_t>(INT32_MAX),
-                  "bb::gpu::bn254::msm: large bucket full chunk count exceeds "
-                  "CUB int range");
-  const int num_large_bucket_chunks =
-      static_cast<int>(plan.bucket_stats[BUCKET_STAT_LARGE_CHUNKS]);
-  const int num_large_bucket_full_chunks =
-      static_cast<int>(plan.bucket_stats[BUCKET_STAT_LARGE_FULL_CHUNKS]);
-  const int max_large_bucket_chunk_count =
-      static_cast<int>((plan.bucket_stats[BUCKET_STAT_MAX_SIZE] +
-                        plan.large_bucket_segment_size - 1) /
-                       plan.large_bucket_segment_size);
+  const int max_large_bucket_chunk_count = static_cast<int>(
+      (plan.max_bucket_size + plan.large_bucket_segment_size - 1) /
+      plan.large_bucket_segment_size);
 
   DeviceBuffer<int> large_bucket_chunk_counts;
   DeviceBuffer<int> large_bucket_chunk_offsets;
   DeviceBuffer<int> large_bucket_full_chunk_counts;
   DeviceBuffer<int> large_bucket_full_chunk_offsets;
-  DeviceBuffer<int> chunk_bucket_job_indices;
-  DeviceBuffer<int> exec_chunk_partial_indices;
-  DeviceBuffer<int> exec_chunk_point_offsets;
-  DeviceBuffer<int> exec_chunk_point_counts;
-  DeviceBuffer<fq32_xyzz_g1_t> chunk_partials;
   large_bucket_chunk_counts.resize(static_cast<size_t>(num_active_buckets));
   large_bucket_chunk_offsets.resize(static_cast<size_t>(num_active_buckets));
   large_bucket_full_chunk_counts.resize(
       static_cast<size_t>(num_active_buckets));
   large_bucket_full_chunk_offsets.resize(
       static_cast<size_t>(num_active_buckets));
+
+  int num_large_bucket_chunks = 0;
+  int num_large_bucket_full_chunks = 0;
+  recorder.time(msm_stage::accumulate_large_buckets, [&]() {
+    count_large_bucket_chunks_kernel<<<bucket_job_blocks, BUCKET_THREADS, 0,
+                                       cuda_stream>>>(
+        sorted_bucket_run_indices, bucket_sizes,
+        large_bucket_chunk_counts.data(), large_bucket_full_chunk_counts.data(),
+        num_active_buckets, plan.large_bucket_threshold,
+        plan.large_bucket_segment_size);
+    check_cuda(cudaGetLastError(), "count_large_bucket_chunks_kernel launch");
+    cub_exclusive_sum(temp_storage, large_bucket_chunk_counts.data(),
+                      large_bucket_chunk_offsets.data(), num_active_buckets,
+                      stream);
+    cub_exclusive_sum(temp_storage, large_bucket_full_chunk_counts.data(),
+                      large_bucket_full_chunk_offsets.data(),
+                      num_active_buckets, stream);
+
+    int last_chunk_count = 0;
+    int last_chunk_offset = 0;
+    int last_full_chunk_count = 0;
+    int last_full_chunk_offset = 0;
+    copy_device_to_host(&last_chunk_count,
+                        large_bucket_chunk_counts.data() +
+                            (num_active_buckets - 1),
+                        sizeof(int), stream);
+    copy_device_to_host(&last_chunk_offset,
+                        large_bucket_chunk_offsets.data() +
+                            (num_active_buckets - 1),
+                        sizeof(int), stream);
+    copy_device_to_host(&last_full_chunk_count,
+                        large_bucket_full_chunk_counts.data() +
+                            (num_active_buckets - 1),
+                        sizeof(int), stream);
+    copy_device_to_host(&last_full_chunk_offset,
+                        large_bucket_full_chunk_offsets.data() +
+                            (num_active_buckets - 1),
+                        sizeof(int), stream);
+    check_cuda(cudaStreamSynchronize(cuda_stream),
+               "cudaStreamSynchronize large bucket chunk totals");
+    num_large_bucket_chunks = last_chunk_offset + last_chunk_count;
+    num_large_bucket_full_chunks =
+        last_full_chunk_offset + last_full_chunk_count;
+  });
+
+  if (num_large_bucket_chunks == 0) {
+    recorder.set_large_bucket_config(MSM_LARGE_BUCKET_NONE,
+                                     plan.large_bucket_segment_size, 0);
+    return;
+  }
+
+  DeviceBuffer<int> chunk_bucket_job_indices;
+  DeviceBuffer<int> exec_chunk_partial_indices;
+  DeviceBuffer<int> exec_chunk_point_offsets;
+  DeviceBuffer<int> exec_chunk_point_counts;
+  DeviceBuffer<fq32_xyzz_g1_t> chunk_partials;
   chunk_bucket_job_indices.resize(static_cast<size_t>(num_large_bucket_chunks));
   exec_chunk_partial_indices.resize(
       static_cast<size_t>(num_large_bucket_chunks));
@@ -438,9 +485,9 @@ void run_chunked_large_buckets(
   exec_chunk_point_counts.resize(static_cast<size_t>(num_large_bucket_chunks));
   chunk_partials.resize(static_cast<size_t>(num_large_bucket_chunks));
 
-  recorder.set_large_bucket_config(MSM_LARGE_BUCKET_CHUNKED_FQ32_XYZZ,
-                                   plan.large_bucket_segment_size,
-                                   plan.bucket_stats[BUCKET_STAT_LARGE_CHUNKS]);
+  recorder.set_large_bucket_config(
+      MSM_LARGE_BUCKET_CHUNKED_FQ32_XYZZ, plan.large_bucket_segment_size,
+      static_cast<uint64_t>(num_large_bucket_chunks));
   recorder.time(msm_stage::accumulate_large_buckets, [&]() {
     accumulate_large_buckets_fq32_xyzz_chunked(
         temp_storage, sorted_bucket_run_indices, single_bucket_indices,
@@ -464,6 +511,7 @@ void run_reduce_buckets(fq32_xyzz_g1_t *dense_buckets,
                         fq32_xyzz_g1_t *reduction_chunk_sums,
                         fq32_xyzz_g1_t *bit_sums, const uint32_t bucket_bits,
                         const uint32_t flat_num_windows,
+                        const bool assume_upper_buckets_finite,
                         cudaStream_t cuda_stream, Recorder &recorder) {
   recorder.time(msm_stage::reduce_buckets, [&]() {
     for (int bit = static_cast<int>(bucket_bits) - 1; bit >= 0; --bit) {
@@ -471,18 +519,23 @@ void run_reduce_buckets(fq32_xyzz_g1_t *dense_buckets,
       const uint32_t chunks_per_window =
           ceil_div_u32(half, CHUNKED_REDUCTION_CHUNK_SIZE);
       const uint32_t chunk_blocks = flat_num_windows * chunks_per_window;
-      reduce_fq32_xyzz_bucket_bit_chunks_kernel<<<
-          chunk_blocks, CHUNKED_REDUCTION_THREADS, 0, cuda_stream>>>(
-          dense_buckets, reduction_chunk_sums,
-          static_cast<uint32_t>(bit), bucket_bits, flat_num_windows,
-          chunks_per_window);
+      if (assume_upper_buckets_finite) {
+        reduce_fq32_xyzz_bucket_bit_chunks_kernel<true>
+            <<<chunk_blocks, CHUNKED_REDUCTION_THREADS, 0, cuda_stream>>>(
+                dense_buckets, reduction_chunk_sums, static_cast<uint32_t>(bit),
+                bucket_bits, flat_num_windows, chunks_per_window);
+      } else {
+        reduce_fq32_xyzz_bucket_bit_chunks_kernel<false>
+            <<<chunk_blocks, CHUNKED_REDUCTION_THREADS, 0, cuda_stream>>>(
+                dense_buckets, reduction_chunk_sums, static_cast<uint32_t>(bit),
+                bucket_bits, flat_num_windows, chunks_per_window);
+      }
       check_cuda(cudaGetLastError(),
                  "reduce_fq32_xyzz_bucket_bit_chunks_kernel launch");
       reduce_fq32_xyzz_bucket_bit_chunk_sums_kernel<<<
           flat_num_windows, CHUNKED_REDUCTION_THREADS, 0, cuda_stream>>>(
-          reduction_chunk_sums, bit_sums,
-          static_cast<uint32_t>(bit), bucket_bits, flat_num_windows,
-          chunks_per_window);
+          reduction_chunk_sums, bit_sums, static_cast<uint32_t>(bit),
+          bucket_bits, flat_num_windows, chunks_per_window);
       check_cuda(cudaGetLastError(),
                  "reduce_fq32_xyzz_bucket_bit_chunk_sums_kernel launch");
     }
@@ -495,8 +548,7 @@ void run_compose_windows(const fq32_xyzz_g1_t *bit_sums,
                          const uint32_t bits_per_slice,
                          const uint32_t flat_num_windows,
                          cudaStream_t cuda_stream, Recorder &recorder) {
-  const uint32_t window_blocks =
-      ceil_div_u32(flat_num_windows, BUCKET_THREADS);
+  const uint32_t window_blocks = ceil_div_u32(flat_num_windows, BUCKET_THREADS);
   recorder.time(msm_stage::compose_windows, [&]() {
     compose_fq32_xyzz_window_sums_kernel<<<window_blocks, BUCKET_THREADS, 0,
                                            cuda_stream>>>(
