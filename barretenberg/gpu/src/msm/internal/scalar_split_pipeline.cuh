@@ -211,10 +211,9 @@ void copy_and_split_scalars_batched_pipeline(
   for (uint32_t batch_id = 0; batch_id < batch_size; ++batch_id) {
     const size_t dst_offset =
         static_cast<size_t>(batch_id) * num_scalars_per_msm;
-    copy_host_to_device(scalars_montgomery_device.data() + dst_offset,
-                        scalars[batch_id],
-                        sizeof(host_fr_montgomery_t) * num_scalars_per_msm,
-                        main_stream);
+    copy_host_to_device(
+        scalars_montgomery_device.data() + dst_offset, scalars[batch_id],
+        sizeof(host_fr_montgomery_t) * num_scalars_per_msm, main_stream);
   }
 
   if (record_profile) {
@@ -230,7 +229,7 @@ void copy_and_split_scalars_batched_pipeline(
   const dim3 block_dim(SPLIT_THREADS, 1, 1);
   if (precompute_factor > 1) {
     split_scalars_precomputed_batched_kernel<<<grid_dim, block_dim, 0,
-                                                main_stream>>>(
+                                               main_stream>>>(
         scalars_montgomery_device.data(), bucket_indices, point_indices,
         num_scalars_per_msm, point_start_index, srs_size, bits_per_slice,
         num_windows, folded_windows, batch_size);

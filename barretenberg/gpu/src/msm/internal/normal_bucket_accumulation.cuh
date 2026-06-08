@@ -1,11 +1,3 @@
-__global__ void init_fq32_xyzz_bucket_storage_kernel(fq32_xyzz_g1_t *buckets,
-                                                     const size_t num_buckets) {
-  const size_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (idx < num_buckets) {
-    buckets[idx] = fq32_xyzz_infinity();
-  }
-}
-
 __global__ void __launch_bounds__(BUCKET_THREADS, 2)
     accumulate_normal_buckets_fq32_xyzz_kernel(
         const int *sorted_bucket_run_indices,

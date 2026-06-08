@@ -131,32 +131,43 @@ BB_GPU_HD_FORCEINLINE uint32_t fr32_get_bit(const fr32_t &scalar,
   return (scalar.limbs[bit >> 5] >> (bit & 31U)) & 1U;
 }
 
+BB_GPU_HD_FORCEINLINE uint32_t fr32_get_bits_low(const fr32_t &scalar,
+                                                 const uint32_t lo_bit,
+                                                 const uint32_t bit_count) {
+  if (bit_count == 0) {
+    return 0;
+  }
+  const uint32_t limb = lo_bit >> 5;
+  const uint32_t shift = lo_bit & 31U;
+  uint32_t digit = scalar.limbs[limb] >> shift;
+  if (shift + bit_count > 32U && limb + 1U < 8U) {
+    digit |= scalar.limbs[limb + 1U] << (32U - shift);
+  }
+  const uint32_t mask = (uint32_t{1} << bit_count) - 1U;
+  return digit & mask;
+}
+
 BB_GPU_HD_FORCEINLINE uint32_t fr32_get_scalar_slice(
     const fr32_t &scalar, const uint32_t round, const uint32_t slice_size) {
   constexpr uint32_t NUM_BITS_IN_FIELD = 254;
   const uint32_t hi_bit = NUM_BITS_IN_FIELD - (round * slice_size);
   const uint32_t lo_bit = hi_bit < slice_size ? 0 : hi_bit - slice_size;
   const uint32_t actual_slice_size = hi_bit - lo_bit;
-  uint32_t digit = 0;
-  for (uint32_t i = 0; i < actual_slice_size; ++i) {
-    digit |= fr32_get_bit(scalar, lo_bit + i) << i;
-  }
-  return digit;
+  return fr32_get_bits_low(scalar, lo_bit, actual_slice_size);
 }
 
 BB_GPU_HD_FORCEINLINE uint32_t fr32_get_padded_scalar_slice_low(
     const fr32_t &scalar, const uint32_t low_window,
     const uint32_t slice_size) {
   constexpr uint32_t NUM_BITS_IN_FIELD = 254;
-  uint32_t digit = 0;
   const uint32_t lo_bit = low_window * slice_size;
-  for (uint32_t i = 0; i < slice_size; ++i) {
-    const uint32_t bit = lo_bit + i;
-    if (bit < NUM_BITS_IN_FIELD) {
-      digit |= fr32_get_bit(scalar, bit) << i;
-    }
+  if (lo_bit >= NUM_BITS_IN_FIELD) {
+    return 0;
   }
-  return digit;
+  const uint32_t remaining_bits = NUM_BITS_IN_FIELD - lo_bit;
+  const uint32_t actual_slice_size =
+      remaining_bits < slice_size ? remaining_bits : slice_size;
+  return fr32_get_bits_low(scalar, lo_bit, actual_slice_size);
 }
 
 } // namespace bb::gpu::bn254
