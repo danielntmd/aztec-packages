@@ -5,7 +5,7 @@ void copy_and_split_scalar_chunk(
     const size_t chunk_start, const size_t chunk_size,
     const uint32_t point_start_index, const uint32_t bits_per_slice,
     const uint32_t num_windows, const uint32_t precompute_factor,
-    const uint32_t folded_windows, const uint32_t srs_size,
+    const uint32_t folded_windows, const uint32_t layer_stride,
     const cudaStream_t stream, const bool record_profile,
     cudaEvent_t copy_done_event, cudaEvent_t copy_start_event,
     cudaEvent_t copy_stop_event, cudaEvent_t split_start_event,
@@ -36,8 +36,8 @@ void copy_and_split_scalar_chunk(
     split_scalars_precomputed_kernel<<<split_blocks, SPLIT_THREADS, 0,
                                        stream>>>(
         scalars_montgomery_device, bucket_indices, point_indices,
-        total_num_scalars, chunk_start, chunk_size, point_start_index, srs_size,
-        bits_per_slice, num_windows, folded_windows);
+        total_num_scalars, chunk_start, chunk_size, point_start_index,
+        layer_stride, bits_per_slice, num_windows, folded_windows);
   } else {
     split_scalars_kernel<<<split_blocks, SPLIT_THREADS, 0, stream>>>(
         scalars_montgomery_device, bucket_indices, point_indices,
@@ -58,7 +58,7 @@ void copy_and_split_scalars_pipeline(
     uint32_t *bucket_indices, uint32_t *point_indices, const size_t num_scalars,
     const uint32_t point_start_index, const uint32_t bits_per_slice,
     const uint32_t num_windows, const uint32_t precompute_factor,
-    const uint32_t folded_windows, const uint32_t srs_size,
+    const uint32_t folded_windows, const uint32_t layer_stride,
     const cudaStream_t main_stream, Recorder &recorder) {
   bb::gpu::ScopedNvtxRange nvtx_range(recorder.scalar_copy_split_range_name());
   const uint32_t first_chunk_percent = scalar_split_first_chunk_percent();
@@ -108,7 +108,7 @@ void copy_and_split_scalars_pipeline(
   copy_and_split_scalar_chunk(
       scalars, scalars_montgomery_device.data(), bucket_indices, point_indices,
       num_scalars, 0, first_chunk_size, point_start_index, bits_per_slice,
-      num_windows, precompute_factor, folded_windows, srs_size,
+      num_windows, precompute_factor, folded_windows, layer_stride,
       first_cuda_stream, record_profile, first_copy_done_event,
       copy_start_events[0], copy_stop_events[0], split_start_events[0],
       split_stop_events[0]);
@@ -122,9 +122,9 @@ void copy_and_split_scalars_pipeline(
         scalars, scalars_montgomery_device.data(), bucket_indices,
         point_indices, num_scalars, second_chunk_start, second_chunk_size,
         point_start_index, bits_per_slice, num_windows, precompute_factor,
-        folded_windows, srs_size, second_cuda_stream, record_profile, nullptr,
-        copy_start_events[1], copy_stop_events[1], split_start_events[1],
-        split_stop_events[1]);
+        folded_windows, layer_stride, second_cuda_stream, record_profile,
+        nullptr, copy_start_events[1], copy_stop_events[1],
+        split_start_events[1], split_stop_events[1]);
     record_event(second_split_done_event, second_cuda_stream,
                  "cudaEventRecord second scalar split done");
     wait_event(main_stream, second_split_done_event,
@@ -181,7 +181,7 @@ void copy_and_split_scalars_batched_pipeline(
     const size_t num_scalars_per_msm, const uint32_t batch_size,
     const uint32_t point_start_index, const uint32_t bits_per_slice,
     const uint32_t num_windows, const uint32_t precompute_factor,
-    const uint32_t folded_windows, const uint32_t srs_size,
+    const uint32_t folded_windows, const uint32_t layer_stride,
     const cudaStream_t main_stream, Recorder &recorder) {
   bb::gpu::ScopedNvtxRange nvtx_range(recorder.scalar_copy_split_range_name());
 
@@ -233,7 +233,7 @@ void copy_and_split_scalars_batched_pipeline(
     split_scalars_precomputed_batched_kernel<<<grid_dim, block_dim, 0,
                                                main_stream>>>(
         scalars_montgomery_device.data(), bucket_indices, point_indices,
-        num_scalars_per_msm, point_start_index, srs_size, bits_per_slice,
+        num_scalars_per_msm, point_start_index, layer_stride, bits_per_slice,
         num_windows, folded_windows, batch_size);
   } else {
     split_scalars_batched_kernel<<<grid_dim, block_dim, 0, main_stream>>>(

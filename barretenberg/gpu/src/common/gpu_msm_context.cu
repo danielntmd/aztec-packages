@@ -275,12 +275,25 @@ bool GpuMsmContext::has_shifted_srs(const size_t point_start_index,
                                     const size_t num_points,
                                     const uint32_t shift_bits,
                                     const uint32_t precompute_factor) const {
-  return shifted_srs_host_base_ == srs_host_base_ &&
-         shifted_srs_point_start_index_ == point_start_index &&
-         shifted_srs_original_size_ == num_points &&
+  const bool request_starts_in_cache =
+      point_start_index >= shifted_srs_point_start_index_;
+  const size_t request_offset =
+      request_starts_in_cache
+          ? point_start_index - shifted_srs_point_start_index_
+          : 0;
+  return shifted_srs_host_base_ == srs_host_base_ && request_starts_in_cache &&
+         request_offset <= shifted_srs_original_size_ &&
+         num_points <= shifted_srs_original_size_ - request_offset &&
          shifted_srs_shift_bits_ == shift_bits &&
          shifted_srs_precompute_factor_ == precompute_factor &&
          !shifted_srs_points_device_.empty();
+}
+
+size_t
+GpuMsmContext::shifted_srs_point_offset(const size_t point_start_index) const {
+  check_condition(point_start_index >= shifted_srs_point_start_index_,
+                  "bb::gpu: shifted SRS request starts before cached span");
+  return point_start_index - shifted_srs_point_start_index_;
 }
 
 void GpuMsmContext::release_shifted_srs() {

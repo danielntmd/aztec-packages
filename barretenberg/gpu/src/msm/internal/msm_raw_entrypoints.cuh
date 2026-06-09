@@ -63,10 +63,9 @@ void msm_raw_batch_profiled_fq32(const host_fr_montgomery_t *const *scalars,
     return;
   }
 
-  bucket_pippenger_batch_msm_profiled_fq32(scalars, num_scalars_per_msm,
-                                           batch_size, point_start_index,
-                                           bits_per_slice, results_host,
-                                           profile);
+  bucket_pippenger_batch_msm_profiled_fq32(
+      scalars, num_scalars_per_msm, batch_size, point_start_index,
+      bits_per_slice, results_host, profile);
 }
 
 void set_msm_precompute_factor(const uint32_t factor) {
@@ -79,3 +78,14 @@ void set_msm_precompute_factor(const uint32_t factor) {
 }
 
 uint32_t get_msm_precompute_factor() { return current_msm_precompute_factor(); }
+
+void set_msm_precompute_cache_min_length(const size_t length) {
+  if (msm_precompute_cache_min_length_ref() != length) {
+    bb::gpu::default_msm_context().release_shifted_srs();
+    msm_precompute_cache_min_length_ref() = length;
+  }
+}
+
+size_t get_msm_precompute_cache_min_length() {
+  return current_msm_precompute_cache_min_length();
+}

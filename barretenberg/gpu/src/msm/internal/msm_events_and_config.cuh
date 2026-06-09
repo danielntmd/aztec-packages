@@ -41,3 +41,12 @@ uint32_t &msm_precompute_factor_ref() {
 }
 
 uint32_t current_msm_precompute_factor() { return msm_precompute_factor_ref(); }
+
+size_t &msm_precompute_cache_min_length_ref() {
+  static size_t length = size_t{1} << 24;
+  return length;
+}
+
+size_t current_msm_precompute_cache_min_length() {
+  return msm_precompute_cache_min_length_ref();
+}

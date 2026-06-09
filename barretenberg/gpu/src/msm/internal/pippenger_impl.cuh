@@ -73,14 +73,14 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
         scalars[0], buffers.scalars_montgomery, buffers.bucket_indices.data(),
         buffers.point_indices.data(), num_scalars_per_msm,
         srs.split_point_start_index, bits_per_slice, cfg.original_num_windows,
-        cfg.precompute_factor, cfg.active_num_windows, srs.split_srs_size,
+        cfg.precompute_factor, cfg.active_num_windows, srs.split_srs_stride,
         cuda_stream, recorder);
   } else {
     copy_and_split_scalars_batched_pipeline(
         scalars, buffers.scalars_montgomery, buffers.bucket_indices.data(),
         buffers.point_indices.data(), num_scalars_per_msm, batch_size,
         srs.split_point_start_index, bits_per_slice, cfg.original_num_windows,
-        cfg.precompute_factor, cfg.active_num_windows, srs.split_srs_size,
+        cfg.precompute_factor, cfg.active_num_windows, srs.split_srs_stride,
         cuda_stream, recorder);
   }
 
