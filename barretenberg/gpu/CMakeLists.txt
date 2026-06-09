@@ -7,7 +7,9 @@ set(BB_GPU_HEADERS
     include/barretenberg/gpu/common/cuda_defines.cuh
     include/barretenberg/gpu/common/cuda_error.cuh
     include/barretenberg/gpu/common/cub_helpers.cuh
+    include/barretenberg/gpu/common/device_buffer_pool.hpp
     include/barretenberg/gpu/common/device_buffer.hpp
+    include/barretenberg/gpu/common/device_span.hpp
     include/barretenberg/gpu/common/gpu_msm_context.hpp
     include/barretenberg/gpu/common/nvtx.hpp
     include/barretenberg/gpu/commitment_schemes/commitment_key_msm.hpp
@@ -20,7 +22,8 @@ set(BB_GPU_HEADERS
     include/barretenberg/gpu/msm/msm.hpp
     include/barretenberg/gpu/msm/msm_heuristics.hpp
     include/barretenberg/gpu/msm/msm_profile.cuh
-    include/barretenberg/gpu/msm/msm_raw.cuh)
+    include/barretenberg/gpu/msm/msm_raw.cuh
+    include/barretenberg/gpu/msm/msm_buffers.hpp)
 
 if(TARGET barretenberg_headers)
     target_sources(barretenberg_headers INTERFACE

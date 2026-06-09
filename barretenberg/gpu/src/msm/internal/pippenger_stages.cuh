@@ -147,19 +147,18 @@ size_t query_exclusive_sum_temp_bytes(const int num_items, void *stream) {
     const size_t total_bytes, const size_t num_scalars,
     const uint32_t bits_per_slice, const uint32_t precompute_factor,
     const uint32_t active_num_windows, const size_t total_entries_size) {
-  std::fprintf(stderr,
-               "bb::gpu::bn254::msm: estimated transient allocation requires "
-               "%zu bytes for %zu scalars (c=%u, precompute factor=%u, active "
-               "windows=%u, schedule entries=%zu), but only %zu bytes are free "
-               "(%zu bytes total)\n",
-               required_bytes, num_scalars, bits_per_slice, precompute_factor,
-               active_num_windows, total_entries_size, free_bytes, total_bytes);
+  std::fprintf(
+      stderr,
+      "bb::gpu::bn254::msm: estimated temporary buffer allocation requires "
+      "%zu bytes for %zu scalars (c=%u, precompute factor=%u, active "
+      "windows=%u, schedule entries=%zu), but only %zu bytes are free "
+      "(%zu bytes total)\n",
+      required_bytes, num_scalars, bits_per_slice, precompute_factor,
+      active_num_windows, total_entries_size, free_bytes, total_bytes);
   std::abort();
 }
 
-// Unified preflight covers both single-MSM (batch_size=1) and batched.
-// flat_num_windows = batch_size * cfg.active_num_windows.
-void preflight_pippenger_transient_memory(
+MsmPippengerBufferLayout compute_pippenger_buffer_layout(
     const size_t num_scalars_per_msm, const uint32_t batch_size,
     const WindowConfig &cfg, const size_t total_entries_size,
     const int total_entries, const size_t total_dense_buckets, void *stream) {
@@ -169,7 +168,6 @@ void preflight_pippenger_transient_memory(
   const uint32_t sort_key_bits =
       cfg.bucket_bits + ceil_log2_u32(flat_num_windows);
 
-  size_t required_bytes = 0;
   const size_t max_encoded_buckets =
       std::min(total_entries_size, total_dense_buckets);
   const size_t max_reduction_chunks_per_window =
@@ -178,35 +176,6 @@ void preflight_pippenger_transient_memory(
           : ceil_div_u32(uint32_t{1} << (cfg.bits_per_slice - 1),
                          CHUNKED_REDUCTION_CHUNK_SIZE);
 
-  bool valid = add_memory_requirement(required_bytes, total_scalars,
-                                      sizeof(host_fr_montgomery_t)) &&
-               add_memory_requirement(required_bytes, total_entries_size,
-                                      6 * sizeof(uint32_t)) &&
-               add_memory_requirement(required_bytes, max_encoded_buckets,
-                                      sizeof(int)) &&
-               add_memory_requirement(required_bytes, max_encoded_buckets,
-                                      2 * sizeof(uint32_t)) &&
-               add_memory_requirement(required_bytes, max_encoded_buckets,
-                                      2 * sizeof(int)) &&
-               add_memory_requirement(required_bytes, total_dense_buckets,
-                                      sizeof(fq32_xyzz_g1_t)) &&
-               add_memory_requirement(required_bytes,
-                                      static_cast<size_t>(flat_num_windows) *
-                                          cfg.bits_per_slice,
-                                      sizeof(fq32_xyzz_g1_t)) &&
-               add_memory_requirement(required_bytes, flat_num_windows,
-                                      sizeof(fq32_xyzz_g1_t)) &&
-               add_memory_requirement(required_bytes,
-                                      static_cast<size_t>(flat_num_windows) *
-                                          max_reduction_chunks_per_window,
-                                      sizeof(fq32_xyzz_g1_t)) &&
-               add_memory_requirement(required_bytes, batch_size,
-                                      sizeof(fq32_affine_g1_t)) &&
-               add_memory_requirement(required_bytes, 1, sizeof(int));
-  check_condition(valid,
-                  "bb::gpu::bn254::msm: estimated transient allocation exceeds "
-                  "size_t range");
-
   const size_t cub_temp_bytes = std::max(
       {query_sort_pairs_temp_bytes(total_entries, 0, sort_key_bits, stream),
        query_run_length_encode_temp_bytes(total_entries, stream),
@@ -214,17 +183,94 @@ void preflight_pippenger_transient_memory(
                                    stream),
        query_exclusive_sum_temp_bytes(static_cast<int>(max_encoded_buckets),
                                       stream)});
-  check_condition(cub_temp_bytes <=
-                      std::numeric_limits<size_t>::max() - required_bytes,
-                  "bb::gpu::bn254::msm: estimated CUB temp allocation exceeds "
-                  "size_t range");
-  required_bytes += cub_temp_bytes;
 
+  MsmPippengerBufferLayout layout{
+      .total_scalars = total_scalars,
+      .total_entries = total_entries_size,
+      .max_encoded_buckets = max_encoded_buckets,
+      .num_active_buckets = max_encoded_buckets,
+      .total_dense_buckets = total_dense_buckets,
+      .bit_sums = static_cast<size_t>(flat_num_windows) * cfg.bits_per_slice,
+      .flat_num_windows = flat_num_windows,
+      .reduction_chunk_sums = static_cast<size_t>(flat_num_windows) *
+                              max_reduction_chunks_per_window,
+      .batch_size = batch_size,
+      .cub_temp_bytes = cub_temp_bytes,
+      .bucket_stat_count = BUCKET_STAT_COUNT,
+      .total_bytes = 0,
+  };
+  size_t required_bytes = 0;
+  const bool valid =
+      DeviceBufferPool::add_aligned<host_fr_montgomery_t>(
+          required_bytes, layout.total_scalars) &&
+      DeviceBufferPool::add_aligned<uint32_t>(required_bytes,
+                                              layout.total_entries) &&
+      DeviceBufferPool::add_aligned<uint32_t>(required_bytes,
+                                              layout.total_entries) &&
+      DeviceBufferPool::add_aligned<uint32_t>(required_bytes,
+                                              layout.total_entries) &&
+      DeviceBufferPool::add_aligned<uint32_t>(required_bytes,
+                                              layout.total_entries) &&
+      DeviceBufferPool::add_aligned<uint32_t>(required_bytes,
+                                              layout.total_entries) &&
+      DeviceBufferPool::add_aligned<int>(required_bytes,
+                                         layout.total_entries) &&
+      DeviceBufferPool::add_aligned<int>(required_bytes, 1) &&
+      DeviceBufferPool::add_aligned<int>(required_bytes,
+                                         layout.max_encoded_buckets) &&
+      DeviceBufferPool::add_aligned<uint32_t>(required_bytes,
+                                              layout.num_active_buckets) &&
+      DeviceBufferPool::add_aligned<uint32_t>(required_bytes,
+                                              layout.num_active_buckets) &&
+      DeviceBufferPool::add_aligned<int>(required_bytes,
+                                         layout.num_active_buckets) &&
+      DeviceBufferPool::add_aligned<int>(required_bytes,
+                                         layout.num_active_buckets) &&
+      DeviceBufferPool::add_aligned<fq32_affine_g1_t>(required_bytes,
+                                                      layout.batch_size) &&
+      DeviceBufferPool::add_aligned<fq32_xyzz_g1_t>(
+          required_bytes, layout.total_dense_buckets) &&
+      DeviceBufferPool::add_aligned<fq32_xyzz_g1_t>(required_bytes,
+                                                    layout.bit_sums) &&
+      DeviceBufferPool::add_aligned<fq32_xyzz_g1_t>(required_bytes,
+                                                    layout.flat_num_windows) &&
+      DeviceBufferPool::add_aligned<fq32_xyzz_g1_t>(
+          required_bytes, layout.reduction_chunk_sums) &&
+      DeviceBufferPool::add_aligned<std::byte>(required_bytes,
+                                               layout.cub_temp_bytes) &&
+      DeviceBufferPool::add_aligned<int>(required_bytes,
+                                         layout.max_encoded_buckets) &&
+      DeviceBufferPool::add_aligned<int>(required_bytes,
+                                         layout.max_encoded_buckets) &&
+      DeviceBufferPool::add_aligned<int>(required_bytes,
+                                         layout.max_encoded_buckets) &&
+      DeviceBufferPool::add_aligned<int>(required_bytes,
+                                         layout.max_encoded_buckets) &&
+      DeviceBufferPool::add_aligned<uint64_t>(required_bytes,
+                                              layout.bucket_stat_count);
+  check_condition(
+      valid,
+      "bb::gpu::bn254::msm: estimated temporary buffer allocation exceeds "
+      "size_t range");
+  layout.total_bytes = required_bytes;
+  return layout;
+}
+
+void ensure_pippenger_buffer_capacity(bb::gpu::GpuMsmContext &context,
+                                      const MsmPippengerBufferLayout &layout,
+                                      const size_t total_scalars,
+                                      const WindowConfig &cfg,
+                                      const size_t total_entries_size) {
+  const size_t current_capacity = context.msm_buffers().pippenger_capacity();
+  if (layout.total_bytes <= current_capacity) {
+    return;
+  }
   size_t free_bytes = 0;
   size_t total_bytes = 0;
   check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo");
-  if (required_bytes > free_bytes) {
-    fail_msm_memory_preflight(required_bytes, free_bytes, total_bytes,
+  const size_t available_bytes = free_bytes + current_capacity;
+  if (layout.total_bytes > available_bytes) {
+    fail_msm_memory_preflight(layout.total_bytes, available_bytes, total_bytes,
                               total_scalars, cfg.bits_per_slice,
                               cfg.precompute_factor, cfg.active_num_windows,
                               total_entries_size);
@@ -232,7 +278,7 @@ void preflight_pippenger_transient_memory(
 }
 
 template <typename Recorder>
-void run_sort_records(DeviceBuffer<std::byte> &temp_storage,
+void run_sort_records(DeviceSpan<std::byte> temp_storage,
                       uint32_t *bucket_indices, uint32_t *sorted_bucket_indices,
                       uint32_t *point_indices, uint32_t *sorted_point_indices,
                       const int total_entries, const uint32_t sort_key_bits,
@@ -245,7 +291,7 @@ void run_sort_records(DeviceBuffer<std::byte> &temp_storage,
 }
 
 template <typename Recorder>
-void run_encode_buckets(DeviceBuffer<std::byte> &temp_storage,
+void run_encode_buckets(DeviceSpan<std::byte> temp_storage,
                         const uint32_t *sorted_bucket_indices,
                         uint32_t *single_bucket_indices, int *bucket_sizes,
                         int *num_encoded_buckets_device,
@@ -259,7 +305,7 @@ void run_encode_buckets(DeviceBuffer<std::byte> &temp_storage,
 }
 
 template <typename Recorder>
-void run_scan_bucket_offsets(DeviceBuffer<std::byte> &temp_storage,
+void run_scan_bucket_offsets(DeviceSpan<std::byte> temp_storage,
                              const int *bucket_sizes, int *bucket_offsets,
                              const int num_encoded_buckets, void *stream,
                              Recorder &recorder) {
@@ -271,7 +317,7 @@ void run_scan_bucket_offsets(DeviceBuffer<std::byte> &temp_storage,
 
 template <typename Recorder>
 void run_build_and_sort_bucket_jobs(
-    DeviceBuffer<std::byte> &temp_storage, const int *bucket_sizes,
+    DeviceSpan<std::byte> temp_storage, const int *bucket_sizes,
     uint32_t *bucket_size_sort_keys, uint32_t *sorted_bucket_size_sort_keys,
     int *bucket_run_indices, int *sorted_bucket_run_indices,
     const int zero_bucket_offset, const int num_active_buckets,
@@ -401,7 +447,8 @@ void run_accumulate_normal_buckets(
 
 template <typename Recorder>
 void run_chunked_large_buckets(
-    DeviceBuffer<std::byte> &temp_storage, const int *sorted_bucket_run_indices,
+    bb::gpu::GpuMsmContext &context, MsmPippengerBuffers &pippenger_buffers,
+    DeviceSpan<std::byte> temp_storage, const int *sorted_bucket_run_indices,
     const uint32_t *single_bucket_indices, const int *bucket_sizes,
     const int *bucket_offsets, const uint32_t *sorted_point_indices,
     const fq32_affine_g1_t *selected_points_device,
@@ -412,16 +459,14 @@ void run_chunked_large_buckets(
       (plan.max_bucket_size + plan.large_bucket_segment_size - 1) /
       plan.large_bucket_segment_size);
 
-  DeviceBuffer<int> large_bucket_chunk_counts;
-  DeviceBuffer<int> large_bucket_chunk_offsets;
-  DeviceBuffer<int> large_bucket_full_chunk_counts;
-  DeviceBuffer<int> large_bucket_full_chunk_offsets;
-  large_bucket_chunk_counts.resize(static_cast<size_t>(num_active_buckets));
-  large_bucket_chunk_offsets.resize(static_cast<size_t>(num_active_buckets));
-  large_bucket_full_chunk_counts.resize(
-      static_cast<size_t>(num_active_buckets));
-  large_bucket_full_chunk_offsets.resize(
-      static_cast<size_t>(num_active_buckets));
+  DeviceSpan<int> large_bucket_chunk_counts =
+      pippenger_buffers.large_bucket_chunk_counts;
+  DeviceSpan<int> large_bucket_chunk_offsets =
+      pippenger_buffers.large_bucket_chunk_offsets;
+  DeviceSpan<int> large_bucket_full_chunk_counts =
+      pippenger_buffers.large_bucket_full_chunk_counts;
+  DeviceSpan<int> large_bucket_full_chunk_offsets =
+      pippenger_buffers.large_bucket_full_chunk_offsets;
 
   int num_large_bucket_chunks = 0;
   int num_large_bucket_full_chunks = 0;
@@ -473,17 +518,40 @@ void run_chunked_large_buckets(
     return;
   }
 
-  DeviceBuffer<int> chunk_bucket_job_indices;
-  DeviceBuffer<int> exec_chunk_partial_indices;
-  DeviceBuffer<int> exec_chunk_point_offsets;
-  DeviceBuffer<int> exec_chunk_point_counts;
-  DeviceBuffer<fq32_xyzz_g1_t> chunk_partials;
-  chunk_bucket_job_indices.resize(static_cast<size_t>(num_large_bucket_chunks));
-  exec_chunk_partial_indices.resize(
-      static_cast<size_t>(num_large_bucket_chunks));
-  exec_chunk_point_offsets.resize(static_cast<size_t>(num_large_bucket_chunks));
-  exec_chunk_point_counts.resize(static_cast<size_t>(num_large_bucket_chunks));
-  chunk_partials.resize(static_cast<size_t>(num_large_bucket_chunks));
+  MsmLargeBucketBufferLayout large_bucket_layout{
+      .num_active_buckets = static_cast<size_t>(num_active_buckets),
+      .num_large_bucket_chunks = static_cast<size_t>(num_large_bucket_chunks),
+      .total_bytes = 0,
+  };
+  size_t large_required_bytes = 0;
+  const bool valid_large_bucket_layout =
+      DeviceBufferPool::add_aligned<int>(
+          large_required_bytes, large_bucket_layout.num_large_bucket_chunks) &&
+      DeviceBufferPool::add_aligned<int>(
+          large_required_bytes, large_bucket_layout.num_large_bucket_chunks) &&
+      DeviceBufferPool::add_aligned<int>(
+          large_required_bytes, large_bucket_layout.num_large_bucket_chunks) &&
+      DeviceBufferPool::add_aligned<int>(
+          large_required_bytes, large_bucket_layout.num_large_bucket_chunks) &&
+      DeviceBufferPool::add_aligned<fq32_xyzz_g1_t>(
+          large_required_bytes, large_bucket_layout.num_large_bucket_chunks);
+  check_condition(valid_large_bucket_layout,
+                  "bb::gpu::bn254::msm: large-bucket buffer pool exceeds "
+                  "size_t range");
+  large_bucket_layout.total_bytes = large_required_bytes;
+  const size_t large_current_capacity =
+      context.msm_buffers().large_bucket_capacity();
+  if (large_bucket_layout.total_bytes > large_current_capacity) {
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo");
+    const size_t available_bytes = free_bytes + large_current_capacity;
+    check_condition(large_bucket_layout.total_bytes <= available_bytes,
+                    "bb::gpu::bn254::msm: large-bucket buffer pool exceeds "
+                    "available device memory");
+  }
+  MsmLargeBucketBuffers large_buffers =
+      context.msm_buffers().prepare_large_bucket(large_bucket_layout, stream);
 
   recorder.set_large_bucket_config(
       MSM_LARGE_BUCKET_CHUNKED_FQ32_XYZZ, plan.large_bucket_segment_size,
@@ -498,8 +566,10 @@ void run_chunked_large_buckets(
         num_large_bucket_full_chunks, max_large_bucket_chunk_count,
         large_bucket_chunk_counts, large_bucket_chunk_offsets,
         large_bucket_full_chunk_counts, large_bucket_full_chunk_offsets,
-        chunk_bucket_job_indices, exec_chunk_partial_indices,
-        exec_chunk_point_offsets, exec_chunk_point_counts, chunk_partials,
+        large_buffers.chunk_bucket_job_indices,
+        large_buffers.exec_chunk_partial_indices,
+        large_buffers.exec_chunk_point_offsets,
+        large_buffers.exec_chunk_point_counts, large_buffers.chunk_partials,
         cuda_stream, stream, recorder);
     check_cuda(cudaGetLastError(),
                "accumulate_large_buckets_fq32_xyzz_chunked launch");

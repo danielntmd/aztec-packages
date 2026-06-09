@@ -294,6 +294,11 @@ void GpuMsmContext::release_shifted_srs() {
   shifted_srs_precompute_factor_ = 1;
 }
 
+void GpuMsmContext::release_msm_buffers() {
+  sync();
+  msm_buffers_.release();
+}
+
 size_t
 GpuMsmContext::get_srs_offset(const bn254::host_affine_g1_montgomery_t *points,
                               const size_t num_points) const {
@@ -320,15 +325,11 @@ GpuMsmContext::get_srs_offset(const bn254::host_affine_g1_montgomery_t *points,
   return offset;
 }
 
-void GpuMsmContext::reserve_temp(const size_t bytes) {
-  temp_storage_.resize(bytes);
-}
-
 void GpuMsmContext::reset() {
   sync();
   srs_points_device_.reset();
   shifted_srs_points_device_.reset();
-  temp_storage_.reset();
+  msm_buffers_.release();
   srs_host_base_ = nullptr;
   srs_size_ = 0;
   shifted_srs_host_base_ = nullptr;

@@ -54,7 +54,7 @@ void copy_and_split_scalar_chunk(
 template <typename Recorder>
 void copy_and_split_scalars_pipeline(
     const host_fr_montgomery_t *scalars,
-    DeviceBuffer<host_fr_montgomery_t> &scalars_montgomery_device,
+    DeviceSpan<host_fr_montgomery_t> scalars_montgomery_device,
     uint32_t *bucket_indices, uint32_t *point_indices, const size_t num_scalars,
     const uint32_t point_start_index, const uint32_t bits_per_slice,
     const uint32_t num_windows, const uint32_t precompute_factor,
@@ -67,7 +67,8 @@ void copy_and_split_scalars_pipeline(
   const size_t second_chunk_start = first_chunk_size;
   const size_t second_chunk_size = num_scalars - first_chunk_size;
 
-  scalars_montgomery_device.resize(num_scalars);
+  check_condition(scalars_montgomery_device.size() >= num_scalars,
+                  "bb::gpu::bn254::msm: scalar buffer is too small");
 
   bb::gpu::CudaStream first_stream;
   bb::gpu::CudaStream second_stream;
@@ -175,7 +176,7 @@ void copy_and_split_scalars_pipeline(
 template <typename Recorder>
 void copy_and_split_scalars_batched_pipeline(
     const host_fr_montgomery_t *const *scalars,
-    DeviceBuffer<host_fr_montgomery_t> &scalars_montgomery_device,
+    DeviceSpan<host_fr_montgomery_t> scalars_montgomery_device,
     uint32_t *bucket_indices, uint32_t *point_indices,
     const size_t num_scalars_per_msm, const uint32_t batch_size,
     const uint32_t point_start_index, const uint32_t bits_per_slice,
@@ -186,7 +187,8 @@ void copy_and_split_scalars_batched_pipeline(
 
   const size_t total_scalars =
       static_cast<size_t>(batch_size) * num_scalars_per_msm;
-  scalars_montgomery_device.resize(total_scalars);
+  check_condition(scalars_montgomery_device.size() >= total_scalars,
+                  "bb::gpu::bn254::msm: scalar buffer is too small");
 
   const bool record_profile = recorder.enabled();
   cudaEvent_t pipeline_start_event = nullptr;
