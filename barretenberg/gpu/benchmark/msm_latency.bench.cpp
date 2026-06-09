@@ -144,7 +144,8 @@ void add_profile(bb::gpu::bn254::msm_profile &totals,
 }
 
 void add_profile_counters(benchmark::State &state,
-                          const bb::gpu::bn254::msm_profile &totals) {
+                          const bb::gpu::bn254::msm_profile &totals,
+                          const bb::gpu::bn254::msm_profile &warmup_profile) {
   const double iterations = static_cast<double>(state.iterations());
   const double h2d_scalars_ms = totals.h2d_scalars_ms / iterations;
   const double split_ms = totals.split_scalars_ms / iterations;
@@ -158,7 +159,8 @@ void add_profile_counters(benchmark::State &state,
   state.counters["gpu_total_ms"] = totals.total_profiled_ms / iterations;
   state.counters["h2d_points_ms"] = totals.h2d_points_ms / iterations;
   state.counters["scalar_ingest_ms"] = scalar_ingest_ms;
-  state.counters["precompute_ms"] = totals.precompute_bases_ms / iterations;
+  state.counters["cold_precompute_ms"] = warmup_profile.precompute_bases_ms;
+  state.counters["hot_precompute_ms"] = totals.precompute_bases_ms / iterations;
   state.counters["sort_records_ms"] = totals.sort_records_ms / iterations;
   state.counters["encode_buckets_ms"] = totals.encode_buckets_ms / iterations;
   state.counters["bucket_jobs_ms"] =
@@ -215,7 +217,7 @@ void bench_gpu_msm_profiled(benchmark::State &state) {
     add_profile(totals, profile);
   }
 
-  add_profile_counters(state, totals);
+  add_profile_counters(state, totals, warmup_profile);
   if (state.range(0) <= MAX_CPU_CORRECTNESS_LOG_NUM_POINTS) {
     assert_correctness(*input, bits_per_slice,
                        static_cast<int>(state.range(0)));
@@ -349,7 +351,7 @@ void bench_gpu_batch_msm_profiled(benchmark::State &state) {
     add_profile(totals, profile);
   }
 
-  add_profile_counters(state, totals);
+  add_profile_counters(state, totals, warmup_profile);
   state.counters["batch_size"] = benchmark::Counter(batch_size);
   state.counters["per_commitment_ms"] =
       totals.total_profiled_ms /

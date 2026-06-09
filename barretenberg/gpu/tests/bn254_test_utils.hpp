@@ -39,6 +39,26 @@ public:
   ~ScopedMsmPrecomputeFactor() { bb::gpu::bn254::set_msm_precompute_factor(4); }
 };
 
+class ScopedMsmPrecomputeCacheMinLength {
+public:
+  explicit ScopedMsmPrecomputeCacheMinLength(const size_t length)
+      : previous_(bb::gpu::bn254::get_msm_precompute_cache_min_length()) {
+    bb::gpu::bn254::set_msm_precompute_cache_min_length(length);
+  }
+
+  ScopedMsmPrecomputeCacheMinLength(const ScopedMsmPrecomputeCacheMinLength &) =
+      delete;
+  ScopedMsmPrecomputeCacheMinLength &
+  operator=(const ScopedMsmPrecomputeCacheMinLength &) = delete;
+
+  ~ScopedMsmPrecomputeCacheMinLength() {
+    bb::gpu::bn254::set_msm_precompute_cache_min_length(previous_);
+  }
+
+private:
+  size_t previous_;
+};
+
 inline fq32_t to_fq32_standard(const fq &value) {
   const fq standard = value.from_montgomery_form_reduced();
   fq32_t out{};

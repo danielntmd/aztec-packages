@@ -13,7 +13,7 @@ struct WindowConfig {
 struct SrsBinding {
   const fq32_affine_g1_t *selected_points_device;
   uint32_t split_point_start_index;
-  uint32_t split_srs_size;
+  uint32_t split_srs_stride;
 };
 
 struct LargeBucketPlan {
@@ -58,14 +58,32 @@ SrsBinding select_srs(bb::gpu::GpuMsmContext &context, Recorder &recorder,
   SrsBinding binding{
       .selected_points_device = context.srs_points_device().data(),
       .split_point_start_index = static_cast<uint32_t>(point_start_index),
-      .split_srs_size = static_cast<uint32_t>(srs_size),
+      .split_srs_stride = static_cast<uint32_t>(srs_size),
   };
   if (cfg.precompute_factor > 1) {
+    const size_t requested_end = point_start_index + num_scalars_per_msm;
+    const size_t min_cache_length = current_msm_precompute_cache_min_length();
+    size_t cache_start_index = point_start_index;
+    size_t cache_num_points = num_scalars_per_msm;
+    if (srs_size >= min_cache_length && requested_end <= min_cache_length) {
+      cache_start_index = 0;
+      cache_num_points = min_cache_length;
+    } else {
+      const size_t remaining_points = srs_size - cache_start_index;
+      cache_num_points = std::min(
+          std::max(num_scalars_per_msm, min_cache_length), remaining_points);
+    }
+    check_condition(
+        cache_num_points <=
+            static_cast<size_t>(std::numeric_limits<uint32_t>::max()) /
+                cfg.precompute_factor,
+        "bb::gpu::bn254::msm: precomputed point indices exceed 32 "
+        "bits");
     if (!context.has_shifted_srs(point_start_index, num_scalars_per_msm,
                                  cfg.shift_bits, cfg.precompute_factor)) {
       recorder.time(msm_stage::precompute_bases, [&]() {
-        context.ensure_shifted_srs_uploaded(point_start_index,
-                                            num_scalars_per_msm, cfg.shift_bits,
+        context.ensure_shifted_srs_uploaded(cache_start_index, cache_num_points,
+                                            cfg.shift_bits,
                                             cfg.precompute_factor);
       });
     }
@@ -73,8 +91,10 @@ SrsBinding select_srs(bb::gpu::GpuMsmContext &context, Recorder &recorder,
         cfg.precompute_factor, cfg.active_num_windows,
         static_cast<uint64_t>(context.shifted_srs_device_bytes()));
     binding.selected_points_device = context.shifted_srs_points_device().data();
-    binding.split_point_start_index = 0;
-    binding.split_srs_size = static_cast<uint32_t>(num_scalars_per_msm);
+    binding.split_point_start_index = static_cast<uint32_t>(
+        context.shifted_srs_point_offset(point_start_index));
+    binding.split_srs_stride =
+        static_cast<uint32_t>(context.shifted_srs_layer_stride());
   }
   return binding;
 }

@@ -24,6 +24,8 @@ void msm_raw_batch_fq32(const host_fr_montgomery_t *const *scalars,
 
 void set_msm_precompute_factor(uint32_t factor);
 uint32_t get_msm_precompute_factor();
+void set_msm_precompute_cache_min_length(size_t length);
+size_t get_msm_precompute_cache_min_length();
 
 } // namespace bb::gpu::bn254
 
