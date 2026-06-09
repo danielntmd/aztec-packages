@@ -5,16 +5,16 @@ std::array<uint64_t, BUCKET_STAT_COUNT> collect_bucket_distribution(
     const int *sorted_bucket_run_indices, const int *bucket_sizes,
     const int num_active_buckets, const int large_bucket_threshold,
     const uint32_t large_bucket_chunk_size, const uint32_t bucket_job_blocks,
-    const cudaStream_t cuda_stream, void *stream, Recorder &recorder,
-    const bool force_collect = false) {
+    DeviceSpan<uint64_t> stats_device, const cudaStream_t cuda_stream,
+    void *stream, Recorder &recorder, const bool force_collect = false) {
   std::array<uint64_t, BUCKET_STAT_COUNT> stats{};
   if (!recorder.enabled() && !force_collect) {
     return stats;
   }
 
   recorder.time(msm_stage::bucket_distribution, [&]() {
-    DeviceBuffer<uint64_t> stats_device;
-    stats_device.resize(BUCKET_STAT_COUNT);
+    check_condition(stats_device.size() >= BUCKET_STAT_COUNT,
+                    "bb::gpu::bn254::msm: bucket stats buffer is too small");
     check_cuda(cudaMemsetAsync(stats_device.data(), 0,
                                sizeof(uint64_t) * BUCKET_STAT_COUNT,
                                cuda_stream),

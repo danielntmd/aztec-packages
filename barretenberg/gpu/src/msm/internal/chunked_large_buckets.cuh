@@ -1,22 +1,22 @@
 template <typename Recorder>
 void accumulate_large_buckets_fq32_xyzz_chunked(
-    DeviceBuffer<std::byte> &temp_storage, const int *sorted_bucket_run_indices,
+    DeviceSpan<std::byte> temp_storage, const int *sorted_bucket_run_indices,
     const uint32_t *unique_bucket_indices, const int *bucket_sizes,
     const int *bucket_offsets, const uint32_t *sorted_point_indices,
     const fq32_affine_g1_t *points, fq32_xyzz_g1_t *dense_buckets,
     const int num_active_buckets, const int large_bucket_threshold,
     const uint32_t bucket_job_blocks, const uint32_t chunk_size,
     const int num_chunks, const int num_full_chunks, const int max_chunk_count,
-    DeviceBuffer<int> &large_bucket_chunk_counts,
-    DeviceBuffer<int> &large_bucket_chunk_offsets,
-    DeviceBuffer<int> &large_bucket_full_chunk_counts,
-    DeviceBuffer<int> &large_bucket_full_chunk_offsets,
-    DeviceBuffer<int> &chunk_bucket_job_indices,
-    DeviceBuffer<int> &exec_chunk_partial_indices,
-    DeviceBuffer<int> &exec_chunk_point_offsets,
-    DeviceBuffer<int> &exec_chunk_point_counts,
-    DeviceBuffer<fq32_xyzz_g1_t> &chunk_partials,
-    const cudaStream_t cuda_stream, void *stream, Recorder &recorder) {
+    DeviceSpan<int> large_bucket_chunk_counts,
+    DeviceSpan<int> large_bucket_chunk_offsets,
+    DeviceSpan<int> large_bucket_full_chunk_counts,
+    DeviceSpan<int> large_bucket_full_chunk_offsets,
+    DeviceSpan<int> chunk_bucket_job_indices,
+    DeviceSpan<int> exec_chunk_partial_indices,
+    DeviceSpan<int> exec_chunk_point_offsets,
+    DeviceSpan<int> exec_chunk_point_counts,
+    DeviceSpan<fq32_xyzz_g1_t> chunk_partials, const cudaStream_t cuda_stream,
+    void *stream, Recorder &recorder) {
   if (num_chunks == 0) {
     recorder.set_large_bucket_config(MSM_LARGE_BUCKET_NONE, chunk_size, 0);
     return;

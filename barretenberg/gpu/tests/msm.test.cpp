@@ -243,6 +243,86 @@ TEST(GpuBn254, MsmDefaultPrecomputeFactorCachesShiftedSrs) {
   EXPECT_EQ(second_profile.precompute_bases_ms, 0.0F);
 }
 
+TEST(GpuBn254, MsmBuffersReuseKeepHighWaterAndGrow) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> small_points;
+  std::vector<fr> small_scalars;
+  for (size_t i = 0; i < 16; ++i) {
+    small_points.emplace_back(
+        curve::BN254::AffineElement::random_element(&engine));
+    small_scalars.emplace_back(i % 3 == 0 ? fr::zero()
+                                          : fr::random_element(&engine));
+  }
+  gpu_testing::upload_test_srs(small_points);
+  default_msm_context().release_msm_buffers();
+
+  auto small_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(small_scalars.data(), small_scalars.size())};
+  const auto small_expected = gpu_testing::reference_msm_with_explicit_window(
+      small_points, small_span, 8U);
+  EXPECT_EQ(bb::gpu::bn254::msm(small_span, small_points, 8U), small_expected);
+  const size_t small_capacity =
+      default_msm_context().msm_buffers().pippenger_capacity();
+  EXPECT_GT(small_capacity, 0U);
+
+  EXPECT_EQ(bb::gpu::bn254::msm(small_span, small_points, 8U), small_expected);
+  EXPECT_EQ(default_msm_context().msm_buffers().pippenger_capacity(),
+            small_capacity);
+
+  auto smaller_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(small_scalars.data(), small_scalars.size() / 2)};
+  const auto smaller_expected = gpu_testing::reference_msm_with_explicit_window(
+      small_points, smaller_span, 8U);
+  EXPECT_EQ(bb::gpu::bn254::msm(smaller_span, small_points, 8U),
+            smaller_expected);
+  EXPECT_EQ(default_msm_context().msm_buffers().pippenger_capacity(),
+            small_capacity);
+
+  std::vector<curve::BN254::AffineElement> large_points;
+  std::vector<fr> large_scalars;
+  for (size_t i = 0; i < 1024; ++i) {
+    large_points.emplace_back(
+        curve::BN254::AffineElement::random_element(&engine));
+    large_scalars.emplace_back(i % 11 == 0 ? fr::zero()
+                                           : fr::random_element(&engine));
+  }
+  bb::gpu::bn254::init(large_points);
+  auto large_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(large_scalars.data(), large_scalars.size())};
+  const auto large_expected = gpu_testing::reference_msm_with_explicit_window(
+      large_points, large_span, 8U);
+  EXPECT_EQ(bb::gpu::bn254::msm(large_span, large_points, 8U), large_expected);
+  EXPECT_GT(default_msm_context().msm_buffers().pippenger_capacity(),
+            small_capacity);
+}
+
+TEST(GpuBn254, MsmReleaseBuffersPreservesUploadedSrs) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 32; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+    scalars.emplace_back(i % 5 == 0 ? fr::zero() : fr::random_element(&engine));
+  }
+  gpu_testing::upload_test_srs(points);
+
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+  const auto expected =
+      gpu_testing::reference_msm_with_explicit_window(points, scalar_span, 8U);
+  EXPECT_EQ(bb::gpu::bn254::msm(scalar_span, points, 8U), expected);
+  EXPECT_GT(default_msm_context().msm_buffers().pippenger_capacity(), 0U);
+
+  default_msm_context().release_msm_buffers();
+  EXPECT_EQ(default_msm_context().msm_buffers().pippenger_capacity(), 0U);
+  EXPECT_EQ(bb::gpu::bn254::msm(scalar_span, points, 8U), expected);
+  EXPECT_GT(default_msm_context().msm_buffers().pippenger_capacity(), 0U);
+}
+
 TEST(GpuBn254, MsmPrecomputeFactorCapsAtWindowCount) {
   BB_REQUIRE_CUDA_DEVICE();
 
