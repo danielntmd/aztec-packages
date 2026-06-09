@@ -243,6 +243,116 @@ TEST(GpuBn254, MsmDefaultPrecomputeFactorCachesShiftedSrs) {
   EXPECT_EQ(second_profile.precompute_bases_ms, 0.0F);
 }
 
+TEST(GpuBn254, MsmPrecomputeCacheMinLengthInvalidatesCache) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  EXPECT_EQ(bb::gpu::bn254::get_msm_precompute_cache_min_length(),
+            size_t{1} << 24);
+  const gpu_testing::ScopedMsmPrecomputeCacheMinLength scoped_cache_length(64);
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  std::vector<fr> scalars;
+  for (size_t i = 0; i < 96; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+  }
+  for (size_t i = 0; i < 32; ++i) {
+    scalars.emplace_back(i % 7 == 0 ? fr::zero() : fr::random_element(&engine));
+  }
+  gpu_testing::upload_test_srs(points);
+
+  constexpr uint32_t BITS_PER_SLICE = 8;
+  auto scalar_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(scalars.data(), scalars.size())};
+  const auto expected = gpu_testing::reference_msm_with_explicit_window(
+      points, scalar_span, BITS_PER_SLICE);
+
+  fq32_affine_g1_t first_result{};
+  msm_profile first_profile{};
+  msm_raw_profiled_fq32(
+      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
+      scalars.size(), 0, BITS_PER_SLICE, &first_result, &first_profile);
+  gpu_testing::expect_same_point(first_result, expected);
+  EXPECT_EQ(first_profile.precomputed_srs_bytes,
+            64U * 4U * sizeof(fq32_affine_g1_t));
+  EXPECT_GT(first_profile.precompute_bases_ms, 0.0F);
+
+  fq32_affine_g1_t second_result{};
+  msm_profile second_profile{};
+  msm_raw_profiled_fq32(
+      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
+      scalars.size(), 0, BITS_PER_SLICE, &second_result, &second_profile);
+  gpu_testing::expect_same_point(second_result, expected);
+  EXPECT_EQ(second_profile.precompute_bases_ms, 0.0F);
+
+  bb::gpu::bn254::set_msm_precompute_cache_min_length(48);
+  fq32_affine_g1_t third_result{};
+  msm_profile third_profile{};
+  msm_raw_profiled_fq32(
+      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
+      scalars.size(), 0, BITS_PER_SLICE, &third_result, &third_profile);
+  gpu_testing::expect_same_point(third_result, expected);
+  EXPECT_EQ(third_profile.precomputed_srs_bytes,
+            48U * 4U * sizeof(fq32_affine_g1_t));
+  EXPECT_GT(third_profile.precompute_bases_ms, 0.0F);
+}
+
+TEST(GpuBn254, MsmPrecomputedSrsCacheServesSmallerOffsetSpan) {
+  BB_REQUIRE_CUDA_DEVICE();
+
+  const gpu_testing::ScopedMsmPrecomputeCacheMinLength scoped_cache_length(128);
+
+  auto &engine = numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  for (size_t i = 0; i < 160; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+  }
+  std::vector<fr> warmup_scalars;
+  for (size_t i = 0; i < 64; ++i) {
+    warmup_scalars.emplace_back(i % 5 == 0 ? fr::zero()
+                                           : fr::random_element(&engine));
+  }
+  std::vector<fr> offset_scalars;
+  for (size_t i = 0; i < 25; ++i) {
+    offset_scalars.emplace_back(i % 6 == 0 ? fr::zero()
+                                           : fr::random_element(&engine));
+  }
+  gpu_testing::upload_test_srs(points);
+
+  constexpr uint32_t BITS_PER_SLICE = 8;
+  auto warmup_span = PolynomialSpan<const fr>{
+      0, std::span<const fr>(warmup_scalars.data(), warmup_scalars.size())};
+  const auto warmup_expected = gpu_testing::reference_msm_with_explicit_window(
+      points, warmup_span, BITS_PER_SLICE);
+  fq32_affine_g1_t warmup_result{};
+  msm_profile warmup_profile{};
+  msm_raw_profiled_fq32(
+      reinterpret_cast<const host_fr_montgomery_t *>(warmup_scalars.data()),
+      warmup_scalars.size(), 0, BITS_PER_SLICE, &warmup_result,
+      &warmup_profile);
+  gpu_testing::expect_same_point(warmup_result, warmup_expected);
+  EXPECT_EQ(warmup_profile.precomputed_srs_bytes,
+            128U * 4U * sizeof(fq32_affine_g1_t));
+  EXPECT_GT(warmup_profile.precompute_bases_ms, 0.0F);
+
+  constexpr size_t OFFSET_START = 41;
+  auto offset_span = PolynomialSpan<const fr>{
+      OFFSET_START,
+      std::span<const fr>(offset_scalars.data(), offset_scalars.size())};
+  const auto offset_expected = gpu_testing::reference_msm_with_explicit_window(
+      points, offset_span, BITS_PER_SLICE);
+  fq32_affine_g1_t offset_result{};
+  msm_profile offset_profile{};
+  msm_raw_profiled_fq32(
+      reinterpret_cast<const host_fr_montgomery_t *>(offset_scalars.data()),
+      offset_scalars.size(), OFFSET_START, BITS_PER_SLICE, &offset_result,
+      &offset_profile);
+  gpu_testing::expect_same_point(offset_result, offset_expected);
+  EXPECT_EQ(offset_profile.precomputed_srs_bytes,
+            128U * 4U * sizeof(fq32_affine_g1_t));
+  EXPECT_EQ(offset_profile.precompute_bases_ms, 0.0F);
+}
+
 TEST(GpuBn254, MsmBuffersReuseKeepHighWaterAndGrow) {
   BB_REQUIRE_CUDA_DEVICE();
 

@@ -69,7 +69,7 @@ __global__ void split_scalars_precomputed_batched_kernel(
     const host_fr_montgomery_t *scalars_montgomery_device,
     uint32_t *bucket_indices, uint32_t *point_indices,
     const size_t num_scalars_per_msm, const uint32_t point_start_index,
-    const uint32_t srs_size, const uint32_t bits_per_slice,
+    const uint32_t layer_stride, const uint32_t bits_per_slice,
     const uint32_t num_windows, const uint32_t folded_windows,
     const uint32_t batch_size) {
   const uint32_t batch_id = blockIdx.y;
@@ -101,7 +101,7 @@ __global__ void split_scalars_precomputed_batched_kernel(
         intra_scalar_idx;
     bucket_indices[output_idx] =
         digit == 0 ? 0 : ((flat_window << bits_per_slice) | digit);
-    point_indices[output_idx] = (layer * srs_size) + base_point_index;
+    point_indices[output_idx] = (layer * layer_stride) + base_point_index;
   }
 }
 
@@ -111,7 +111,7 @@ __global__ void split_scalars_precomputed_kernel(
     uint32_t *bucket_indices, uint32_t *point_indices,
     const size_t total_num_scalars, const size_t chunk_start,
     const size_t chunk_size, const uint32_t point_start_index,
-    const uint32_t srs_size, const uint32_t bits_per_slice,
+    const uint32_t layer_stride, const uint32_t bits_per_slice,
     const uint32_t num_windows, const uint32_t folded_windows) {
   const size_t local_scalar_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
   if (local_scalar_idx >= chunk_size) {
@@ -136,6 +136,6 @@ __global__ void split_scalars_precomputed_kernel(
         (static_cast<size_t>(low_window) * total_num_scalars) + scalar_idx;
     bucket_indices[output_idx] =
         digit == 0 ? 0 : ((target_window << bits_per_slice) | digit);
-    point_indices[output_idx] = (layer * srs_size) + base_point_index;
+    point_indices[output_idx] = (layer * layer_stride) + base_point_index;
   }
 }

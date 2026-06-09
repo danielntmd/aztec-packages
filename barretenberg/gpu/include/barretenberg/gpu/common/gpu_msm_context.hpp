@@ -40,6 +40,7 @@ public:
                                    uint32_t precompute_factor);
   bool has_shifted_srs(size_t point_start_index, size_t num_points,
                        uint32_t shift_bits, uint32_t precompute_factor) const;
+  size_t shifted_srs_point_offset(size_t point_start_index) const;
   void release_shifted_srs();
   void release_msm_buffers();
   size_t get_srs_offset(const bn254::host_affine_g1_montgomery_t *points,
@@ -58,6 +59,9 @@ public:
   }
   [[nodiscard]] size_t shifted_srs_device_bytes() const noexcept {
     return shifted_srs_points_device_.size() * sizeof(bn254::fq32_affine_g1_t);
+  }
+  [[nodiscard]] size_t shifted_srs_layer_stride() const noexcept {
+    return shifted_srs_original_size_;
   }
   [[nodiscard]] bn254::MsmBuffers &msm_buffers() noexcept {
     return msm_buffers_;
