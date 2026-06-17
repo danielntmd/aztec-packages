@@ -127,10 +127,12 @@ class PreparedBases {
 public:
   PreparedBases(std::span<const bb::gpu::benchmark_msm::Commitment> points,
                 const uint32_t precompute_factor, const int c) {
+    bb::gpu::benchmark_msm::HostTimer setup_timer;
     const auto converted_points = convert_points(points);
     prepared_ = icicle_v2_prepare_bases(
         converted_points.data(), converted_points.size(), precompute_factor, c,
-        &setup_ms, &precompute_ms);
+        nullptr, &precompute_wall_ms, &precompute_device_ms);
+    setup_wall_ms = setup_timer.elapsed_ms();
     if (prepared_ == nullptr) {
       fail_adapter("icicle_v2_prepare_bases");
     }
@@ -143,8 +145,9 @@ public:
 
   icicle_v2_prepared_bases_t *get() const { return prepared_; }
 
-  double setup_ms = 0.0;
-  double precompute_ms = 0.0;
+  double setup_wall_ms = 0.0;
+  double precompute_wall_ms = 0.0;
+  double precompute_device_ms = 0.0;
 
 private:
   icicle_v2_prepared_bases_t *prepared_ = nullptr;
@@ -155,25 +158,25 @@ run_msm(std::span<const bb::gpu::benchmark_msm::Fr> scalars,
         const size_t num_points, const uint32_t batch_size,
         const PreparedBases &prepared, const uint32_t precompute_factor,
         const int c) {
+  bb::gpu::benchmark_msm::HostTimer outer_timer;
   const auto converted_scalars = convert_scalars(scalars);
   std::vector<icicle_v2_affine_t> results(batch_size);
 
-  double backend_call_ms = 0.0;
-  double device_event_ms = 0.0;
-  bb::gpu::benchmark_msm::HostTimer e2e_timer;
+  double backend_wall_ms = 0.0;
+  double device_ms = 0.0;
   if (icicle_v2_run_msm(converted_scalars.data(), num_points, batch_size,
                         prepared.get(), precompute_factor, c, results.data(),
-                        &backend_call_ms, &device_event_ms) != 0) {
+                        &backend_wall_ms, &device_ms) != 0) {
     fail_adapter("icicle_v2_run_msm");
   }
 
   bb::gpu::benchmark_msm::TimedRun run;
-  run.msm_e2e_ms = e2e_timer.elapsed_ms();
-  run.backend_call_ms = backend_call_ms;
-  run.device_event_ms = device_event_ms;
-  run.gpu_total_ms = device_event_ms;
-  run.setup_ms = prepared.setup_ms;
-  run.precompute_ms = prepared.precompute_ms;
+  run.outer_wall_ms = outer_timer.elapsed_ms();
+  run.backend_wall_ms = backend_wall_ms;
+  run.device_ms = device_ms;
+  run.setup_wall_ms = prepared.setup_wall_ms;
+  run.precompute_wall_ms = prepared.precompute_wall_ms;
+  run.precompute_device_ms = prepared.precompute_device_ms;
   run.c = static_cast<uint32_t>(c);
 
   std::vector<std::string> result_ids;
@@ -277,6 +280,10 @@ void run_batch_sweep(const bb::gpu::benchmark_msm::Options &options,
 int main(int argc, char **argv) {
   try {
     const auto options = bb::gpu::benchmark_msm::parse_options(argc, argv);
+    if (options.memory_placement != "host") {
+      bb::gpu::benchmark_msm::fail(
+          "Icicle v2.8.0 benchmark only supports host memory placement");
+    }
     std::ofstream out;
     bb::gpu::benchmark_msm::open_output(out, options.output_path);
     if (options.mode == "single" || options.mode == "all") {

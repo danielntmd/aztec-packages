@@ -2,9 +2,9 @@
 #include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
 #include "barretenberg/gpu/backend.hpp"
 #include "barretenberg/gpu/curves/bn254/bn254_conversions.hpp"
+#include "barretenberg/polynomials/polynomial.hpp"
 #include "common/gpu_msm_context.hpp"
 #include "msm/internal/msm_heuristics.hpp"
-#include "barretenberg/polynomials/polynomial.hpp"
 #include "msm/internal/msm_profile.hpp"
 #include "msm/internal/msm_raw.hpp"
 
@@ -25,6 +25,53 @@ bool cuda_available() {
   return cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0;
 }
 
+void check_cuda_benchmark(const cudaError_t err, const std::string &context) {
+  if (err != cudaSuccess) {
+    bb::gpu::benchmark_msm::fail(context + ": " + cudaGetErrorString(err));
+  }
+}
+
+template <typename T> class CudaAllocation {
+public:
+  explicit CudaAllocation(const size_t count) : count_(count) {
+    if (count_ != 0) {
+      check_cuda_benchmark(
+          cudaMalloc(reinterpret_cast<void **>(&ptr_), sizeof(T) * count_),
+          "cudaMalloc");
+    }
+  }
+
+  ~CudaAllocation() {
+    if (ptr_ != nullptr) {
+      cudaFree(ptr_);
+    }
+  }
+
+  CudaAllocation(const CudaAllocation &) = delete;
+  CudaAllocation &operator=(const CudaAllocation &) = delete;
+
+  T *data() const { return ptr_; }
+  size_t size() const { return count_; }
+
+private:
+  T *ptr_ = nullptr;
+  size_t count_ = 0;
+};
+
+template <typename T>
+void copy_to_device(CudaAllocation<T> &dst, const T *src, const size_t count) {
+  check_cuda_benchmark(
+      cudaMemcpy(dst.data(), src, sizeof(T) * count, cudaMemcpyHostToDevice),
+      "cudaMemcpy host to device");
+}
+
+template <typename T>
+void copy_to_host(T *dst, const CudaAllocation<T> &src, const size_t count) {
+  check_cuda_benchmark(
+      cudaMemcpy(dst, src.data(), sizeof(T) * count, cudaMemcpyDeviceToHost),
+      "cudaMemcpy device to host");
+}
+
 size_t resolve_point_start_index(
     std::span<const bb::gpu::benchmark_msm::Commitment> points) {
   return bb::gpu::default_msm_context().get_srs_offset(
@@ -43,11 +90,14 @@ cpu_msm(const bb::gpu::benchmark_msm::CpuInput &input,
       scalar_span, input.points);
 }
 
+void add_optional(std::optional<double> &target, const double value) {
+  target = target.value_or(0.0) + value;
+}
+
 void apply_profile(bb::gpu::benchmark_msm::TimedRun &run,
                    const bb::gpu::bn254::msm_profile &profile) {
-  run.precompute_ms += profile.precompute_bases_ms;
-  run.device_event_ms += profile.total_profiled_ms;
-  run.gpu_total_ms += profile.total_profiled_ms;
+  add_optional(run.precompute_device_ms, profile.precompute_bases_ms);
+  add_optional(run.device_ms, profile.total_profiled_ms);
   run.backend_host_preamble_ms += profile.backend_host_preamble_ms;
   run.backend_host_cleanup_ms += profile.backend_host_cleanup_ms;
   run.backend_host_total_ms += profile.backend_host_total_ms;
@@ -171,6 +221,7 @@ run_single(const bb::gpu::benchmark_msm::CpuInput &input,
       .precompute_factor = precompute_factor,
       .precompute_cache_min_length =
           bb::gpu::MsmConfig{}.precompute_cache_min_length,
+      .max_fused_batch_size = bb::gpu::bn254::GPU_MSM_MAX_FUSED_BATCH_SIZE,
   };
 
   bb::gpu::benchmark_msm::HostTimer timer;
@@ -181,9 +232,10 @@ run_single(const bb::gpu::benchmark_msm::CpuInput &input,
       &raw_result, &profile);
 
   bb::gpu::benchmark_msm::TimedRun run;
-  run.setup_ms = setup_ms;
-  run.msm_e2e_ms = timer.elapsed_ms();
-  run.backend_call_ms = run.msm_e2e_ms;
+  run.memory_placement = "host";
+  run.setup_wall_ms = setup_ms;
+  run.outer_wall_ms = timer.elapsed_ms();
+  run.backend_wall_ms = run.outer_wall_ms;
   apply_profile(run, profile);
   run.result = bb::gpu::benchmark_msm::result_id(
       bb::gpu::bn254::to_cpu_point(raw_result));
@@ -194,7 +246,8 @@ run_single(const bb::gpu::benchmark_msm::CpuInput &input,
 bb::gpu::benchmark_msm::TimedRun
 run_batch(const bb::gpu::benchmark_msm::CpuInput &input,
           const uint32_t batch_size, const uint32_t precompute_factor,
-          const uint32_t c, const double setup_ms) {
+          const uint32_t c, const uint32_t max_fused_batch_size,
+          const double setup_ms) {
   std::vector<const bb::gpu::bn254::host_fr_montgomery_t *> scalar_pointers;
   std::vector<bb::gpu::bn254::fq32_affine_g1_t> raw_results;
   raw_results.reserve(batch_size);
@@ -203,15 +256,16 @@ run_batch(const bb::gpu::benchmark_msm::CpuInput &input,
       .precompute_factor = precompute_factor,
       .precompute_cache_min_length =
           bb::gpu::MsmConfig{}.precompute_cache_min_length,
+      .max_fused_batch_size = max_fused_batch_size,
   };
   bb::gpu::benchmark_msm::TimedRun run;
-  run.setup_ms = setup_ms;
+  run.memory_placement = "host";
+  run.setup_wall_ms = setup_ms;
   bb::gpu::benchmark_msm::HostTimer timer;
   for (uint32_t batch_offset = 0; batch_offset < batch_size;
-       batch_offset += bb::gpu::bn254::GPU_MSM_MAX_FUSED_BATCH_SIZE) {
+       batch_offset += max_fused_batch_size) {
     const uint32_t chunk_size =
-        std::min<uint32_t>(bb::gpu::bn254::GPU_MSM_MAX_FUSED_BATCH_SIZE,
-                           batch_size - batch_offset);
+        std::min<uint32_t>(max_fused_batch_size, batch_size - batch_offset);
     scalar_pointers.clear();
     scalar_pointers.reserve(chunk_size);
     for (uint32_t batch = 0; batch < chunk_size; ++batch) {
@@ -225,15 +279,15 @@ run_batch(const bb::gpu::benchmark_msm::CpuInput &input,
     bb::gpu::bn254::msm_profile profile{};
     bb::gpu::bn254::msm_raw_batch_profiled_fq32(
         scalar_pointers.data(), input.points.size(), chunk_size,
-        resolve_point_start_index(input.points), raw_options, chunk_results.data(),
-        &profile);
+        resolve_point_start_index(input.points), raw_options,
+        chunk_results.data(), &profile);
     apply_profile(run, profile);
     raw_results.insert(raw_results.end(), chunk_results.begin(),
                        chunk_results.end());
   }
 
-  run.msm_e2e_ms = timer.elapsed_ms();
-  run.backend_call_ms = run.msm_e2e_ms;
+  run.outer_wall_ms = timer.elapsed_ms();
+  run.backend_wall_ms = run.outer_wall_ms;
   std::vector<std::string> result_ids;
   result_ids.reserve(raw_results.size());
   for (const auto &raw_result : raw_results) {
@@ -242,6 +296,102 @@ run_batch(const bb::gpu::benchmark_msm::CpuInput &input,
   }
   run.result = bb::gpu::benchmark_msm::join_result_ids(result_ids);
   (void)precompute_factor;
+  return run;
+}
+
+bb::gpu::benchmark_msm::TimedRun
+run_single_device(const bb::gpu::benchmark_msm::CpuInput &input,
+                  const uint32_t precompute_factor, const uint32_t c,
+                  const double setup_ms) {
+  const size_t num_points = input.points.size();
+  CudaAllocation<bb::gpu::bn254::host_fr_montgomery_t> device_scalars(
+      num_points);
+  copy_to_device(device_scalars,
+                 reinterpret_cast<const bb::gpu::bn254::host_fr_montgomery_t *>(
+                     input.scalars.data()),
+                 num_points);
+  CudaAllocation<bb::gpu::bn254::fq32_affine_g1_t> device_result(1);
+
+  const bb::gpu::bn254::MsmRawOptions raw_options{
+      .bits_per_slice = c,
+      .precompute_factor = precompute_factor,
+      .precompute_cache_min_length =
+          bb::gpu::MsmConfig{}.precompute_cache_min_length,
+      .max_fused_batch_size = bb::gpu::bn254::GPU_MSM_MAX_FUSED_BATCH_SIZE,
+  };
+
+  bb::gpu::bn254::msm_profile profile{};
+  bb::gpu::benchmark_msm::HostTimer timer;
+  bb::gpu::bn254::msm_raw_batch_device_profiled_fq32(
+      device_scalars.data(), num_points, 1,
+      resolve_point_start_index(input.points), raw_options,
+      device_result.data(), &profile);
+
+  bb::gpu::benchmark_msm::TimedRun run;
+  run.memory_placement = "device";
+  run.setup_wall_ms = setup_ms;
+  run.outer_wall_ms = timer.elapsed_ms();
+  run.backend_wall_ms = run.outer_wall_ms;
+  apply_profile(run, profile);
+
+  bb::gpu::bn254::fq32_affine_g1_t raw_result{};
+  copy_to_host(&raw_result, device_result, 1);
+  run.result = bb::gpu::benchmark_msm::result_id(
+      bb::gpu::bn254::to_cpu_point(raw_result));
+  return run;
+}
+
+bb::gpu::benchmark_msm::TimedRun
+run_batch_device(const bb::gpu::benchmark_msm::CpuInput &input,
+                 const uint32_t batch_size, const uint32_t precompute_factor,
+                 const uint32_t c, const uint32_t max_fused_batch_size,
+                 const double setup_ms) {
+  const size_t num_points = input.points.size();
+  const size_t total_scalars = static_cast<size_t>(batch_size) * num_points;
+  CudaAllocation<bb::gpu::bn254::host_fr_montgomery_t> device_scalars(
+      total_scalars);
+  copy_to_device(device_scalars,
+                 reinterpret_cast<const bb::gpu::bn254::host_fr_montgomery_t *>(
+                     input.scalars.data()),
+                 total_scalars);
+  CudaAllocation<bb::gpu::bn254::fq32_affine_g1_t> device_results(batch_size);
+
+  const bb::gpu::bn254::MsmRawOptions raw_options{
+      .bits_per_slice = c,
+      .precompute_factor = precompute_factor,
+      .precompute_cache_min_length =
+          bb::gpu::MsmConfig{}.precompute_cache_min_length,
+      .max_fused_batch_size = max_fused_batch_size,
+  };
+
+  bb::gpu::benchmark_msm::TimedRun run;
+  run.memory_placement = "device";
+  run.setup_wall_ms = setup_ms;
+  bb::gpu::benchmark_msm::HostTimer timer;
+  for (uint32_t batch_offset = 0; batch_offset < batch_size;
+       batch_offset += max_fused_batch_size) {
+    const uint32_t chunk_size =
+        std::min<uint32_t>(max_fused_batch_size, batch_size - batch_offset);
+    bb::gpu::bn254::msm_profile profile{};
+    bb::gpu::bn254::msm_raw_batch_device_profiled_fq32(
+        device_scalars.data() + static_cast<size_t>(batch_offset) * num_points,
+        num_points, chunk_size, resolve_point_start_index(input.points),
+        raw_options, device_results.data() + batch_offset, &profile);
+    apply_profile(run, profile);
+  }
+
+  run.outer_wall_ms = timer.elapsed_ms();
+  run.backend_wall_ms = run.outer_wall_ms;
+
+  std::vector<bb::gpu::bn254::fq32_affine_g1_t> raw_results(batch_size);
+  copy_to_host(raw_results.data(), device_results, batch_size);
+  std::vector<std::string> result_ids;
+  result_ids.reserve(raw_results.size());
+  for (const auto &raw_result : raw_results) {
+    result_ids.push_back(bb::gpu::benchmark_msm::result_id(
+        bb::gpu::bn254::to_cpu_point(raw_result)));
+  }
+  run.result = bb::gpu::benchmark_msm::join_result_ids(result_ids);
   return run;
 }
 
@@ -282,6 +432,7 @@ void run_single_sweep(const bb::gpu::benchmark_msm::Options &options,
 
     for (const uint32_t precompute_factor : options.precompute_factors) {
       bb::gpu::default_msm_context().release_shifted_srs();
+      bb::gpu::default_msm_context().release_msm_buffers();
       const uint32_t c = options.c == 0
                              ? bb::gpu::bn254::get_auto_bits_per_slice(
                                    num_points, precompute_factor)
@@ -291,7 +442,7 @@ void run_single_sweep(const bb::gpu::benchmark_msm::Options &options,
       const uint32_t effective_precompute_factor =
           bb::gpu::bn254::get_effective_msm_precompute_factor(
               original_windows, precompute_factor);
-      const size_t persistent_bytes =
+      size_t persistent_bytes =
           (points.has_value()
                ? 0
                : num_points * sizeof(bb::gpu::bn254::fq32_affine_g1_t)) +
@@ -299,6 +450,11 @@ void run_single_sweep(const bb::gpu::benchmark_msm::Options &options,
                ? num_points * static_cast<size_t>(effective_precompute_factor) *
                      sizeof(bb::gpu::bn254::fq32_affine_g1_t)
                : 0);
+      if (options.memory_placement == "device") {
+        persistent_bytes +=
+            num_points * sizeof(bb::gpu::bn254::host_fr_montgomery_t) +
+            sizeof(bb::gpu::bn254::fq32_affine_g1_t);
+      }
       std::string skip_reason;
       if (!has_enough_transient_memory(num_points, 1, c, precompute_factor,
                                        persistent_bytes, skip_reason)) {
@@ -317,7 +473,11 @@ void run_single_sweep(const bb::gpu::benchmark_msm::Options &options,
             points->size(), bb::gpu::benchmark_msm::scalars_seed(
                                 options, log_num_points, -1, 1));
         const bb::gpu::benchmark_msm::CpuInput input{*points, scalars};
-        (void)run_single(input, precompute_factor, c, setup_ms);
+        if (options.memory_placement == "device") {
+          (void)run_single_device(input, precompute_factor, c, setup_ms);
+        } else {
+          (void)run_single(input, precompute_factor, c, setup_ms);
+        }
       }
 
       for (int repeat = 0; repeat < options.repeats; ++repeat) {
@@ -325,7 +485,10 @@ void run_single_sweep(const bb::gpu::benchmark_msm::Options &options,
             points->size(), bb::gpu::benchmark_msm::scalars_seed(
                                 options, log_num_points, repeat, 1));
         const bb::gpu::benchmark_msm::CpuInput input{*points, scalars};
-        auto run = run_single(input, precompute_factor, c, setup_ms);
+        auto run =
+            options.memory_placement == "device"
+                ? run_single_device(input, precompute_factor, c, setup_ms)
+                : run_single(input, precompute_factor, c, setup_ms);
         if (log_num_points <= 16) {
           verify_single(input, run);
         }
@@ -347,18 +510,19 @@ void run_batch_sweep(const bb::gpu::benchmark_msm::Options &options,
 
   for (const uint32_t precompute_factor : options.precompute_factors) {
     bb::gpu::default_msm_context().release_shifted_srs();
+    bb::gpu::default_msm_context().release_msm_buffers();
     const uint32_t c =
         options.c == 0 ? bb::gpu::bn254::get_auto_batched_bits_per_slice(
                              num_points, options.batch_size, precompute_factor)
                        : static_cast<uint32_t>(options.c);
-    const uint32_t preflight_batch_size = std::min<uint32_t>(
-        bb::gpu::bn254::GPU_MSM_MAX_FUSED_BATCH_SIZE, options.batch_size);
+    const uint32_t preflight_batch_size =
+        std::min<uint32_t>(options.bb_max_fused_batch_size, options.batch_size);
     const uint32_t original_windows =
         (bb::gpu::bn254::GPU_MSM_NUM_BITS_IN_FIELD + c - 1) / c;
     const uint32_t effective_precompute_factor =
         bb::gpu::bn254::get_effective_msm_precompute_factor(original_windows,
                                                             precompute_factor);
-    const size_t persistent_bytes =
+    size_t persistent_bytes =
         (points.has_value()
              ? 0
              : num_points * sizeof(bb::gpu::bn254::fq32_affine_g1_t)) +
@@ -366,6 +530,12 @@ void run_batch_sweep(const bb::gpu::benchmark_msm::Options &options,
              ? num_points * static_cast<size_t>(effective_precompute_factor) *
                    sizeof(bb::gpu::bn254::fq32_affine_g1_t)
              : 0);
+    if (options.memory_placement == "device") {
+      persistent_bytes += num_points * static_cast<size_t>(options.batch_size) *
+                              sizeof(bb::gpu::bn254::host_fr_montgomery_t) +
+                          static_cast<size_t>(options.batch_size) *
+                              sizeof(bb::gpu::bn254::fq32_affine_g1_t);
+    }
     std::string skip_reason;
     if (!has_enough_transient_memory(num_points, preflight_batch_size, c,
                                      precompute_factor, persistent_bytes,
@@ -386,8 +556,13 @@ void run_batch_sweep(const bb::gpu::benchmark_msm::Options &options,
           bb::gpu::benchmark_msm::scalars_seed(options, options.batch_log, -1,
                                                options.batch_size));
       const bb::gpu::benchmark_msm::CpuInput input{*points, scalars};
-      (void)run_batch(input, options.batch_size, precompute_factor, c,
-                      setup_ms);
+      if (options.memory_placement == "device") {
+        (void)run_batch_device(input, options.batch_size, precompute_factor, c,
+                               options.bb_max_fused_batch_size, setup_ms);
+      } else {
+        (void)run_batch(input, options.batch_size, precompute_factor, c,
+                        options.bb_max_fused_batch_size, setup_ms);
+      }
     }
 
     for (int repeat = 0; repeat < options.repeats; ++repeat) {
@@ -397,7 +572,11 @@ void run_batch_sweep(const bb::gpu::benchmark_msm::Options &options,
                                                repeat, options.batch_size));
       const bb::gpu::benchmark_msm::CpuInput input{*points, scalars};
       auto run =
-          run_batch(input, options.batch_size, precompute_factor, c, setup_ms);
+          options.memory_placement == "device"
+              ? run_batch_device(input, options.batch_size, precompute_factor,
+                                 c, options.bb_max_fused_batch_size, setup_ms)
+              : run_batch(input, options.batch_size, precompute_factor, c,
+                          options.bb_max_fused_batch_size, setup_ms);
       if (options.batch_log <= 16) {
         verify_batch_first_result(input, run);
       }

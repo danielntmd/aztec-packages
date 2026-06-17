@@ -83,6 +83,7 @@ public:
   DeviceAllocation &operator=(const DeviceAllocation &) = delete;
 
   T *data() { return ptr_; }
+  const T *data() const { return ptr_; }
 
 private:
   T *ptr_ = nullptr;
@@ -91,8 +92,8 @@ private:
 
 struct PreparedBases {
   std::unique_ptr<DeviceAllocation<bn254::affine_t>> device_points;
-  double precompute_ms = 0.0;
-  double setup_ms = 0.0;
+  double precompute_wall_ms = 0.0;
+  double setup_wall_ms = 0.0;
 };
 
 icicle::MSMConfig make_config(const uint32_t precompute_factor, const int c) {
@@ -122,7 +123,7 @@ prepare_bases(std::span<const bb::gpu::benchmark_msm::Commitment> points,
                      converted_points.data(), static_cast<int>(points.size()),
                      config, precomputed_points.data()),
                  "icicle::msm_precompute_bases");
-    prepared.precompute_ms = precompute_timer.elapsed_ms();
+    prepared.precompute_wall_ms = precompute_timer.elapsed_ms();
   }
 
   prepared.device_points = std::make_unique<DeviceAllocation<bn254::affine_t>>(
@@ -131,34 +132,21 @@ prepare_bases(std::span<const bb::gpu::benchmark_msm::Commitment> points,
                            precomputed_points.data(),
                            sizeof(bn254::affine_t) * precomputed_points.size()),
                "icicle_copy points");
-  prepared.setup_ms = setup_timer.elapsed_ms();
+  prepared.setup_wall_ms = setup_timer.elapsed_ms();
   return prepared;
 }
 
 bb::gpu::benchmark_msm::TimedRun
-run_msm(std::span<const bb::gpu::benchmark_msm::Fr> scalars,
-        const size_t num_points, const uint32_t batch_size,
-        const PreparedBases &prepared, icicle::MSMConfig config) {
-  auto converted_scalars = convert_scalars(scalars);
-  std::vector<bn254::projective_t> results(batch_size);
-
-  config.batch_size = static_cast<int>(batch_size);
-  config.are_points_on_device = true;
-  config.are_scalars_on_device = false;
-  config.are_results_on_device = false;
-
-  bb::gpu::benchmark_msm::HostTimer timer;
-  check_icicle(
-      icicle::msm(converted_scalars.data(), prepared.device_points->data(),
-                  static_cast<int>(num_points), config, results.data()),
-      "icicle::msm");
-
+finish_run(std::vector<bn254::projective_t> &results,
+           const PreparedBases &prepared, const icicle::MSMConfig &config,
+           const std::string &memory_placement, const double outer_wall_ms,
+           const double backend_wall_ms) {
   bb::gpu::benchmark_msm::TimedRun run;
-  run.msm_e2e_ms = timer.elapsed_ms();
-  run.backend_call_ms = run.msm_e2e_ms;
-  run.gpu_total_ms = run.msm_e2e_ms;
-  run.setup_ms = prepared.setup_ms;
-  run.precompute_ms = prepared.precompute_ms;
+  run.memory_placement = memory_placement;
+  run.outer_wall_ms = outer_wall_ms;
+  run.backend_wall_ms = backend_wall_ms;
+  run.setup_wall_ms = prepared.setup_wall_ms;
+  run.precompute_wall_ms = prepared.precompute_wall_ms;
   run.c = static_cast<uint32_t>(config.c);
   std::vector<std::string> result_ids;
   result_ids.reserve(results.size());
@@ -167,6 +155,73 @@ run_msm(std::span<const bb::gpu::benchmark_msm::Fr> scalars,
   }
   run.result = bb::gpu::benchmark_msm::join_result_ids(result_ids);
   return run;
+}
+
+bb::gpu::benchmark_msm::TimedRun
+run_msm_host(std::span<const bb::gpu::benchmark_msm::Fr> scalars,
+             const size_t num_points, const uint32_t batch_size,
+             const PreparedBases &prepared, icicle::MSMConfig config) {
+  bb::gpu::benchmark_msm::HostTimer outer_timer;
+  auto converted_scalars = convert_scalars(scalars);
+  std::vector<bn254::projective_t> results(batch_size);
+
+  config.batch_size = static_cast<int>(batch_size);
+  config.are_points_on_device = true;
+  config.are_scalars_on_device = false;
+  config.are_results_on_device = false;
+
+  bb::gpu::benchmark_msm::HostTimer backend_timer;
+  check_icicle(
+      icicle::msm(converted_scalars.data(), prepared.device_points->data(),
+                  static_cast<int>(num_points), config, results.data()),
+      "icicle::msm");
+  const double backend_wall_ms = backend_timer.elapsed_ms();
+  return finish_run(results, prepared, config, "host", outer_timer.elapsed_ms(),
+                    backend_wall_ms);
+}
+
+bb::gpu::benchmark_msm::TimedRun
+run_msm_device(std::span<const bb::gpu::benchmark_msm::Fr> scalars,
+               const size_t num_points, const uint32_t batch_size,
+               const PreparedBases &prepared, icicle::MSMConfig config) {
+  auto converted_scalars = convert_scalars(scalars);
+  DeviceAllocation<bn254::scalar_t> device_scalars(converted_scalars.size());
+  check_icicle(icicle_copy(device_scalars.data(), converted_scalars.data(),
+                           sizeof(bn254::scalar_t) * converted_scalars.size()),
+               "icicle_copy scalars");
+  DeviceAllocation<bn254::projective_t> device_results(batch_size);
+  std::vector<bn254::projective_t> results(batch_size);
+
+  config.batch_size = static_cast<int>(batch_size);
+  config.are_points_on_device = true;
+  config.are_scalars_on_device = true;
+  config.are_results_on_device = true;
+
+  bb::gpu::benchmark_msm::HostTimer outer_timer;
+  bb::gpu::benchmark_msm::HostTimer backend_timer;
+  check_icicle(
+      icicle::msm(device_scalars.data(), prepared.device_points->data(),
+                  static_cast<int>(num_points), config, device_results.data()),
+      "icicle::msm");
+  const double backend_wall_ms = backend_timer.elapsed_ms();
+  const double outer_wall_ms = outer_timer.elapsed_ms();
+
+  check_icicle(icicle_copy(results.data(), device_results.data(),
+                           sizeof(bn254::projective_t) * results.size()),
+               "icicle_copy results");
+  return finish_run(results, prepared, config, "device", outer_wall_ms,
+                    backend_wall_ms);
+}
+
+bb::gpu::benchmark_msm::TimedRun
+run_msm(std::span<const bb::gpu::benchmark_msm::Fr> scalars,
+        const size_t num_points, const uint32_t batch_size,
+        const PreparedBases &prepared, icicle::MSMConfig config,
+        const std::string &memory_placement) {
+  if (memory_placement == "device") {
+    return run_msm_device(scalars, num_points, batch_size, prepared, config);
+  }
+  return run_msm_host(scalars, num_points, batch_size, prepared, config);
 }
 
 void initialize_backend(int argc, char **argv) {
@@ -206,13 +261,15 @@ void run_single_sweep(const bb::gpu::benchmark_msm::Options &options,
         auto scalars = bb::gpu::benchmark_msm::make_scalars(
             points.size(), bb::gpu::benchmark_msm::scalars_seed(
                                options, log_num_points, -1, 1));
-        (void)run_msm(scalars, points.size(), 1, prepared, config);
+        (void)run_msm(scalars, points.size(), 1, prepared, config,
+                      options.memory_placement);
       }
       for (int repeat = 0; repeat < options.repeats; ++repeat) {
         auto scalars = bb::gpu::benchmark_msm::make_scalars(
             points.size(), bb::gpu::benchmark_msm::scalars_seed(
                                options, log_num_points, repeat, 1));
-        auto run = run_msm(scalars, points.size(), 1, prepared, config);
+        auto run = run_msm(scalars, points.size(), 1, prepared, config,
+                           options.memory_placement);
         write_record(out, "icicle-v4.0.0", "single", log_num_points, 1,
                      precompute_factor, repeat,
                      bb::gpu::benchmark_msm::scalars_seed(
@@ -237,17 +294,17 @@ void run_batch_sweep(const bb::gpu::benchmark_msm::Options &options,
           bb::gpu::benchmark_msm::scalars_seed(options, options.batch_log, -1,
                                                options.batch_size));
       (void)run_msm(scalars, points.size(),
-                    static_cast<uint32_t>(options.batch_size), prepared,
-                    config);
+                    static_cast<uint32_t>(options.batch_size), prepared, config,
+                    options.memory_placement);
     }
     for (int repeat = 0; repeat < options.repeats; ++repeat) {
       auto scalars = bb::gpu::benchmark_msm::make_scalars(
           points.size() * static_cast<size_t>(options.batch_size),
           bb::gpu::benchmark_msm::scalars_seed(options, options.batch_log,
                                                repeat, options.batch_size));
-      auto run =
-          run_msm(scalars, points.size(),
-                  static_cast<uint32_t>(options.batch_size), prepared, config);
+      auto run = run_msm(scalars, points.size(),
+                         static_cast<uint32_t>(options.batch_size), prepared,
+                         config, options.memory_placement);
       write_record(out, "icicle-v4.0.0", "batch", options.batch_log,
                    options.batch_size, precompute_factor, repeat,
                    bb::gpu::benchmark_msm::scalars_seed(

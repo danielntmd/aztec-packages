@@ -3,6 +3,7 @@
 #ifdef BB_GPU_NATIVE
 
 #include "barretenberg/gpu/curves/bn254/bn254.cuh"
+#include "msm/internal/msm_heuristics.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +14,7 @@ struct MsmRawOptions {
   uint32_t bits_per_slice;
   uint32_t precompute_factor;
   size_t precompute_cache_min_length;
+  uint32_t max_fused_batch_size = GPU_MSM_MAX_FUSED_BATCH_SIZE;
 };
 
 // Raw MSM entry point for callers that have already uploaded an SRS into the

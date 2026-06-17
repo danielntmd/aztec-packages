@@ -122,11 +122,10 @@ struct icicle_v2_prepared_bases_t {
   size_t num_device_points = 0;
 };
 
-extern "C" icicle_v2_prepared_bases_t *
-icicle_v2_prepare_bases(const icicle_v2_affine_t *points,
-                        const size_t num_points,
-                        const uint32_t precompute_factor, const int c,
-                        double *setup_ms, double *precompute_ms) {
+extern "C" icicle_v2_prepared_bases_t *icicle_v2_prepare_bases(
+    const icicle_v2_affine_t *points, const size_t num_points,
+    const uint32_t precompute_factor, const int c, double *setup_wall_ms,
+    double *precompute_wall_ms, double *precompute_device_ms) {
   last_error.clear();
   HostTimer setup_timer;
   std::vector<bn254::affine_t> converted_points(num_points);
@@ -152,12 +151,16 @@ icicle_v2_prepare_bases(const icicle_v2_affine_t *points,
       icicle_v2_free_prepared_bases(prepared);
       return nullptr;
     }
-    if (precompute_ms != nullptr) {
-      *precompute_ms = 0.0;
+    if (precompute_wall_ms != nullptr) {
+      *precompute_wall_ms = 0.0;
+    }
+    if (precompute_device_ms != nullptr) {
+      *precompute_device_ms = 0.0;
     }
   } else {
     auto config = make_config(precompute_factor, c, 1, num_points);
     config.are_points_on_device = false;
+    HostTimer precompute_timer;
     CudaEventPair events;
     events.begin();
     if (!check_cuda(bn254_precompute_msm_points_cuda(
@@ -167,13 +170,17 @@ icicle_v2_prepare_bases(const icicle_v2_affine_t *points,
       icicle_v2_free_prepared_bases(prepared);
       return nullptr;
     }
-    if (precompute_ms != nullptr) {
-      *precompute_ms = events.end();
+    const double device_elapsed_ms = events.end();
+    if (precompute_wall_ms != nullptr) {
+      *precompute_wall_ms = precompute_timer.elapsed_ms();
+    }
+    if (precompute_device_ms != nullptr) {
+      *precompute_device_ms = device_elapsed_ms;
     }
   }
 
-  if (setup_ms != nullptr) {
-    *setup_ms = setup_timer.elapsed_ms();
+  if (setup_wall_ms != nullptr) {
+    *setup_wall_ms = setup_timer.elapsed_ms();
   }
   return prepared;
 }
@@ -187,11 +194,13 @@ icicle_v2_free_prepared_bases(icicle_v2_prepared_bases_t *prepared) {
   delete prepared;
 }
 
-extern "C" int icicle_v2_run_msm(
-    const icicle_v2_scalar_t *scalars, const size_t num_points,
-    const uint32_t batch_size, const icicle_v2_prepared_bases_t *prepared,
-    const uint32_t precompute_factor, const int c, icicle_v2_affine_t *results,
-    double *backend_call_ms, double *device_event_ms) {
+extern "C" int icicle_v2_run_msm(const icicle_v2_scalar_t *scalars,
+                                 const size_t num_points,
+                                 const uint32_t batch_size,
+                                 const icicle_v2_prepared_bases_t *prepared,
+                                 const uint32_t precompute_factor, const int c,
+                                 icicle_v2_affine_t *results,
+                                 double *backend_wall_ms, double *device_ms) {
   last_error.clear();
   std::vector<bn254::scalar_t> converted_scalars(num_points * batch_size);
   for (size_t i = 0; i < converted_scalars.size(); ++i) {
@@ -211,11 +220,11 @@ extern "C" int icicle_v2_run_msm(
                   "bn254_msm_cuda")) {
     return 1;
   }
-  if (backend_call_ms != nullptr) {
-    *backend_call_ms = backend_timer.elapsed_ms();
+  if (backend_wall_ms != nullptr) {
+    *backend_wall_ms = backend_timer.elapsed_ms();
   }
-  if (device_event_ms != nullptr) {
-    *device_event_ms = events.end();
+  if (device_ms != nullptr) {
+    *device_ms = events.end();
   }
 
   for (uint32_t i = 0; i < batch_size; ++i) {

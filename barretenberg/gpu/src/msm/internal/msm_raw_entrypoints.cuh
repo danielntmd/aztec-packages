@@ -66,3 +66,20 @@ void msm_raw_batch_profiled_fq32(const host_fr_montgomery_t *const *scalars,
                                            batch_size, point_start_index,
                                            options, results_host, profile);
 }
+
+void msm_raw_batch_device_profiled_fq32(
+    const host_fr_montgomery_t *device_scalars,
+    const size_t num_scalars_per_msm, const uint32_t batch_size,
+    const size_t point_start_index, const MsmRawOptions &options,
+    fq32_affine_g1_t *results_device, msm_profile *profile) {
+  if (batch_size == 0 || num_scalars_per_msm == 0) {
+    if (profile != nullptr) {
+      *profile = {};
+    }
+    return;
+  }
+
+  bucket_pippenger_batch_msm_device_profiled_fq32(
+      device_scalars, num_scalars_per_msm, batch_size, point_start_index,
+      options, results_device, profile);
+}

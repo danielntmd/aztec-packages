@@ -239,3 +239,52 @@ void copy_and_split_scalars_batched_pipeline(
     recorder.add_split_scalars_ms(split_ms);
   }
 }
+
+template <typename Recorder>
+void split_device_scalars_batched_pipeline(
+    const host_fr_montgomery_t *scalars_montgomery_device,
+    uint32_t *bucket_indices, uint32_t *point_indices,
+    const size_t num_scalars_per_msm, const uint32_t batch_size,
+    const uint32_t point_start_index, const uint32_t bits_per_slice,
+    const uint32_t num_windows, const uint32_t precompute_factor,
+    const uint32_t folded_windows, const uint32_t layer_stride,
+    const cudaStream_t main_stream, Recorder &recorder) {
+  bb::gpu::ScopedNvtxRange nvtx_range(recorder.scalar_copy_split_range_name());
+
+  const bool record_profile = recorder.enabled();
+  const OptionalTimingEvent split_start_event(record_profile);
+  const OptionalTimingEvent split_stop_event(record_profile);
+
+  split_start_event.record(main_stream,
+                           "cudaEventRecord device scalar split start");
+
+  const uint32_t split_blocks_x =
+      ceil_div_u32(num_scalars_per_msm, SPLIT_THREADS);
+  const dim3 grid_dim(split_blocks_x, batch_size, 1);
+  const dim3 block_dim(SPLIT_THREADS, 1, 1);
+  if (precompute_factor > 1) {
+    split_scalars_precomputed_batched_kernel<<<grid_dim, block_dim, 0,
+                                               main_stream>>>(
+        scalars_montgomery_device, bucket_indices, point_indices,
+        num_scalars_per_msm, point_start_index, layer_stride, bits_per_slice,
+        num_windows, folded_windows, batch_size);
+  } else {
+    split_scalars_batched_kernel<<<grid_dim, block_dim, 0, main_stream>>>(
+        scalars_montgomery_device, bucket_indices, point_indices,
+        num_scalars_per_msm, point_start_index, bits_per_slice, num_windows,
+        batch_size);
+  }
+  check_cuda(cudaGetLastError(), "split_device_scalars_batched_kernel launch");
+
+  split_stop_event.record(main_stream,
+                          "cudaEventRecord device scalar split stop");
+
+  if (record_profile) {
+    check_cuda(cudaEventSynchronize(split_stop_event.get()),
+               "cudaEventSynchronize device scalar split stop");
+    const float split_ms =
+        elapsed_ms(split_start_event.get(), split_stop_event.get());
+    recorder.set_scalar_copy_split_pipeline_ms(split_ms);
+    recorder.add_split_scalars_ms(split_ms);
+  }
+}

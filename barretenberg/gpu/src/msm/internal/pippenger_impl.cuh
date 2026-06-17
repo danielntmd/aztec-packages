@@ -3,11 +3,14 @@
 // `flat_window = batch_id * active_num_windows + window`.
 template <typename Recorder>
 void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
+                           const host_fr_montgomery_t *device_scalars,
                            const size_t num_scalars_per_msm,
                            const uint32_t batch_size,
                            const size_t point_start_index,
                            const MsmRawOptions &options,
-                           fq32_affine_g1_t *results_host, Recorder &recorder) {
+                           fq32_affine_g1_t *results_host,
+                           fq32_affine_g1_t *results_device,
+                           Recorder &recorder) {
   using HostClock = std::chrono::steady_clock;
   const auto host_start = HostClock::now();
   auto host_elapsed_ms = [](const HostClock::time_point start) -> float {
@@ -18,7 +21,7 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
            1'000'000.0F;
   };
 
-  check_condition(batch_size >= 1 && batch_size <= GPU_MSM_MAX_FUSED_BATCH_SIZE,
+  check_condition(batch_size >= 1 && batch_size <= options.max_fused_batch_size,
                   "msm: batch size out of fused range");
 
   const uint32_t bits_per_slice = options.bits_per_slice;
@@ -72,7 +75,14 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
       context.msm_buffers().prepare_pippenger(pippenger_layout, stream);
   recorder.add_backend_host_preamble_ms(host_elapsed_ms(host_start));
 
-  if (batch_size == 1) {
+  if (device_scalars != nullptr) {
+    split_device_scalars_batched_pipeline(
+        device_scalars, buffers.bucket_indices.data(),
+        buffers.point_indices.data(), num_scalars_per_msm, batch_size,
+        srs.split_point_start_index, bits_per_slice, cfg.original_num_windows,
+        cfg.precompute_factor, cfg.active_num_windows, srs.split_srs_stride,
+        cuda_stream, recorder);
+  } else if (batch_size == 1) {
     copy_and_split_scalars_pipeline(
         scalars[0], buffers.scalars_montgomery, buffers.bucket_indices.data(),
         buffers.point_indices.data(), num_scalars_per_msm,
@@ -118,6 +128,8 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
       static_cast<size_t>(num_active_buckets) ==
       static_cast<size_t>(flat_num_windows) * (cfg.bucket_stride - 1U);
   if (num_active_buckets == 0) {
+    check_condition(results_device == nullptr,
+                    "msm: zero-result device output is unsupported");
     for (uint32_t batch_id = 0; batch_id < batch_size; ++batch_id) {
       results_host[batch_id] = fq32_affine_infinity();
     }
@@ -177,20 +189,24 @@ void bucket_pippenger_impl(const host_fr_montgomery_t *const *scalars,
   run_compose_windows(buffers.bit_sums.data(), buffers.window_sums.data(),
                       bits_per_slice, flat_num_windows, cuda_stream, recorder);
 
+  fq32_affine_g1_t *final_results_device = results_device == nullptr
+                                               ? buffers.results_device.data()
+                                               : results_device;
   recorder.time(msm_stage::final_accumulation, [&]() {
     final_fq32_xyzz_accumulation_batched_kernel<<<1, batch_size, 0,
                                                   cuda_stream>>>(
-        buffers.window_sums.data(), buffers.results_device.data(),
-        bits_per_slice, cfg.active_num_windows, cfg.final_remainder,
-        batch_size);
+        buffers.window_sums.data(), final_results_device, bits_per_slice,
+        cfg.active_num_windows, cfg.final_remainder, batch_size);
     check_cuda(cudaGetLastError(),
                "final_fq32_xyzz_accumulation_batched_kernel launch");
   });
 
-  recorder.time(msm_stage::d2h_result, [&]() {
-    copy_device_to_host(results_host, buffers.results_device.data(),
-                        sizeof(fq32_affine_g1_t) * batch_size, stream);
-  });
+  if (results_device == nullptr) {
+    recorder.time(msm_stage::d2h_result, [&]() {
+      copy_device_to_host(results_host, buffers.results_device.data(),
+                          sizeof(fq32_affine_g1_t) * batch_size, stream);
+    });
+  }
   context.sync();
   recorder.stop();
   const auto cleanup_start = HostClock::now();
@@ -204,8 +220,9 @@ void bucket_pippenger_msm_fq32(const host_fr_montgomery_t *scalars,
                                const MsmRawOptions &options,
                                fq32_affine_g1_t *result_host) {
   NoopMsmRecorder recorder;
-  bucket_pippenger_impl(&scalars, num_scalars, /*batch_size=*/1,
-                        point_start_index, options, result_host, recorder);
+  bucket_pippenger_impl(&scalars, nullptr, num_scalars, /*batch_size=*/1,
+                        point_start_index, options, result_host, nullptr,
+                        recorder);
 }
 
 void bucket_pippenger_msm_profiled_fq32(const host_fr_montgomery_t *scalars,
@@ -215,8 +232,9 @@ void bucket_pippenger_msm_profiled_fq32(const host_fr_montgomery_t *scalars,
                                         fq32_affine_g1_t *result_host,
                                         msm_profile *profile) {
   ProfileMsmRecorder recorder(profile);
-  bucket_pippenger_impl(&scalars, num_scalars, /*batch_size=*/1,
-                        point_start_index, options, result_host, recorder);
+  bucket_pippenger_impl(&scalars, nullptr, num_scalars, /*batch_size=*/1,
+                        point_start_index, options, result_host, nullptr,
+                        recorder);
 }
 
 void bucket_pippenger_batch_msm_fq32(const host_fr_montgomery_t *const *scalars,
@@ -226,8 +244,9 @@ void bucket_pippenger_batch_msm_fq32(const host_fr_montgomery_t *const *scalars,
                                      const MsmRawOptions &options,
                                      fq32_affine_g1_t *results_host) {
   NoopMsmRecorder recorder;
-  bucket_pippenger_impl(scalars, num_scalars_per_msm, batch_size,
-                        point_start_index, options, results_host, recorder);
+  bucket_pippenger_impl(scalars, nullptr, num_scalars_per_msm, batch_size,
+                        point_start_index, options, results_host, nullptr,
+                        recorder);
 }
 
 void bucket_pippenger_batch_msm_profiled_fq32(
@@ -236,8 +255,20 @@ void bucket_pippenger_batch_msm_profiled_fq32(
     const size_t point_start_index, const MsmRawOptions &options,
     fq32_affine_g1_t *results_host, msm_profile *profile) {
   ProfileMsmRecorder recorder(profile);
-  bucket_pippenger_impl(scalars, num_scalars_per_msm, batch_size,
-                        point_start_index, options, results_host, recorder);
+  bucket_pippenger_impl(scalars, nullptr, num_scalars_per_msm, batch_size,
+                        point_start_index, options, results_host, nullptr,
+                        recorder);
+}
+
+void bucket_pippenger_batch_msm_device_profiled_fq32(
+    const host_fr_montgomery_t *device_scalars,
+    const size_t num_scalars_per_msm, const uint32_t batch_size,
+    const size_t point_start_index, const MsmRawOptions &options,
+    fq32_affine_g1_t *results_device, msm_profile *profile) {
+  ProfileMsmRecorder recorder(profile);
+  bucket_pippenger_impl(nullptr, device_scalars, num_scalars_per_msm,
+                        batch_size, point_start_index, options, nullptr,
+                        results_device, recorder);
 }
 
 } // namespace

@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <string>
@@ -27,6 +28,7 @@ using Commitment = Curve::AffineElement;
 struct Options {
   std::string mode = "all";
   std::string output_path = "/tmp/bb_gpu_msm_external_bench.jsonl";
+  std::string memory_placement = "host";
   int min_log = 10;
   int max_log = 24;
   int log_step = 2;
@@ -34,6 +36,7 @@ struct Options {
   int batch_size = 32;
   int repeats = 5;
   int c = 0;
+  uint32_t bb_max_fused_batch_size = 16;
   uint64_t seed = 0x8b1f2a77d3c45e91ULL;
   std::vector<uint32_t> precompute_factors = {1, 4, 8};
 };
@@ -51,15 +54,16 @@ struct OwnedCpuInput {
 };
 
 struct TimedRun {
-  double setup_ms = 0.0;
-  double precompute_ms = 0.0;
-  double msm_e2e_ms = 0.0;
-  double backend_call_ms = 0.0;
-  double device_event_ms = 0.0;
-  double gpu_total_ms = 0.0;
+  double setup_wall_ms = 0.0;
+  double precompute_wall_ms = 0.0;
+  std::optional<double> precompute_device_ms;
+  double outer_wall_ms = 0.0;
+  double backend_wall_ms = 0.0;
+  std::optional<double> device_ms;
   double backend_host_preamble_ms = 0.0;
   double backend_host_cleanup_ms = 0.0;
   double backend_host_total_ms = 0.0;
+  std::string memory_placement = "host";
   uint32_t c = 0;
   uint64_t large_bucket_count = 0;
   uint64_t large_bucket_point_count = 0;
@@ -68,6 +72,8 @@ struct TimedRun {
   uint32_t large_bucket_threshold = 0;
   uint32_t large_bucket_mode = 0;
   std::string result;
+
+  double comparison_ms() const { return device_ms.value_or(backend_wall_ms); }
 };
 
 class HostTimer {
@@ -145,14 +151,17 @@ inline Options parse_options(const int argc, char **argv) {
   if (has_arg(argc, argv, "--help")) {
     fail("usage: runner [--mode single|batch|all] [--output file] [--min-log "
          "N] [--max-log N] "
+         "[--memory-placement host|device] "
          "[--log-step N] [--factors 1,4,8] [--repeats N] [--batch-log N] "
          "[--batch-size N] [--c N] "
-         "[--seed N]");
+         "[--bb-max-fused-batch-size N] [--seed N]");
   }
 
   Options options;
   options.mode = read_arg(argc, argv, "--mode", options.mode);
   options.output_path = read_arg(argc, argv, "--output", options.output_path);
+  options.memory_placement =
+      read_arg(argc, argv, "--memory-placement", options.memory_placement);
   options.min_log = read_int_arg(argc, argv, "--min-log", options.min_log);
   options.max_log = read_int_arg(argc, argv, "--max-log", options.max_log);
   options.log_step = read_int_arg(argc, argv, "--log-step", options.log_step);
@@ -162,6 +171,9 @@ inline Options parse_options(const int argc, char **argv) {
       read_int_arg(argc, argv, "--batch-size", options.batch_size);
   options.repeats = read_int_arg(argc, argv, "--repeats", options.repeats);
   options.c = read_int_arg(argc, argv, "--c", options.c);
+  options.bb_max_fused_batch_size = static_cast<uint32_t>(
+      read_int_arg(argc, argv, "--bb-max-fused-batch-size",
+                   static_cast<int>(options.bb_max_fused_batch_size)));
   options.seed = read_u64_arg(argc, argv, "--seed", options.seed);
   options.precompute_factors =
       parse_factors(read_arg(argc, argv, "--factors", "1,4,8"));
@@ -170,12 +182,19 @@ inline Options parse_options(const int argc, char **argv) {
       options.mode != "all") {
     fail("--mode must be one of single, batch, all");
   }
+  if (options.memory_placement != "host" &&
+      options.memory_placement != "device") {
+    fail("--memory-placement must be one of host, device");
+  }
   if (options.min_log < 0 || options.max_log < options.min_log ||
       options.log_step <= 0 || options.repeats <= 0) {
     fail("invalid benchmark range or repeat count");
   }
   if (options.batch_size <= 0) {
     fail("--batch-size must be positive");
+  }
+  if (options.bb_max_fused_batch_size == 0) {
+    fail("--bb-max-fused-batch-size must be positive");
   }
   return options;
 }
@@ -293,6 +312,15 @@ inline std::string join_result_ids(const std::vector<std::string> &results) {
   return joined;
 }
 
+inline void write_json_optional(std::ofstream &out,
+                                const std::optional<double> &value) {
+  if (value.has_value()) {
+    out << *value;
+  } else {
+    out << "null";
+  }
+}
+
 inline std::string json_escape(const std::string &value) {
   std::string escaped;
   escaped.reserve(value.size());
@@ -324,6 +352,7 @@ inline void write_record(std::ofstream &out, const std::string &implementation,
   out << "{"
       << "\"implementation\":\"" << json_escape(implementation) << "\","
       << "\"mode\":\"" << mode << "\","
+      << "\"memory_placement\":\"" << json_escape(run.memory_placement) << "\","
       << "\"log_num_points\":" << log_num_points << ","
       << "\"num_points\":" << num_points << ","
       << "\"batch_size\":" << batch_size << ","
@@ -331,17 +360,22 @@ inline void write_record(std::ofstream &out, const std::string &implementation,
       << "\"repeat\":" << repeat << ","
       << "\"seed\":" << seed << ","
       << "\"c\":" << run.c << ","
-      << "\"setup_ms\":" << run.setup_ms << ","
-      << "\"precompute_ms\":" << run.precompute_ms << ","
-      << "\"msm_e2e_ms\":" << run.msm_e2e_ms << ","
-      << "\"backend_call_ms\":" << run.backend_call_ms << ","
-      << "\"device_event_ms\":" << run.device_event_ms << ","
-      << "\"gpu_total_ms\":" << run.gpu_total_ms << ","
+      << "\"setup_wall_ms\":" << run.setup_wall_ms << ","
+      << "\"precompute_wall_ms\":" << run.precompute_wall_ms << ","
+      << "\"precompute_device_ms\":";
+  write_json_optional(out, run.precompute_device_ms);
+  out << ","
+      << "\"outer_wall_ms\":" << run.outer_wall_ms << ","
+      << "\"backend_wall_ms\":" << run.backend_wall_ms << ","
+      << "\"device_ms\":";
+  write_json_optional(out, run.device_ms);
+  out << ","
+      << "\"comparison_ms\":" << run.comparison_ms() << ","
       << "\"backend_host_preamble_ms\":" << run.backend_host_preamble_ms << ","
       << "\"backend_host_cleanup_ms\":" << run.backend_host_cleanup_ms << ","
       << "\"backend_host_total_ms\":" << run.backend_host_total_ms << ","
-      << "\"per_msm_ms\":" << run.gpu_total_ms / static_cast<double>(batch_size)
-      << ","
+      << "\"per_msm_ms\":"
+      << run.comparison_ms() / static_cast<double>(batch_size) << ","
       << "\"large_bucket_count\":" << run.large_bucket_count << ","
       << "\"large_bucket_point_count\":" << run.large_bucket_point_count << ","
       << "\"large_bucket_chunks\":" << run.large_bucket_chunk_count << ","
