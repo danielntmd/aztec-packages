@@ -1,4 +1,4 @@
-#include "barretenberg/gpu/msm/msm_heuristics.hpp"
+#include "msm/internal/msm_heuristics.hpp"
 
 #ifdef BB_GPU_NATIVE
 

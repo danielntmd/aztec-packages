@@ -1,19 +1,19 @@
 void msm_raw_fq32(const host_fr_montgomery_t *scalars, const size_t num_scalars,
-                  const size_t point_start_index, const uint32_t bits_per_slice,
+                  const size_t point_start_index, const MsmRawOptions &options,
                   fq32_affine_g1_t *result_host) {
   if (num_scalars == 0) {
     *result_host = fq32_affine_infinity();
     return;
   }
 
-  bucket_pippenger_msm_fq32(scalars, num_scalars, point_start_index,
-                            bits_per_slice, result_host);
+  bucket_pippenger_msm_fq32(scalars, num_scalars, point_start_index, options,
+                            result_host);
 }
 
 void msm_raw_profiled_fq32(const host_fr_montgomery_t *scalars,
                            const size_t num_scalars,
                            const size_t point_start_index,
-                           const uint32_t bits_per_slice,
+                           const MsmRawOptions &options,
                            fq32_affine_g1_t *result_host,
                            msm_profile *profile) {
   if (num_scalars == 0) {
@@ -25,14 +25,14 @@ void msm_raw_profiled_fq32(const host_fr_montgomery_t *scalars,
   }
 
   bucket_pippenger_msm_profiled_fq32(scalars, num_scalars, point_start_index,
-                                     bits_per_slice, result_host, profile);
+                                     options, result_host, profile);
 }
 
 void msm_raw_batch_fq32(const host_fr_montgomery_t *const *scalars,
                         const size_t num_scalars_per_msm,
                         const uint32_t batch_size,
                         const size_t point_start_index,
-                        const uint32_t bits_per_slice,
+                        const MsmRawOptions &options,
                         fq32_affine_g1_t *results_host) {
   if (batch_size == 0 || num_scalars_per_msm == 0) {
     for (uint32_t i = 0; i < batch_size; ++i) {
@@ -42,15 +42,14 @@ void msm_raw_batch_fq32(const host_fr_montgomery_t *const *scalars,
   }
 
   bucket_pippenger_batch_msm_fq32(scalars, num_scalars_per_msm, batch_size,
-                                  point_start_index, bits_per_slice,
-                                  results_host);
+                                  point_start_index, options, results_host);
 }
 
 void msm_raw_batch_profiled_fq32(const host_fr_montgomery_t *const *scalars,
                                  const size_t num_scalars_per_msm,
                                  const uint32_t batch_size,
                                  const size_t point_start_index,
-                                 const uint32_t bits_per_slice,
+                                 const MsmRawOptions &options,
                                  fq32_affine_g1_t *results_host,
                                  msm_profile *profile) {
   if (batch_size == 0 || num_scalars_per_msm == 0) {
@@ -63,29 +62,7 @@ void msm_raw_batch_profiled_fq32(const host_fr_montgomery_t *const *scalars,
     return;
   }
 
-  bucket_pippenger_batch_msm_profiled_fq32(
-      scalars, num_scalars_per_msm, batch_size, point_start_index,
-      bits_per_slice, results_host, profile);
-}
-
-void set_msm_precompute_factor(const uint32_t factor) {
-  check_condition(is_valid_msm_precompute_factor(factor),
-                  "bb::gpu::bn254::msm: precompute factor must be in [1, 16]");
-  if (msm_precompute_factor_ref() != factor) {
-    bb::gpu::default_msm_context().release_shifted_srs();
-    msm_precompute_factor_ref() = factor;
-  }
-}
-
-uint32_t get_msm_precompute_factor() { return current_msm_precompute_factor(); }
-
-void set_msm_precompute_cache_min_length(const size_t length) {
-  if (msm_precompute_cache_min_length_ref() != length) {
-    bb::gpu::default_msm_context().release_shifted_srs();
-    msm_precompute_cache_min_length_ref() = length;
-  }
-}
-
-size_t get_msm_precompute_cache_min_length() {
-  return current_msm_precompute_cache_min_length();
+  bucket_pippenger_batch_msm_profiled_fq32(scalars, num_scalars_per_msm,
+                                           batch_size, point_start_index,
+                                           options, results_host, profile);
 }

@@ -26,7 +26,7 @@ __global__ void build_large_bucket_chunk_jobs_kernel(
     const int *bucket_offsets, const int *large_bucket_chunk_counts,
     const int *large_bucket_chunk_offsets,
     const int *large_bucket_full_chunk_counts,
-    const int *large_bucket_full_chunk_offsets, int *chunk_bucket_job_indices,
+    const int *large_bucket_full_chunk_offsets,
     int *exec_chunk_partial_indices, int *exec_chunk_point_offsets,
     int *exec_chunk_point_counts, const int num_active_buckets,
     const int total_full_chunks, const uint32_t chunk_size) {
@@ -50,7 +50,6 @@ __global__ void build_large_bucket_chunk_jobs_kernel(
     const int local_offset = chunk * static_cast<int>(chunk_size);
     const int partial_idx = chunk_offset + chunk;
     const int exec_idx = full_chunk_offset + chunk;
-    chunk_bucket_job_indices[partial_idx] = job_idx;
     exec_chunk_partial_indices[exec_idx] = partial_idx;
     exec_chunk_point_offsets[exec_idx] = bucket_start + local_offset;
     exec_chunk_point_counts[exec_idx] = static_cast<int>(chunk_size);
@@ -60,7 +59,6 @@ __global__ void build_large_bucket_chunk_jobs_kernel(
     const int partial_idx = chunk_offset + full_chunk_count;
     const int exec_idx = total_full_chunks + tail_prefix;
     const int local_offset = full_chunk_count * static_cast<int>(chunk_size);
-    chunk_bucket_job_indices[partial_idx] = job_idx;
     exec_chunk_partial_indices[exec_idx] = partial_idx;
     exec_chunk_point_offsets[exec_idx] = bucket_start + local_offset;
     exec_chunk_point_counts[exec_idx] = bucket_count - local_offset;

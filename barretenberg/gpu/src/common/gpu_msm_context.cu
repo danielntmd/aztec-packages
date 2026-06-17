@@ -1,16 +1,17 @@
 #ifdef BB_GPU_NATIVE
 
-#include "barretenberg/gpu/common/gpu_msm_context.hpp"
+#include "common/gpu_msm_context.hpp"
 
-#include "barretenberg/gpu/common/cuda_error.cuh"
+#include "barretenberg/gpu/common/cuda_error.hpp"
+#include "barretenberg/gpu/common/device_buffer.hpp"
 
 #include <cuda_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <limits>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace bb::gpu {
@@ -81,96 +82,33 @@ __global__ void shift_srs_layer_kernel(const bn254::fq32_affine_g1_t *src,
   dst[idx] = bn254::fq32_xyzz_to_affine(point);
 }
 
-[[noreturn]] void fail_shifted_srs_memory_check(
+std::string format_shifted_srs_memory_check_message(
     const size_t required_bytes, const size_t available_bytes,
     const size_t free_bytes, const size_t total_bytes, const size_t num_points,
     const uint32_t precompute_factor) {
-  std::fprintf(stderr,
-               "bb::gpu: shifted SRS allocation requires %zu bytes for %zu "
-               "points and precompute factor %u, but only %zu bytes are "
-               "available (%zu bytes free, %zu bytes total)\n",
-               required_bytes, num_points, precompute_factor, available_bytes,
-               free_bytes, total_bytes);
-  std::abort();
+  std::ostringstream os;
+  os << "shifted SRS allocation requires " << required_bytes << " bytes for "
+     << num_points << " points and precompute factor " << precompute_factor
+     << ", but only " << available_bytes << " bytes are available ("
+     << free_bytes << " bytes free, " << total_bytes << " bytes total)";
+  return os.str();
 }
 
 } // namespace
 
-void *device_malloc_bytes(const size_t bytes) {
-  if (bytes == 0) {
-    return nullptr;
-  }
-  void *ptr = nullptr;
-  check_cuda(cudaMalloc(&ptr, bytes), "cudaMalloc");
-  return ptr;
-}
-
-void device_free_bytes(void *ptr) noexcept {
-  if (ptr != nullptr) {
-    (void)cudaFree(ptr);
-  }
-}
-
-void copy_host_to_device(void *dst, const void *src, const size_t bytes,
-                         void *stream) {
-  if (bytes == 0) {
-    return;
-  }
-  check_cuda(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice,
-                             as_cuda_stream(stream)),
-             "cudaMemcpyAsync H2D");
-}
-
-void copy_device_to_host(void *dst, const void *src, const size_t bytes,
-                         void *stream) {
-  if (bytes == 0) {
-    return;
-  }
-  check_cuda(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost,
-                             as_cuda_stream(stream)),
-             "cudaMemcpyAsync D2H");
-}
-
-void device_synchronize(void *stream) {
-  check_cuda(cudaStreamSynchronize(as_cuda_stream(stream)),
-             "cudaStreamSynchronize");
-}
-
-CudaStream::CudaStream() : owned_(true) {
-  cudaStream_t created = nullptr;
-  check_cuda(cudaStreamCreate(&created), "cudaStreamCreate");
-  stream_ = created;
-}
-
-CudaStream::CudaStream(void *borrowed_stream)
-    : stream_(borrowed_stream), owned_(false) {}
-
-CudaStream::CudaStream(CudaStream &&other) noexcept
-    : stream_(std::exchange(other.stream_, nullptr)),
-      owned_(std::exchange(other.owned_, false)) {}
-
-CudaStream &CudaStream::operator=(CudaStream &&other) noexcept {
-  if (this != &other) {
-    if (owned_ && stream_ != nullptr) {
-      (void)cudaStreamDestroy(as_cuda_stream(stream_));
-    }
-    stream_ = std::exchange(other.stream_, nullptr);
-    owned_ = std::exchange(other.owned_, false);
-  }
-  return *this;
-}
-
-CudaStream::~CudaStream() {
-  if (owned_ && stream_ != nullptr) {
-    (void)cudaStreamDestroy(as_cuda_stream(stream_));
-  }
-}
-
-void CudaStream::sync() const { device_synchronize(stream_); }
-
 GpuMsmContext::GpuMsmContext(void *borrowed_stream)
     : stream_(borrowed_stream == nullptr ? CudaStream()
                                          : CudaStream(borrowed_stream)) {}
+
+void GpuMsmContext::clear_shifted_srs_state() noexcept {
+  shifted_srs_points_device_.reset();
+  shifted_srs_host_base_ = nullptr;
+  shifted_srs_point_start_index_ = 0;
+  shifted_srs_original_size_ = 0;
+  shifted_srs_size_ = 0;
+  shifted_srs_shift_bits_ = 0;
+  shifted_srs_precompute_factor_ = 1;
+}
 
 void GpuMsmContext::ensure_srs_uploaded(
     const bn254::host_affine_g1_montgomery_t *srs_points,
@@ -189,34 +127,22 @@ void GpuMsmContext::ensure_srs_uploaded(
   }
   srs_host_base_ = srs_points;
   srs_size_ = num_points;
-  shifted_srs_points_device_.reset();
-  shifted_srs_host_base_ = nullptr;
-  shifted_srs_point_start_index_ = 0;
-  shifted_srs_original_size_ = 0;
-  shifted_srs_size_ = 0;
-  shifted_srs_shift_bits_ = 0;
-  shifted_srs_precompute_factor_ = 1;
+  clear_shifted_srs_state();
 }
 
 void GpuMsmContext::ensure_shifted_srs_uploaded(
     const size_t point_start_index, const size_t num_points,
     const uint32_t shift_bits, const uint32_t precompute_factor) {
   if (precompute_factor <= 1) {
-    shifted_srs_points_device_.reset();
-    shifted_srs_host_base_ = nullptr;
-    shifted_srs_point_start_index_ = 0;
-    shifted_srs_original_size_ = 0;
-    shifted_srs_size_ = 0;
-    shifted_srs_shift_bits_ = 0;
-    shifted_srs_precompute_factor_ = 1;
+    clear_shifted_srs_state();
     return;
   }
 
   check_condition(srs_host_base_ != nullptr,
-                  "bb::gpu: SRS has not been uploaded");
+                  "SRS has not been uploaded");
   check_condition(point_start_index <= srs_size_ &&
                       num_points <= srs_size_ - point_start_index,
-                  "bb::gpu: shifted SRS span exceeds cached SRS");
+                  "shifted SRS span exceeds cached SRS");
   if (has_shifted_srs(point_start_index, num_points, shift_bits,
                       precompute_factor)) {
     return;
@@ -224,12 +150,12 @@ void GpuMsmContext::ensure_shifted_srs_uploaded(
 
   check_condition(num_points <= std::numeric_limits<size_t>::max() /
                                     static_cast<size_t>(precompute_factor),
-                  "bb::gpu: shifted SRS size exceeds size_t range");
+                  "shifted SRS size exceeds size_t range");
   const size_t shifted_size =
       num_points * static_cast<size_t>(precompute_factor);
   check_condition(shifted_size <= std::numeric_limits<size_t>::max() /
                                       sizeof(bn254::fq32_affine_g1_t),
-                  "bb::gpu: shifted SRS byte size exceeds size_t range");
+                  "shifted SRS byte size exceeds size_t range");
   const size_t required_bytes = shifted_size * sizeof(bn254::fq32_affine_g1_t);
   if (required_bytes > shifted_srs_device_bytes()) {
     size_t free_bytes = 0;
@@ -237,10 +163,12 @@ void GpuMsmContext::ensure_shifted_srs_uploaded(
     check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "cudaMemGetInfo");
     const size_t reusable_shifted_srs_bytes = shifted_srs_device_bytes();
     const size_t available_bytes = free_bytes + reusable_shifted_srs_bytes;
-    if (required_bytes > available_bytes) {
-      fail_shifted_srs_memory_check(required_bytes, available_bytes, free_bytes,
-                                    total_bytes, num_points, precompute_factor);
-    }
+    const std::string shifted_srs_message =
+        format_shifted_srs_memory_check_message(
+            required_bytes, available_bytes, free_bytes, total_bytes,
+            num_points, precompute_factor);
+    check_condition(required_bytes <= available_bytes,
+                    shifted_srs_message.c_str());
   }
   shifted_srs_points_device_.resize(shifted_size);
   shifted_srs_size_ = shifted_size;
@@ -292,19 +220,13 @@ bool GpuMsmContext::has_shifted_srs(const size_t point_start_index,
 size_t
 GpuMsmContext::shifted_srs_point_offset(const size_t point_start_index) const {
   check_condition(point_start_index >= shifted_srs_point_start_index_,
-                  "bb::gpu: shifted SRS request starts before cached span");
+                  "shifted SRS request starts before cached span");
   return point_start_index - shifted_srs_point_start_index_;
 }
 
 void GpuMsmContext::release_shifted_srs() {
   sync();
-  shifted_srs_points_device_.reset();
-  shifted_srs_host_base_ = nullptr;
-  shifted_srs_point_start_index_ = 0;
-  shifted_srs_original_size_ = 0;
-  shifted_srs_size_ = 0;
-  shifted_srs_shift_bits_ = 0;
-  shifted_srs_precompute_factor_ = 1;
+  clear_shifted_srs_state();
 }
 
 void GpuMsmContext::release_msm_buffers() {
@@ -316,41 +238,35 @@ size_t
 GpuMsmContext::get_srs_offset(const bn254::host_affine_g1_montgomery_t *points,
                               const size_t num_points) const {
   check_condition(srs_host_base_ != nullptr,
-                  "bb::gpu: SRS has not been uploaded");
+                  "SRS has not been uploaded");
   const auto base = reinterpret_cast<uintptr_t>(srs_host_base_);
   const auto span_start = reinterpret_cast<uintptr_t>(points);
   const auto span_bytes =
       num_points * sizeof(bn254::host_affine_g1_montgomery_t);
   const auto srs_bytes = srs_size_ * sizeof(bn254::host_affine_g1_montgomery_t);
   check_condition(span_start >= base,
-                  "bb::gpu: point span is not backed by the cached SRS");
+                  "point span is not backed by the cached SRS");
   check_condition(span_start - base <= srs_bytes,
-                  "bb::gpu: point span starts past the cached SRS");
+                  "point span starts past the cached SRS");
   check_condition(
       (span_start - base) % sizeof(bn254::host_affine_g1_montgomery_t) == 0,
-      "bb::gpu: point span is not aligned with the cached SRS");
+      "point span is not aligned with the cached SRS");
   const size_t offset = static_cast<size_t>(
       (span_start - base) / sizeof(bn254::host_affine_g1_montgomery_t));
   check_condition(num_points <= srs_size_ - offset,
-                  "bb::gpu: point span exceeds the cached SRS");
+                  "point span exceeds the cached SRS");
   check_condition(span_bytes <= srs_bytes - (span_start - base),
-                  "bb::gpu: point span byte range exceeds the cached SRS");
+                  "point span byte range exceeds the cached SRS");
   return offset;
 }
 
 void GpuMsmContext::reset() {
   sync();
   srs_points_device_.reset();
-  shifted_srs_points_device_.reset();
   msm_buffers_.release();
   srs_host_base_ = nullptr;
   srs_size_ = 0;
-  shifted_srs_host_base_ = nullptr;
-  shifted_srs_point_start_index_ = 0;
-  shifted_srs_original_size_ = 0;
-  shifted_srs_size_ = 0;
-  shifted_srs_shift_bits_ = 0;
-  shifted_srs_precompute_factor_ = 1;
+  clear_shifted_srs_state();
 }
 
 GpuMsmContext &default_msm_context() {

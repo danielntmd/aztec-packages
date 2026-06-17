@@ -2,7 +2,7 @@
 
 #ifdef BB_GPU_NATIVE
 
-#include "barretenberg/gpu/common/cuda_error.cuh"
+#include "barretenberg/gpu/common/cuda_error.hpp"
 #include "barretenberg/gpu/common/device_span.hpp"
 
 #include <cub/cub.cuh>
@@ -13,12 +13,19 @@
 namespace bb::gpu {
 
 template <typename CubCall>
-void run_cub(DeviceSpan<std::byte> temp_storage, CubCall &&call, void *stream) {
+size_t cub_temp_bytes(CubCall &&call, void *stream) {
   size_t temp_bytes = 0;
   check_cuda(call(nullptr, temp_bytes, stream), "CUB temp-size query");
+  return temp_bytes;
+}
+
+template <typename CubCall>
+void run_cub(DeviceSpan<std::byte> temp_storage, CubCall &&call, void *stream) {
+  const size_t temp_bytes = cub_temp_bytes(call, stream);
   check_condition(temp_bytes <= temp_storage.size(),
                   "CUB temp storage exceeds MSM buffers");
-  check_cuda(call(temp_storage.data(), temp_bytes, stream), "CUB operation");
+  size_t temp_bytes_io = temp_bytes;
+  check_cuda(call(temp_storage.data(), temp_bytes_io, stream), "CUB operation");
 }
 
 template <typename KeyIn, typename KeyOut, typename ValueIn, typename ValueOut>

@@ -136,7 +136,7 @@ template <class Curve> class CommitmentKey {
 
 #ifdef BB_GPU_NATIVE
             if constexpr (gpu::commitment_key_msm_available<Curve>) {
-                auto results = gpu::commitment_key_batch_msm<Curve>(points_spans, scalar_spans, false);
+                auto results = gpu::commitment_key_batch_msm<Curve>(points_spans, scalar_spans);
                 commitments.insert(commitments.end(), results.begin(), results.end());
             } else
 #endif
