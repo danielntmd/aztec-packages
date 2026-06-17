@@ -98,7 +98,7 @@ TEST(GpuBn254, FrMontgomeryAndScalarSliceMatchCpu) {
   fr scalar_standard = scalar.from_montgomery_form_reduced();
   gpu_testing::expect_same_standard_scalar(output.from_montgomery, scalar);
   EXPECT_EQ(output.slice,
-            scalar_multiplication::MSM<curve::BN254>::get_scalar_slice(
+            scalar_multiplication::legacy::MSM<curve::BN254>::get_scalar_slice(
                 scalar_standard, round, slice_size));
 }
 
