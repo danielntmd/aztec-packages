@@ -3,7 +3,7 @@
 #ifdef BB_GPU_NATIVE
 
 #include "barretenberg/gpu/common/device_buffer.hpp"
-#include "barretenberg/gpu/common/gpu_msm_context.hpp"
+#include "common/gpu_msm_context.hpp"
 
 #include <cstring>
 #include <vector>

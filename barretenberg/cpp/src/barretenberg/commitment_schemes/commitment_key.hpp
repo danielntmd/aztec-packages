@@ -132,21 +132,17 @@ template <class Curve> class CommitmentKey {
 
 #ifdef BB_GPU_NATIVE
         if constexpr (gpu::commitment_key_msm_available<Curve>) {
-            const bool has_dedup_hints = std::any_of(
-                has_duplicates_hints.begin(), has_duplicates_hints.end(), [](uint8_t hint) { return hint != 0; });
-            if (!has_dedup_hints) {
-                std::vector<std::span<const Commitment>> points_spans;
-                std::vector<std::span<Fr>> raw_scalar_spans;
-                points_spans.reserve(polynomials.size());
-                raw_scalar_spans.reserve(polynomials.size());
+            std::vector<std::span<const Commitment>> points_spans;
+            std::vector<std::span<Fr>> raw_scalar_spans;
+            points_spans.reserve(polynomials.size());
+            raw_scalar_spans.reserve(polynomials.size());
 
-                for (auto& polynomial : polynomials) {
-                    points_spans.emplace_back(get_monomial_points().subspan(polynomial.start_index()));
-                    raw_scalar_spans.emplace_back(polynomial.coeffs());
-                }
-
-                return gpu::commitment_key_batch_msm<Curve>(points_spans, raw_scalar_spans, false);
+            for (auto& polynomial : polynomials) {
+                points_spans.emplace_back(get_monomial_points().subspan(polynomial.start_index()));
+                raw_scalar_spans.emplace_back(polynomial.coeffs());
             }
+
+            return gpu::commitment_key_batch_msm<Curve>(points_spans, raw_scalar_spans);
         }
 #endif
 

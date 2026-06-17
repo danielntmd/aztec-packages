@@ -2,7 +2,7 @@
 
 #include "bn254_test_kernels.hpp"
 
-#include "barretenberg/gpu/common/cuda_error.cuh"
+#include "barretenberg/gpu/common/cuda_error.hpp"
 
 #include <cuda_runtime.h>
 

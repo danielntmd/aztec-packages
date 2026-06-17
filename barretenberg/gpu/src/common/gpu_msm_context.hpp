@@ -4,7 +4,7 @@
 
 #include "barretenberg/gpu/common/device_buffer.hpp"
 #include "barretenberg/gpu/curves/bn254/bn254.cuh"
-#include "barretenberg/gpu/msm/msm_buffers.hpp"
+#include "msm/internal/msm_buffers.hpp"
 
 #include <cstddef>
 #include <span>
@@ -68,6 +68,8 @@ public:
   }
 
 private:
+  void clear_shifted_srs_state() noexcept;
+
   CudaStream stream_;
   DeviceBuffer<bn254::fq32_affine_g1_t> srs_points_device_;
   DeviceBuffer<bn254::fq32_affine_g1_t> shifted_srs_points_device_;

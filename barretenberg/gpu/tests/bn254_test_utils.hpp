@@ -4,10 +4,12 @@
 
 #include "barretenberg/ecc/curves/bn254/bn254.hpp"
 #include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
-#include "barretenberg/gpu/common/gpu_msm_context.hpp"
-#include "barretenberg/gpu/msm/msm.hpp"
-#include "barretenberg/gpu/msm/msm_raw.cuh"
+#include "barretenberg/numeric/random/engine.hpp"
 #include "bn254_test_kernels.hpp"
+#include "common/gpu_msm_context.hpp"
+#include "msm/internal/bn254_msm_helpers.hpp"
+#include "msm/internal/msm_profile.hpp"
+#include "msm/internal/msm_raw.hpp"
 
 #include <gtest/gtest.h>
 
@@ -25,39 +27,6 @@
   } while (false)
 
 namespace bb::gpu::bn254::testing {
-
-class ScopedMsmPrecomputeFactor {
-public:
-  explicit ScopedMsmPrecomputeFactor(const uint32_t factor) {
-    bb::gpu::bn254::set_msm_precompute_factor(factor);
-  }
-
-  ScopedMsmPrecomputeFactor(const ScopedMsmPrecomputeFactor &) = delete;
-  ScopedMsmPrecomputeFactor &
-  operator=(const ScopedMsmPrecomputeFactor &) = delete;
-
-  ~ScopedMsmPrecomputeFactor() { bb::gpu::bn254::set_msm_precompute_factor(4); }
-};
-
-class ScopedMsmPrecomputeCacheMinLength {
-public:
-  explicit ScopedMsmPrecomputeCacheMinLength(const size_t length)
-      : previous_(bb::gpu::bn254::get_msm_precompute_cache_min_length()) {
-    bb::gpu::bn254::set_msm_precompute_cache_min_length(length);
-  }
-
-  ScopedMsmPrecomputeCacheMinLength(const ScopedMsmPrecomputeCacheMinLength &) =
-      delete;
-  ScopedMsmPrecomputeCacheMinLength &
-  operator=(const ScopedMsmPrecomputeCacheMinLength &) = delete;
-
-  ~ScopedMsmPrecomputeCacheMinLength() {
-    bb::gpu::bn254::set_msm_precompute_cache_min_length(previous_);
-  }
-
-private:
-  size_t previous_;
-};
 
 inline fq32_t to_fq32_standard(const fq &value) {
   const fq standard = value.from_montgomery_form_reduced();
@@ -107,32 +76,96 @@ upload_test_srs(const std::vector<curve::BN254::AffineElement> &points) {
   bb::gpu::bn254::init(points);
 }
 
-inline void expect_same_raw(const host_fr_montgomery_t &actual,
-                            const fr &expected) {
-  EXPECT_EQ(actual.data[0], expected.data[0]);
-  EXPECT_EQ(actual.data[1], expected.data[1]);
-  EXPECT_EQ(actual.data[2], expected.data[2]);
-  EXPECT_EQ(actual.data[3], expected.data[3]);
+inline std::vector<curve::BN254::AffineElement> random_points(const size_t n) {
+  auto &engine = bb::numeric::get_debug_randomness();
+  std::vector<curve::BN254::AffineElement> points;
+  points.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
+  }
+  return points;
+}
+
+// Generate N scalars where index `i` is zero when `zero_stride != 0` and
+// `i % zero_stride == 0`. Otherwise random.
+inline std::vector<fr> random_scalars(const size_t n,
+                                      const size_t zero_stride = 0) {
+  auto &engine = bb::numeric::get_debug_randomness();
+  std::vector<fr> scalars;
+  scalars.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    const bool is_zero = zero_stride != 0 && (i % zero_stride) == 0;
+    scalars.emplace_back(is_zero ? fr::zero() : fr::random_element(&engine));
+  }
+  return scalars;
+}
+
+// Generate batch_size × num_points scalars; entry (k, i) is zero when
+// `zero_stride != 0` and `(k * k_step + i) % zero_stride == 0`.
+inline std::vector<std::vector<fr>>
+random_batched_scalars(const size_t batch_size, const size_t num_points,
+                       const size_t zero_stride = 0, const size_t k_step = 1) {
+  auto &engine = bb::numeric::get_debug_randomness();
+  std::vector<std::vector<fr>> per_msm_scalars(batch_size);
+  for (size_t k = 0; k < batch_size; ++k) {
+    per_msm_scalars[k].reserve(num_points);
+    for (size_t i = 0; i < num_points; ++i) {
+      const bool is_zero =
+          zero_stride != 0 && ((k * k_step + i) % zero_stride) == 0;
+      per_msm_scalars[k].emplace_back(is_zero ? fr::zero()
+                                              : fr::random_element(&engine));
+    }
+  }
+  return per_msm_scalars;
+}
+
+inline PolynomialSpan<const fr> polynomial_span(const std::vector<fr> &scalars,
+                                                const size_t start_index = 0) {
+  return PolynomialSpan<const fr>{
+      start_index, std::span<const fr>(scalars.data(), scalars.size())};
+}
+
+inline size_t
+srs_offset_for(const std::vector<curve::BN254::AffineElement> &points) {
+  return default_msm_context().get_srs_offset(
+      reinterpret_cast<const host_affine_g1_montgomery_t *>(points.data()),
+      points.size());
+}
+
+struct ProfiledMsm {
+  fq32_affine_g1_t result{};
+  msm_profile profile{};
+};
+
+inline ProfiledMsm run_profiled_msm(std::span<const fr> scalars,
+                                    const size_t point_start_index,
+                                    const MsmRawOptions &options) {
+  ProfiledMsm out{};
+  msm_raw_profiled_fq32(
+      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
+      scalars.size(), point_start_index, options, &out.result, &out.profile);
+  return out;
+}
+
+template <typename Limbs32, typename CpuField>
+inline void expect_same_standard_limbs(const Limbs32 &actual,
+                                       const CpuField &expected) {
+  const CpuField standard = expected.from_montgomery_form_reduced();
+  for (size_t i = 0; i < 4; ++i) {
+    EXPECT_EQ(actual.limbs[2 * i], static_cast<uint32_t>(standard.data[i]));
+    EXPECT_EQ(actual.limbs[2 * i + 1],
+              static_cast<uint32_t>(standard.data[i] >> 32));
+  }
 }
 
 inline void expect_same_standard_scalar(const fr32_t &actual,
                                         const fr &expected) {
-  const fr standard = expected.from_montgomery_form_reduced();
-  for (size_t i = 0; i < 4; ++i) {
-    EXPECT_EQ(actual.limbs[2 * i], static_cast<uint32_t>(standard.data[i]));
-    EXPECT_EQ(actual.limbs[2 * i + 1],
-              static_cast<uint32_t>(standard.data[i] >> 32));
-  }
+  expect_same_standard_limbs(actual, expected);
 }
 
 inline void expect_same_standard_field(const fq32_t &actual,
                                        const fq &expected) {
-  const fq standard = expected.from_montgomery_form_reduced();
-  for (size_t i = 0; i < 4; ++i) {
-    EXPECT_EQ(actual.limbs[2 * i], static_cast<uint32_t>(standard.data[i]));
-    EXPECT_EQ(actual.limbs[2 * i + 1],
-              static_cast<uint32_t>(standard.data[i] >> 32));
-  }
+  expect_same_standard_limbs(actual, expected);
 }
 
 inline void expect_fq32_zero(const fq32_t &actual) {

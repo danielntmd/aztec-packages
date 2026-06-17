@@ -9,23 +9,24 @@
 
 namespace bb::gpu::bn254 {
 
+struct MsmRawOptions {
+  uint32_t bits_per_slice;
+  uint32_t precompute_factor;
+  size_t precompute_cache_min_length;
+};
+
 // Raw MSM entry point for callers that have already uploaded an SRS into the
 // default MSM context. point_start_index is an offset into that cached SRS.
 void msm_raw_fq32(const host_fr_montgomery_t *scalars, size_t num_scalars,
-                  size_t point_start_index, uint32_t bits_per_slice,
+                  size_t point_start_index, const MsmRawOptions &options,
                   fq32_affine_g1_t *result);
 
 // Fused batched MSM entry point: K MSMs sharing one SRS slice, uniform length.
 // batch_size must satisfy is_valid_fused_batch_size().
 void msm_raw_batch_fq32(const host_fr_montgomery_t *const *scalars,
                         size_t num_scalars_per_msm, uint32_t batch_size,
-                        size_t point_start_index, uint32_t bits_per_slice,
+                        size_t point_start_index, const MsmRawOptions &options,
                         fq32_affine_g1_t *results_host);
-
-void set_msm_precompute_factor(uint32_t factor);
-uint32_t get_msm_precompute_factor();
-void set_msm_precompute_cache_min_length(size_t length);
-size_t get_msm_precompute_cache_min_length();
 
 } // namespace bb::gpu::bn254
 

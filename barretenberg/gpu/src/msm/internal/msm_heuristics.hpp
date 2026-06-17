@@ -111,8 +111,9 @@ inline size_t estimate_msm_cost(const size_t num_points,
   return rounds * (num_points + buckets * GPU_MSM_BUCKET_ACCUMULATION_COST);
 }
 
-inline uint32_t get_auto_bits_per_slice(const size_t num_points,
-                                        const uint32_t precompute_factor) {
+template <typename IsPathological>
+inline uint32_t auto_bits_per_slice_impl(const size_t num_points,
+                                         IsPathological is_pathological) {
   uint32_t best_bits = 1;
   size_t best_cost = estimate_msm_cost(num_points, 1);
   uint32_t best_non_pathological_bits = 0;
@@ -124,10 +125,8 @@ inline uint32_t get_auto_bits_per_slice(const size_t num_points,
       best_cost = cost;
       best_bits = bits;
     }
-    if (!has_pathological_bucket_pressure(num_points, bits,
-                                          precompute_factor) &&
-        (best_non_pathological_bits == 0 ||
-         cost < best_non_pathological_cost)) {
+    if (!is_pathological(bits) && (best_non_pathological_bits == 0 ||
+                                   cost < best_non_pathological_cost)) {
       best_non_pathological_bits = bits;
       best_non_pathological_cost = cost;
     }
@@ -135,6 +134,14 @@ inline uint32_t get_auto_bits_per_slice(const size_t num_points,
 
   return best_non_pathological_bits != 0 ? best_non_pathological_bits
                                          : best_bits;
+}
+
+inline uint32_t get_auto_bits_per_slice(const size_t num_points,
+                                        const uint32_t precompute_factor) {
+  return auto_bits_per_slice_impl(num_points, [&](const uint32_t bits) {
+    return has_pathological_bucket_pressure(num_points, bits,
+                                            precompute_factor);
+  });
 }
 
 inline uint32_t get_auto_bits_per_slice(const size_t num_points) {
@@ -193,28 +200,10 @@ inline uint32_t
 get_auto_batched_bits_per_slice(const size_t num_points,
                                 const uint32_t batch_size,
                                 const uint32_t precompute_factor) {
-  uint32_t best_bits = 1;
-  size_t best_cost = estimate_batched_msm_cost(num_points, batch_size, 1);
-  uint32_t best_non_pathological_bits = 0;
-  size_t best_non_pathological_cost = 0;
-
-  for (uint32_t bits = 2; bits < GPU_MSM_MAX_SLICE_BITS; ++bits) {
-    const size_t cost = estimate_batched_msm_cost(num_points, batch_size, bits);
-    if (cost < best_cost) {
-      best_cost = cost;
-      best_bits = bits;
-    }
-    if (!has_pathological_batched_bucket_pressure(num_points, batch_size, bits,
-                                                  precompute_factor) &&
-        (best_non_pathological_bits == 0 ||
-         cost < best_non_pathological_cost)) {
-      best_non_pathological_bits = bits;
-      best_non_pathological_cost = cost;
-    }
-  }
-
-  return best_non_pathological_bits != 0 ? best_non_pathological_bits
-                                         : best_bits;
+  return auto_bits_per_slice_impl(num_points, [&](const uint32_t bits) {
+    return has_pathological_batched_bucket_pressure(num_points, batch_size,
+                                                    bits, precompute_factor);
+  });
 }
 
 inline uint32_t get_auto_batched_bits_per_slice(const size_t num_points,
