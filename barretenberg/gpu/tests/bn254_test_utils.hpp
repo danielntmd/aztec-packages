@@ -209,7 +209,7 @@ inline curve::BN254::AffineElement reference_msm_with_explicit_window(
     PolynomialSpan<const curve::BN254::ScalarField> scalars,
     const uint32_t bits_per_slice) {
   constexpr size_t NUM_BITS_IN_FIELD =
-      scalar_multiplication::MSM<curve::BN254>::NUM_BITS_IN_FIELD;
+      scalar_multiplication::legacy::MSM<curve::BN254>::NUM_BITS_IN_FIELD;
   const size_t num_windows =
       (NUM_BITS_IN_FIELD + bits_per_slice - 1) / bits_per_slice;
   const size_t num_buckets = size_t{1} << bits_per_slice;
@@ -229,7 +229,7 @@ inline curve::BN254::AffineElement reference_msm_with_explicit_window(
     std::fill(bucket_exists.begin(), bucket_exists.end(), false);
     for (size_t i = 0; i < standard_scalars.size(); ++i) {
       const uint32_t bucket =
-          scalar_multiplication::MSM<curve::BN254>::get_scalar_slice(
+          scalar_multiplication::legacy::MSM<curve::BN254>::get_scalar_slice(
               standard_scalars[i], round, bits_per_slice);
       if (bucket == 0) {
         continue;
