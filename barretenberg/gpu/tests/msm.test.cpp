@@ -3,12 +3,12 @@
 #ifdef BB_GPU_NATIVE
 
 #include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
+#include "barretenberg/gpu/backend.hpp"
 #include "barretenberg/gpu/commitment_schemes/commitment_key_msm.hpp"
-#include "barretenberg/gpu/common/gpu_msm_context.hpp"
-#include "barretenberg/gpu/msm/msm.hpp"
-#include "barretenberg/gpu/msm/msm_profile.cuh"
-#include "barretenberg/gpu/msm/msm_raw.cuh"
 #include "barretenberg/numeric/random/engine.hpp"
+#include "common/gpu_msm_context.hpp"
+#include "msm/internal/msm_profile.hpp"
+#include "msm/internal/msm_raw.hpp"
 
 #include <span>
 #include <sys/wait.h>
@@ -21,6 +21,17 @@ using namespace bb;
 using namespace bb::gpu;
 using namespace bb::gpu::bn254;
 namespace gpu_testing = bb::gpu::bn254::testing;
+
+MsmRawOptions
+raw_options(const uint32_t bits_per_slice, const uint32_t precompute_factor = 4,
+            const size_t precompute_cache_min_length =
+                bb::gpu::MsmConfig{}.precompute_cache_min_length) {
+  return MsmRawOptions{
+      .bits_per_slice = bits_per_slice,
+      .precompute_factor = precompute_factor,
+      .precompute_cache_min_length = precompute_cache_min_length,
+  };
+}
 
 template <typename Fn> void expect_child_exits_unsuccessfully(Fn &&fn) {
 #if defined(__unix__)
@@ -46,15 +57,14 @@ TEST(GpuBn254, MsmAllZeroAndEmptyReturnInfinity) {
   std::vector<curve::BN254::AffineElement> points(
       4, curve::BN254::Group::affine_one);
   gpu_testing::upload_test_srs(points);
-  std::vector<fr> empty_scalars;
-  EXPECT_EQ(bb::gpu::bn254::msm({0, std::span<const fr>(empty_scalars.data(),
-                                                        empty_scalars.size())},
+
+  const std::vector<fr> empty_scalars;
+  EXPECT_EQ(bb::gpu::bn254::msm(gpu_testing::polynomial_span(empty_scalars),
                                 points, 4),
             curve::BN254::AffineElement::infinity());
 
-  std::vector<fr> zero_scalars(4, fr::zero());
-  EXPECT_EQ(bb::gpu::bn254::msm({0, std::span<const fr>(zero_scalars.data(),
-                                                        zero_scalars.size())},
+  const std::vector<fr> zero_scalars(4, fr::zero());
+  EXPECT_EQ(bb::gpu::bn254::msm(gpu_testing::polynomial_span(zero_scalars),
                                 points, 4),
             curve::BN254::AffineElement::infinity());
 }
@@ -62,38 +72,31 @@ TEST(GpuBn254, MsmAllZeroAndEmptyReturnInfinity) {
 TEST(GpuBn254, MsmScalarEdgeValuesMatchCpu) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < 12; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(12);
   gpu_testing::upload_test_srs(points);
 
-  std::vector<fr> ones(points.size(), fr::one());
+  const std::vector<fr> ones(points.size(), fr::one());
   curve::BN254::Element expected_sum = curve::BN254::Group::point_at_infinity;
   for (const auto &point : points) {
     expected_sum += point;
   }
-  EXPECT_EQ(bb::gpu::bn254::msm(
-                {0, std::span<const fr>(ones.data(), ones.size())}, points, 4),
+  EXPECT_EQ(bb::gpu::bn254::msm(gpu_testing::polynomial_span(ones), points, 4),
             curve::BN254::AffineElement(expected_sum));
 
-  std::vector<fr> minus_ones(points.size(), -fr::one());
+  const std::vector<fr> minus_ones(points.size(), -fr::one());
   curve::BN254::Element expected_neg_sum =
       curve::BN254::Group::point_at_infinity;
   for (const auto &point : points) {
     expected_neg_sum -= point;
   }
-  EXPECT_EQ(bb::gpu::bn254::msm(
-                {0, std::span<const fr>(minus_ones.data(), minus_ones.size())},
-                points, 4),
-            curve::BN254::AffineElement(expected_neg_sum));
+  EXPECT_EQ(
+      bb::gpu::bn254::msm(gpu_testing::polynomial_span(minus_ones), points, 4),
+      curve::BN254::AffineElement(expected_neg_sum));
 
-  std::vector<curve::BN254::AffineElement> single_point = {points[0]};
-  std::vector<fr> single_scalar = {fr::random_element(&engine)};
+  const std::vector<curve::BN254::AffineElement> single_point = {points[0]};
+  const auto single_scalar = gpu_testing::random_scalars(1);
   gpu_testing::upload_test_srs(single_point);
-  EXPECT_EQ(bb::gpu::bn254::msm({0, std::span<const fr>(single_scalar.data(),
-                                                        single_scalar.size())},
+  EXPECT_EQ(bb::gpu::bn254::msm(gpu_testing::polynomial_span(single_scalar),
                                 single_point, 4),
             curve::BN254::AffineElement(single_point[0] * single_scalar[0]));
 }
@@ -101,18 +104,12 @@ TEST(GpuBn254, MsmScalarEdgeValuesMatchCpu) {
 TEST(GpuBn254, MsmExplicitWindowsMatchCpu) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 18; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(i % 5 == 0 ? fr::zero() : fr::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(18);
+  const auto scalars = gpu_testing::random_scalars(18, 5);
   gpu_testing::upload_test_srs(points);
 
+  const auto scalar_span = gpu_testing::polynomial_span(scalars);
   for (uint32_t bits_per_slice : {1U, 4U, 8U, 13U}) {
-    auto scalar_span = PolynomialSpan<const fr>{
-        0, std::span<const fr>(scalars.data(), scalars.size())};
     const auto expected = gpu_testing::reference_msm_with_explicit_window(
         points, scalar_span, bits_per_slice);
     const auto actual =
@@ -124,19 +121,12 @@ TEST(GpuBn254, MsmExplicitWindowsMatchCpu) {
 TEST(GpuBn254, MsmLeavesInputScalarsUnchanged) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 64; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(i % 8 == 0 ? fr::zero() : fr::random_element(&engine));
-  }
-  const std::vector<fr> scalars_copy = scalars;
+  const auto points = gpu_testing::random_points(64);
+  const auto scalars = gpu_testing::random_scalars(64, 8);
+  const auto scalars_copy = scalars;
 
   gpu_testing::upload_test_srs(points);
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
-  bb::gpu::bn254::msm(scalar_span, points, 8);
+  bb::gpu::bn254::msm(gpu_testing::polynomial_span(scalars), points, 8);
 
   EXPECT_EQ(scalars, scalars_copy);
 }
@@ -144,25 +134,17 @@ TEST(GpuBn254, MsmLeavesInputScalarsUnchanged) {
 TEST(GpuBn254, MsmStartIndexAndPrecomputeFactorsMatchCpu) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < 24; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(24);
   gpu_testing::upload_test_srs(points);
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 11; ++i) {
-    scalars.emplace_back(i % 4 == 0 ? fr::zero() : fr::random_element(&engine));
-  }
-  auto scalar_span = PolynomialSpan<const fr>{
-      7, std::span<const fr>(scalars.data(), scalars.size())};
+  const auto scalars = gpu_testing::random_scalars(11, 4);
+  const auto scalar_span = gpu_testing::polynomial_span(scalars, 7);
 
   const auto expected =
       gpu_testing::reference_msm_with_explicit_window(points, scalar_span, 5);
   for (uint32_t factor : {1U, 3U, 5U, 8U, 16U}) {
-    const gpu_testing::ScopedMsmPrecomputeFactor scoped_precompute_factor(
-        factor);
-    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 5);
+    const auto actual = bb::gpu::bn254::msm(
+        scalar_span, points,
+        bb::gpu::MsmConfig{.bits_per_slice = 5, .precompute_factor = factor});
     EXPECT_EQ(actual, expected) << "factor=" << factor;
   }
 }
@@ -170,26 +152,19 @@ TEST(GpuBn254, MsmStartIndexAndPrecomputeFactorsMatchCpu) {
 TEST(GpuBn254, MsmPrecomputeFactorsMatchCpu) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 48; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(i % 9 == 0 ? fr::zero() : fr::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(48);
+  const auto scalars = gpu_testing::random_scalars(48, 9);
   gpu_testing::upload_test_srs(points);
 
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
-
+  const auto scalar_span = gpu_testing::polynomial_span(scalars);
   for (uint32_t bits_per_slice : {4U, 8U, 13U, 20U}) {
     const auto expected = gpu_testing::reference_msm_with_explicit_window(
         points, scalar_span, bits_per_slice);
     for (uint32_t factor : {1U, 2U, 3U, 4U, 5U, 7U, 8U, 13U, 16U}) {
-      const gpu_testing::ScopedMsmPrecomputeFactor scoped_precompute_factor(
-          factor);
-      const auto actual =
-          bb::gpu::bn254::msm(scalar_span, points, bits_per_slice);
+      const auto actual = bb::gpu::bn254::msm(
+          scalar_span, points,
+          bb::gpu::MsmConfig{.bits_per_slice = bits_per_slice,
+                             .precompute_factor = factor});
       EXPECT_EQ(actual, expected)
           << "bits_per_slice=" << bits_per_slice << " factor=" << factor;
     }
@@ -199,177 +174,74 @@ TEST(GpuBn254, MsmPrecomputeFactorsMatchCpu) {
 TEST(GpuBn254, MsmDefaultPrecomputeFactorCachesShiftedSrs) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 64; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(i % 11 == 0 ? fr::zero()
-                                     : fr::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(64);
+  const auto scalars = gpu_testing::random_scalars(64, 11);
   gpu_testing::upload_test_srs(points);
 
   constexpr uint32_t BITS_PER_SLICE = 8;
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
   const auto expected = gpu_testing::reference_msm_with_explicit_window(
-      points, scalar_span, BITS_PER_SLICE);
-  const size_t point_start_index = default_msm_context().get_srs_offset(
-      reinterpret_cast<const host_affine_g1_montgomery_t *>(points.data()),
-      points.size());
+      points, gpu_testing::polynomial_span(scalars), BITS_PER_SLICE);
+  const size_t point_start_index = gpu_testing::srs_offset_for(points);
+  const auto options = raw_options(BITS_PER_SLICE);
 
-  fq32_affine_g1_t first_result{};
-  msm_profile first_profile{};
-  msm_raw_profiled_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
-      scalars.size(), point_start_index, BITS_PER_SLICE, &first_result,
-      &first_profile);
-  gpu_testing::expect_same_point(first_result, expected);
-  EXPECT_EQ(first_profile.precompute_factor, 4U);
-  EXPECT_EQ(first_profile.precomputed_srs_bytes,
+  const auto first =
+      gpu_testing::run_profiled_msm(scalars, point_start_index, options);
+  gpu_testing::expect_same_point(first.result, expected);
+  EXPECT_EQ(first.profile.precompute_factor, 4U);
+  EXPECT_EQ(first.profile.precomputed_srs_bytes,
             scalars.size() * 4 * sizeof(fq32_affine_g1_t));
-  EXPECT_GT(first_profile.precompute_bases_ms, 0.0F);
+  EXPECT_GT(first.profile.precompute_bases_ms, 0.0F);
 
-  fq32_affine_g1_t second_result{};
-  msm_profile second_profile{};
-  msm_raw_profiled_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
-      scalars.size(), point_start_index, BITS_PER_SLICE, &second_result,
-      &second_profile);
-  gpu_testing::expect_same_point(second_result, expected);
-  EXPECT_EQ(second_profile.precompute_factor, 4U);
-  EXPECT_EQ(second_profile.precomputed_srs_bytes,
+  const auto second =
+      gpu_testing::run_profiled_msm(scalars, point_start_index, options);
+  gpu_testing::expect_same_point(second.result, expected);
+  EXPECT_EQ(second.profile.precompute_factor, 4U);
+  EXPECT_EQ(second.profile.precomputed_srs_bytes,
             scalars.size() * 4 * sizeof(fq32_affine_g1_t));
-  EXPECT_EQ(second_profile.precompute_bases_ms, 0.0F);
-}
-
-TEST(GpuBn254, MsmPrecomputeCacheMinLengthInvalidatesCache) {
-  BB_REQUIRE_CUDA_DEVICE();
-
-  EXPECT_EQ(bb::gpu::bn254::get_msm_precompute_cache_min_length(),
-            size_t{1} << 24);
-  const gpu_testing::ScopedMsmPrecomputeCacheMinLength scoped_cache_length(64);
-
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 96; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
-  for (size_t i = 0; i < 32; ++i) {
-    scalars.emplace_back(i % 7 == 0 ? fr::zero() : fr::random_element(&engine));
-  }
-  gpu_testing::upload_test_srs(points);
-
-  constexpr uint32_t BITS_PER_SLICE = 8;
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
-  const auto expected = gpu_testing::reference_msm_with_explicit_window(
-      points, scalar_span, BITS_PER_SLICE);
-
-  fq32_affine_g1_t first_result{};
-  msm_profile first_profile{};
-  msm_raw_profiled_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
-      scalars.size(), 0, BITS_PER_SLICE, &first_result, &first_profile);
-  gpu_testing::expect_same_point(first_result, expected);
-  EXPECT_EQ(first_profile.precomputed_srs_bytes,
-            64U * 4U * sizeof(fq32_affine_g1_t));
-  EXPECT_GT(first_profile.precompute_bases_ms, 0.0F);
-
-  fq32_affine_g1_t second_result{};
-  msm_profile second_profile{};
-  msm_raw_profiled_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
-      scalars.size(), 0, BITS_PER_SLICE, &second_result, &second_profile);
-  gpu_testing::expect_same_point(second_result, expected);
-  EXPECT_EQ(second_profile.precompute_bases_ms, 0.0F);
-
-  bb::gpu::bn254::set_msm_precompute_cache_min_length(48);
-  fq32_affine_g1_t third_result{};
-  msm_profile third_profile{};
-  msm_raw_profiled_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
-      scalars.size(), 0, BITS_PER_SLICE, &third_result, &third_profile);
-  gpu_testing::expect_same_point(third_result, expected);
-  EXPECT_EQ(third_profile.precomputed_srs_bytes,
-            48U * 4U * sizeof(fq32_affine_g1_t));
-  EXPECT_GT(third_profile.precompute_bases_ms, 0.0F);
+  EXPECT_EQ(second.profile.precompute_bases_ms, 0.0F);
 }
 
 TEST(GpuBn254, MsmPrecomputedSrsCacheServesSmallerOffsetSpan) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  const gpu_testing::ScopedMsmPrecomputeCacheMinLength scoped_cache_length(128);
-
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < 160; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
-  std::vector<fr> warmup_scalars;
-  for (size_t i = 0; i < 64; ++i) {
-    warmup_scalars.emplace_back(i % 5 == 0 ? fr::zero()
-                                           : fr::random_element(&engine));
-  }
-  std::vector<fr> offset_scalars;
-  for (size_t i = 0; i < 25; ++i) {
-    offset_scalars.emplace_back(i % 6 == 0 ? fr::zero()
-                                           : fr::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(160);
+  const auto warmup_scalars = gpu_testing::random_scalars(64, 5);
+  const auto offset_scalars = gpu_testing::random_scalars(25, 6);
   gpu_testing::upload_test_srs(points);
 
   constexpr uint32_t BITS_PER_SLICE = 8;
-  auto warmup_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(warmup_scalars.data(), warmup_scalars.size())};
+  constexpr size_t CACHE_MIN_LENGTH = 128;
+  const auto options = raw_options(BITS_PER_SLICE, 4, CACHE_MIN_LENGTH);
+
   const auto warmup_expected = gpu_testing::reference_msm_with_explicit_window(
-      points, warmup_span, BITS_PER_SLICE);
-  fq32_affine_g1_t warmup_result{};
-  msm_profile warmup_profile{};
-  msm_raw_profiled_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(warmup_scalars.data()),
-      warmup_scalars.size(), 0, BITS_PER_SLICE, &warmup_result,
-      &warmup_profile);
-  gpu_testing::expect_same_point(warmup_result, warmup_expected);
-  EXPECT_EQ(warmup_profile.precomputed_srs_bytes,
+      points, gpu_testing::polynomial_span(warmup_scalars), BITS_PER_SLICE);
+  const auto warmup = gpu_testing::run_profiled_msm(warmup_scalars, 0, options);
+  gpu_testing::expect_same_point(warmup.result, warmup_expected);
+  EXPECT_EQ(warmup.profile.precomputed_srs_bytes,
             128U * 4U * sizeof(fq32_affine_g1_t));
-  EXPECT_GT(warmup_profile.precompute_bases_ms, 0.0F);
+  EXPECT_GT(warmup.profile.precompute_bases_ms, 0.0F);
 
   constexpr size_t OFFSET_START = 41;
-  auto offset_span = PolynomialSpan<const fr>{
-      OFFSET_START,
-      std::span<const fr>(offset_scalars.data(), offset_scalars.size())};
   const auto offset_expected = gpu_testing::reference_msm_with_explicit_window(
-      points, offset_span, BITS_PER_SLICE);
-  fq32_affine_g1_t offset_result{};
-  msm_profile offset_profile{};
-  msm_raw_profiled_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(offset_scalars.data()),
-      offset_scalars.size(), OFFSET_START, BITS_PER_SLICE, &offset_result,
-      &offset_profile);
-  gpu_testing::expect_same_point(offset_result, offset_expected);
-  EXPECT_EQ(offset_profile.precomputed_srs_bytes,
+      points, gpu_testing::polynomial_span(offset_scalars, OFFSET_START),
+      BITS_PER_SLICE);
+  const auto offset =
+      gpu_testing::run_profiled_msm(offset_scalars, OFFSET_START, options);
+  gpu_testing::expect_same_point(offset.result, offset_expected);
+  EXPECT_EQ(offset.profile.precomputed_srs_bytes,
             128U * 4U * sizeof(fq32_affine_g1_t));
-  EXPECT_EQ(offset_profile.precompute_bases_ms, 0.0F);
+  EXPECT_EQ(offset.profile.precompute_bases_ms, 0.0F);
 }
 
 TEST(GpuBn254, MsmBuffersReuseKeepHighWaterAndGrow) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> small_points;
-  std::vector<fr> small_scalars;
-  for (size_t i = 0; i < 16; ++i) {
-    small_points.emplace_back(
-        curve::BN254::AffineElement::random_element(&engine));
-    small_scalars.emplace_back(i % 3 == 0 ? fr::zero()
-                                          : fr::random_element(&engine));
-  }
+  const auto small_points = gpu_testing::random_points(16);
+  const auto small_scalars = gpu_testing::random_scalars(16, 3);
   gpu_testing::upload_test_srs(small_points);
   default_msm_context().release_msm_buffers();
 
-  auto small_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(small_scalars.data(), small_scalars.size())};
+  const auto small_span = gpu_testing::polynomial_span(small_scalars);
   const auto small_expected = gpu_testing::reference_msm_with_explicit_window(
       small_points, small_span, 8U);
   EXPECT_EQ(bb::gpu::bn254::msm(small_span, small_points, 8U), small_expected);
@@ -381,7 +253,7 @@ TEST(GpuBn254, MsmBuffersReuseKeepHighWaterAndGrow) {
   EXPECT_EQ(default_msm_context().msm_buffers().pippenger_capacity(),
             small_capacity);
 
-  auto smaller_span = PolynomialSpan<const fr>{
+  const auto smaller_span = PolynomialSpan<const fr>{
       0, std::span<const fr>(small_scalars.data(), small_scalars.size() / 2)};
   const auto smaller_expected = gpu_testing::reference_msm_with_explicit_window(
       small_points, smaller_span, 8U);
@@ -390,17 +262,10 @@ TEST(GpuBn254, MsmBuffersReuseKeepHighWaterAndGrow) {
   EXPECT_EQ(default_msm_context().msm_buffers().pippenger_capacity(),
             small_capacity);
 
-  std::vector<curve::BN254::AffineElement> large_points;
-  std::vector<fr> large_scalars;
-  for (size_t i = 0; i < 1024; ++i) {
-    large_points.emplace_back(
-        curve::BN254::AffineElement::random_element(&engine));
-    large_scalars.emplace_back(i % 11 == 0 ? fr::zero()
-                                           : fr::random_element(&engine));
-  }
+  const auto large_points = gpu_testing::random_points(1024);
+  const auto large_scalars = gpu_testing::random_scalars(1024, 11);
   bb::gpu::bn254::init(large_points);
-  auto large_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(large_scalars.data(), large_scalars.size())};
+  const auto large_span = gpu_testing::polynomial_span(large_scalars);
   const auto large_expected = gpu_testing::reference_msm_with_explicit_window(
       large_points, large_span, 8U);
   EXPECT_EQ(bb::gpu::bn254::msm(large_span, large_points, 8U), large_expected);
@@ -411,17 +276,11 @@ TEST(GpuBn254, MsmBuffersReuseKeepHighWaterAndGrow) {
 TEST(GpuBn254, MsmReleaseBuffersPreservesUploadedSrs) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 32; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(i % 5 == 0 ? fr::zero() : fr::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(32);
+  const auto scalars = gpu_testing::random_scalars(32, 5);
   gpu_testing::upload_test_srs(points);
 
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
+  const auto scalar_span = gpu_testing::polynomial_span(scalars);
   const auto expected =
       gpu_testing::reference_msm_with_explicit_window(points, scalar_span, 8U);
   EXPECT_EQ(bb::gpu::bn254::msm(scalar_span, points, 8U), expected);
@@ -436,90 +295,75 @@ TEST(GpuBn254, MsmReleaseBuffersPreservesUploadedSrs) {
 TEST(GpuBn254, MsmPrecomputeFactorCapsAtWindowCount) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 32; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(i % 5 == 0 ? fr::zero() : fr::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(32);
+  const auto scalars = gpu_testing::random_scalars(32, 5);
   gpu_testing::upload_test_srs(points);
 
   constexpr uint32_t BITS_PER_SLICE = 20;
   constexpr uint32_t EFFECTIVE_PRECOMPUTE_FACTOR = 13;
-  const gpu_testing::ScopedMsmPrecomputeFactor scoped_precompute_factor(16);
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
   const auto expected = gpu_testing::reference_msm_with_explicit_window(
-      points, scalar_span, BITS_PER_SLICE);
-  const size_t point_start_index = default_msm_context().get_srs_offset(
-      reinterpret_cast<const host_affine_g1_montgomery_t *>(points.data()),
-      points.size());
+      points, gpu_testing::polynomial_span(scalars), BITS_PER_SLICE);
 
-  fq32_affine_g1_t result{};
-  msm_profile profile{};
-  msm_raw_profiled_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
-      scalars.size(), point_start_index, BITS_PER_SLICE, &result, &profile);
-  gpu_testing::expect_same_point(result, expected);
-  EXPECT_EQ(profile.precompute_factor, EFFECTIVE_PRECOMPUTE_FACTOR);
-  EXPECT_EQ(profile.folded_windows, 1U);
-  EXPECT_EQ(profile.precomputed_srs_bytes, scalars.size() *
-                                               EFFECTIVE_PRECOMPUTE_FACTOR *
-                                               sizeof(fq32_affine_g1_t));
-  EXPECT_GT(profile.precompute_bases_ms, 0.0F);
+  const auto run = gpu_testing::run_profiled_msm(
+      scalars, gpu_testing::srs_offset_for(points),
+      raw_options(BITS_PER_SLICE, 16));
+  gpu_testing::expect_same_point(run.result, expected);
+  EXPECT_EQ(run.profile.precompute_factor, EFFECTIVE_PRECOMPUTE_FACTOR);
+  EXPECT_EQ(run.profile.folded_windows, 1U);
+  EXPECT_EQ(run.profile.precomputed_srs_bytes, scalars.size() *
+                                                   EFFECTIVE_PRECOMPUTE_FACTOR *
+                                                   sizeof(fq32_affine_g1_t));
+  EXPECT_GT(run.profile.precompute_bases_ms, 0.0F);
 }
 
 TEST(GpuBn254, MsmPrecomputeFactorChangesInvalidateCache) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 36; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(i % 7 == 0 ? fr::zero() : fr::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(36);
+  const auto scalars = gpu_testing::random_scalars(36, 7);
   gpu_testing::upload_test_srs(points);
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
+  const auto scalar_span = gpu_testing::polynomial_span(scalars);
 
   const auto expected =
       gpu_testing::reference_msm_with_explicit_window(points, scalar_span, 8);
 
   for (uint32_t factor : {3U, 5U, 16U, 1U, 3U}) {
-    const gpu_testing::ScopedMsmPrecomputeFactor scoped_precompute_factor(
-        factor);
-    const auto actual = bb::gpu::bn254::msm(scalar_span, points, 8);
+    const auto actual = bb::gpu::bn254::msm(
+        scalar_span, points,
+        bb::gpu::MsmConfig{.bits_per_slice = 8, .precompute_factor = factor});
     EXPECT_EQ(actual, expected) << "factor=" << factor;
   }
 }
 
 TEST(GpuBn254, MsmRejectsInvalidPrecomputeFactors) {
-  expect_child_exits_unsuccessfully(
-      []() { bb::gpu::bn254::set_msm_precompute_factor(0); });
-  expect_child_exits_unsuccessfully(
-      []() { bb::gpu::bn254::set_msm_precompute_factor(17); });
+  const auto points = gpu_testing::random_points(1);
+  const std::vector<fr> scalars = {fr::one()};
+  const auto scalar_span = gpu_testing::polynomial_span(scalars);
+  expect_child_exits_unsuccessfully([&]() {
+    gpu_testing::upload_test_srs(points);
+    bb::gpu::Backend<curve::BN254>::msm(
+        scalar_span, points,
+        bb::gpu::MsmConfig{.bits_per_slice = 8, .precompute_factor = 0});
+  });
+  expect_child_exits_unsuccessfully([&]() {
+    gpu_testing::upload_test_srs(points);
+    bb::gpu::Backend<curve::BN254>::msm(
+        scalar_span, points,
+        bb::gpu::MsmConfig{.bits_per_slice = 8, .precompute_factor = 17});
+  });
 }
 
 TEST(GpuBn254, MsmSameBucketNormalAccumulationAndReductionMatchCpu) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 6; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(fr(5));
-  }
+  const auto points = gpu_testing::random_points(6);
+  const std::vector<fr> scalars(6, fr(5));
   gpu_testing::upload_test_srs(points);
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
+  const auto scalar_span = gpu_testing::polynomial_span(scalars);
 
   const auto expected =
       gpu_testing::reference_msm_with_explicit_window(points, scalar_span, 4);
-  const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
-  EXPECT_EQ(actual, expected);
+  EXPECT_EQ(bb::gpu::bn254::msm(scalar_span, points, 4), expected);
 }
 
 TEST(GpuBn254, MsmDuplicatePointEdgeCasesMatchCpu) {
@@ -528,7 +372,8 @@ TEST(GpuBn254, MsmDuplicatePointEdgeCasesMatchCpu) {
   auto &engine = numeric::get_debug_randomness();
   const curve::BN254::AffineElement base_point =
       curve::BN254::AffineElement::random_element(&engine);
-  std::vector<curve::BN254::AffineElement> duplicate_points(32, base_point);
+  const std::vector<curve::BN254::AffineElement> duplicate_points(32,
+                                                                  base_point);
   std::vector<fr> duplicate_scalars;
   duplicate_scalars.reserve(duplicate_points.size());
   fr scalar_sum = fr::zero();
@@ -537,11 +382,9 @@ TEST(GpuBn254, MsmDuplicatePointEdgeCasesMatchCpu) {
     scalar_sum += duplicate_scalars.back();
   }
   gpu_testing::upload_test_srs(duplicate_points);
-  EXPECT_EQ(
-      bb::gpu::bn254::msm({0, std::span<const fr>(duplicate_scalars.data(),
-                                                  duplicate_scalars.size())},
-                          duplicate_points, 4),
-      curve::BN254::AffineElement(base_point * scalar_sum));
+  EXPECT_EQ(bb::gpu::bn254::msm(gpu_testing::polynomial_span(duplicate_scalars),
+                                duplicate_points, 4),
+            curve::BN254::AffineElement(base_point * scalar_sum));
 
   std::vector<curve::BN254::AffineElement> mixed_points;
   std::vector<fr> mixed_scalars;
@@ -562,32 +405,11 @@ TEST(GpuBn254, MsmDuplicatePointEdgeCasesMatchCpu) {
     mixed_scalars.emplace_back(fr::random_element(&engine));
   }
   gpu_testing::upload_test_srs(mixed_points);
-  auto mixed_scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(mixed_scalars.data(), mixed_scalars.size())};
+  const auto mixed_scalar_span = gpu_testing::polynomial_span(mixed_scalars);
   const auto expected = curve::BN254::AffineElement(
       scalar_multiplication::pippenger<curve::BN254>(
           mixed_scalar_span, mixed_points, /*handle_edge_cases=*/true));
   EXPECT_EQ(bb::gpu::bn254::msm(mixed_scalar_span, mixed_points, 4), expected);
-}
-
-TEST(GpuBn254, MsmLargeBucketAccumulationMatchesCpu) {
-  BB_REQUIRE_CUDA_DEVICE();
-
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 600; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(fr(5));
-  }
-  gpu_testing::upload_test_srs(points);
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
-
-  const auto expected =
-      gpu_testing::reference_msm_with_explicit_window(points, scalar_span, 4);
-  const auto actual = bb::gpu::bn254::msm(scalar_span, points, 4);
-  EXPECT_EQ(actual, expected);
 }
 
 TEST(GpuBn254, MsmRejectsInfinityInputPoints) {
@@ -603,52 +425,32 @@ TEST(GpuBn254, MsmRejectsInfinityInputPoints) {
 TEST(GpuBn254, MsmLargeBucketUsesChunkedAccumulation) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 600; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(fr(5));
-  }
+  const auto points = gpu_testing::random_points(600);
+  const std::vector<fr> scalars(600, fr(5));
   gpu_testing::upload_test_srs(points);
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
+  const auto scalar_span = gpu_testing::polynomial_span(scalars);
 
   const auto expected =
       gpu_testing::reference_msm_with_explicit_window(points, scalar_span, 4);
-  const size_t point_start_index = default_msm_context().get_srs_offset(
-      reinterpret_cast<const host_affine_g1_montgomery_t *>(points.data()),
-      points.size());
-
-  fq32_affine_g1_t result{};
-  msm_profile profile{};
-  msm_raw_profiled_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(scalars.data()),
-      scalars.size(), point_start_index, 4, &result, &profile);
-  gpu_testing::expect_same_point(result, expected);
-  EXPECT_EQ(profile.large_bucket_mode, MSM_LARGE_BUCKET_CHUNKED_FQ32_XYZZ);
-  EXPECT_GT(profile.large_bucket_chunk_count, 0U);
+  const auto run = gpu_testing::run_profiled_msm(
+      scalars, gpu_testing::srs_offset_for(points), raw_options(4));
+  gpu_testing::expect_same_point(run.result, expected);
+  EXPECT_TRUE(run.profile.has_large_buckets);
+  EXPECT_GT(run.profile.large_bucket_chunk_count, 0U);
 }
 
 TEST(GpuBn254, MsmAutoWindowMatchesCpuSafePippenger) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
-  std::vector<curve::BN254::AffineElement> points;
-  std::vector<fr> scalars;
-  for (size_t i = 0; i < 32; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-    scalars.emplace_back(i % 7 == 0 ? fr::zero() : fr::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(32);
+  const auto scalars = gpu_testing::random_scalars(32, 7);
   gpu_testing::upload_test_srs(points);
 
-  auto scalar_span = PolynomialSpan<const fr>{
-      0, std::span<const fr>(scalars.data(), scalars.size())};
+  const auto scalar_span = gpu_testing::polynomial_span(scalars);
   const auto expected = curve::BN254::AffineElement(
       scalar_multiplication::pippenger<curve::BN254>(
           scalar_span, points, /*handle_edge_cases=*/true));
-  const auto actual = bb::gpu::bn254::msm(scalar_span, points);
-  EXPECT_EQ(actual, expected);
+  EXPECT_EQ(bb::gpu::bn254::msm(scalar_span, points), expected);
 }
 
 TEST(GpuBn254, BatchMsmAllZeroAndEmptyReturnInfinity) {
@@ -669,8 +471,7 @@ TEST(GpuBn254, BatchMsmAllZeroAndEmptyReturnInfinity) {
   point_spans.emplace_back(points.data(), 4);
   point_spans.emplace_back(points.data(), 8);
 
-  const auto results = bb::gpu::bn254::batch_msm(point_spans, scalar_spans,
-                                                 /*handle_edge_cases=*/false);
+  const auto results = bb::gpu::bn254::batch_msm(point_spans, scalar_spans);
   ASSERT_EQ(results.size(), 3U);
   for (const auto &r : results) {
     EXPECT_EQ(r, curve::BN254::AffineElement::infinity());
@@ -680,23 +481,12 @@ TEST(GpuBn254, BatchMsmAllZeroAndEmptyReturnInfinity) {
 TEST(GpuBn254, BatchMsmExplicitWindowsMatchOracle) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
   constexpr size_t POINTS = 32;
   constexpr size_t BATCH = 5;
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < POINTS; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(POINTS);
   gpu_testing::upload_test_srs(points);
 
-  std::vector<std::vector<fr>> per_msm_scalars(BATCH);
-  for (size_t k = 0; k < BATCH; ++k) {
-    per_msm_scalars[k].reserve(POINTS);
-    for (size_t i = 0; i < POINTS; ++i) {
-      per_msm_scalars[k].emplace_back(
-          (k + i) % 5 == 0 ? fr::zero() : fr::random_element(&engine));
-    }
-  }
+  auto per_msm_scalars = gpu_testing::random_batched_scalars(BATCH, POINTS, 5);
 
   for (uint32_t bits_per_slice : {1U, 4U, 8U, 13U}) {
     const auto expected = gpu_testing::oracle_per_poly_msm(
@@ -704,8 +494,7 @@ TEST(GpuBn254, BatchMsmExplicitWindowsMatchOracle) {
     auto scalar_spans = gpu_testing::make_scalar_spans(per_msm_scalars);
     auto point_spans = gpu_testing::make_point_spans(points, BATCH, POINTS);
     const auto actual =
-        bb::gpu::bn254::batch_msm(point_spans, scalar_spans,
-                                  /*handle_edge_cases=*/false, bits_per_slice);
+        bb::gpu::bn254::batch_msm(point_spans, scalar_spans, bits_per_slice);
     ASSERT_EQ(actual.size(), BATCH);
     for (size_t k = 0; k < BATCH; ++k) {
       EXPECT_EQ(actual[k], expected[k])
@@ -717,62 +506,42 @@ TEST(GpuBn254, BatchMsmExplicitWindowsMatchOracle) {
 TEST(GpuBn254, BatchMsmLeavesInputScalarsUnchanged) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
   constexpr size_t POINTS = 64;
   constexpr size_t BATCH = 3;
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < POINTS; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(POINTS);
   gpu_testing::upload_test_srs(points);
 
-  std::vector<std::vector<fr>> per_msm_scalars(BATCH);
-  for (size_t k = 0; k < BATCH; ++k) {
-    for (size_t i = 0; i < POINTS; ++i) {
-      per_msm_scalars[k].emplace_back(
-          (k * 7 + i) % 8 == 0 ? fr::zero() : fr::random_element(&engine));
-    }
-  }
+  auto per_msm_scalars =
+      gpu_testing::random_batched_scalars(BATCH, POINTS, 8, 7);
   const auto scalars_copy = per_msm_scalars;
 
   auto scalar_spans = gpu_testing::make_scalar_spans(per_msm_scalars);
   auto point_spans = gpu_testing::make_point_spans(points, BATCH, POINTS);
-  bb::gpu::bn254::batch_msm(point_spans, scalar_spans,
-                            /*handle_edge_cases=*/false, 8U);
+  bb::gpu::bn254::batch_msm(point_spans, scalar_spans, 8U);
   EXPECT_EQ(per_msm_scalars, scalars_copy);
 }
 
 TEST(GpuBn254, BatchMsmPrecomputeFactorsMatchOracle) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
   constexpr size_t POINTS = 48;
   constexpr size_t BATCH = 4;
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < POINTS; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(POINTS);
   gpu_testing::upload_test_srs(points);
 
-  std::vector<std::vector<fr>> per_msm_scalars(BATCH);
-  for (size_t k = 0; k < BATCH; ++k) {
-    for (size_t i = 0; i < POINTS; ++i) {
-      per_msm_scalars[k].emplace_back(
-          (k * 3 + i) % 9 == 0 ? fr::zero() : fr::random_element(&engine));
-    }
-  }
+  auto per_msm_scalars =
+      gpu_testing::random_batched_scalars(BATCH, POINTS, 9, 3);
 
   for (uint32_t bits_per_slice : {4U, 8U, 13U}) {
     for (uint32_t factor : {1U, 2U, 4U, 8U, 16U}) {
-      const gpu_testing::ScopedMsmPrecomputeFactor scoped_precompute_factor(
-          factor);
       const auto expected = gpu_testing::oracle_per_poly_msm(
           points, per_msm_scalars, bits_per_slice);
       auto scalar_spans = gpu_testing::make_scalar_spans(per_msm_scalars);
       auto point_spans = gpu_testing::make_point_spans(points, BATCH, POINTS);
-      const auto actual = bb::gpu::bn254::batch_msm(point_spans, scalar_spans,
-                                                    /*handle_edge_cases=*/false,
-                                                    bits_per_slice);
+      const auto actual = bb::gpu::bn254::batch_msm(
+          point_spans, scalar_spans,
+          bb::gpu::MsmConfig{.bits_per_slice = bits_per_slice,
+                             .precompute_factor = factor});
       ASSERT_EQ(actual.size(), BATCH);
       for (size_t k = 0; k < BATCH; ++k) {
         EXPECT_EQ(actual[k], expected[k])
@@ -785,30 +554,20 @@ TEST(GpuBn254, BatchMsmPrecomputeFactorsMatchOracle) {
 TEST(GpuBn254, BatchMsmAutoWindowMatchesOracle) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
   constexpr size_t POINTS = 64;
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < POINTS; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(POINTS);
   gpu_testing::upload_test_srs(points);
 
   for (uint32_t batch_size : {1U, 2U, 4U, 8U, 16U}) {
-    std::vector<std::vector<fr>> per_msm_scalars(batch_size);
-    for (uint32_t k = 0; k < batch_size; ++k) {
-      for (size_t i = 0; i < POINTS; ++i) {
-        per_msm_scalars[k].emplace_back(
-            (k + i) % 7 == 0 ? fr::zero() : fr::random_element(&engine));
-      }
-    }
+    auto per_msm_scalars =
+        gpu_testing::random_batched_scalars(batch_size, POINTS, 7);
     const auto expected =
         gpu_testing::oracle_per_poly_msm(points, per_msm_scalars, 0U);
     auto scalar_spans = gpu_testing::make_scalar_spans(per_msm_scalars);
     auto point_spans =
         gpu_testing::make_point_spans(points, batch_size, POINTS);
     const auto actual =
-        bb::gpu::bn254::batch_msm(point_spans, scalar_spans,
-                                  /*handle_edge_cases=*/false, 0U);
+        bb::gpu::bn254::batch_msm(point_spans, scalar_spans, 0U);
     ASSERT_EQ(actual.size(), batch_size);
     for (uint32_t k = 0; k < batch_size; ++k) {
       EXPECT_EQ(actual[k], expected[k])
@@ -823,22 +582,13 @@ TEST(GpuBn254, BatchMsmSparseMatchesOracle) {
   auto &engine = numeric::get_debug_randomness();
   constexpr size_t POINTS = 33;
   constexpr size_t BATCH = 6;
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < POINTS; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(POINTS);
   gpu_testing::upload_test_srs(points);
 
   std::vector<std::vector<fr>> per_msm_scalars(BATCH, std::vector<fr>(POINTS));
   for (size_t k = 0; k < BATCH; ++k) {
-    for (size_t i = 0; i < 13; ++i) {
-      per_msm_scalars[k][i] = fr::zero();
-    }
     for (size_t i = 13; i < 23; ++i) {
       per_msm_scalars[k][i] = fr::random_element(&engine);
-    }
-    for (size_t i = 23; i < POINTS; ++i) {
-      per_msm_scalars[k][i] = fr::zero();
     }
   }
 
@@ -846,8 +596,7 @@ TEST(GpuBn254, BatchMsmSparseMatchesOracle) {
       gpu_testing::oracle_per_poly_msm(points, per_msm_scalars, 8U);
   auto scalar_spans = gpu_testing::make_scalar_spans(per_msm_scalars);
   auto point_spans = gpu_testing::make_point_spans(points, BATCH, POINTS);
-  const auto actual = bb::gpu::bn254::batch_msm(
-      point_spans, scalar_spans, /*handle_edge_cases=*/false, 8U);
+  const auto actual = bb::gpu::bn254::batch_msm(point_spans, scalar_spans, 8U);
   ASSERT_EQ(actual.size(), BATCH);
   for (size_t k = 0; k < BATCH; ++k) {
     EXPECT_EQ(actual[k], expected[k]) << "k=" << k;
@@ -860,24 +609,17 @@ TEST(GpuBn254, BatchMsmDuplicatePointMatchesOracle) {
   auto &engine = numeric::get_debug_randomness();
   constexpr size_t POINTS = 16;
   constexpr size_t BATCH = 4;
-  std::vector<curve::BN254::AffineElement> points(
+  const std::vector<curve::BN254::AffineElement> points(
       POINTS, curve::BN254::AffineElement::random_element(&engine));
   gpu_testing::upload_test_srs(points);
 
-  std::vector<std::vector<fr>> per_msm_scalars(BATCH);
-  for (size_t k = 0; k < BATCH; ++k) {
-    per_msm_scalars[k].reserve(POINTS);
-    for (size_t i = 0; i < POINTS; ++i) {
-      per_msm_scalars[k].emplace_back(fr::random_element(&engine));
-    }
-  }
+  auto per_msm_scalars = gpu_testing::random_batched_scalars(BATCH, POINTS);
 
   const auto expected =
       gpu_testing::oracle_per_poly_msm(points, per_msm_scalars, 4U);
   auto scalar_spans = gpu_testing::make_scalar_spans(per_msm_scalars);
   auto point_spans = gpu_testing::make_point_spans(points, BATCH, POINTS);
-  const auto actual = bb::gpu::bn254::batch_msm(
-      point_spans, scalar_spans, /*handle_edge_cases=*/false, 4U);
+  const auto actual = bb::gpu::bn254::batch_msm(point_spans, scalar_spans, 4U);
   ASSERT_EQ(actual.size(), BATCH);
   for (size_t k = 0; k < BATCH; ++k) {
     EXPECT_EQ(actual[k], expected[k]) << "k=" << k;
@@ -887,46 +629,33 @@ TEST(GpuBn254, BatchMsmDuplicatePointMatchesOracle) {
 TEST(GpuBn254, BatchMsmHeterogeneousLengthsMatchOracle) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
   constexpr size_t MAX_POINTS = 48;
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < MAX_POINTS; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(MAX_POINTS);
   gpu_testing::upload_test_srs(points);
 
   const std::vector<size_t> lengths = {12, 24, 12, 32, 24, 32, 12, 48};
   std::vector<std::vector<fr>> per_msm_scalars;
   per_msm_scalars.reserve(lengths.size());
   for (const size_t n : lengths) {
-    std::vector<fr> s;
-    s.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-      s.emplace_back(i % 5 == 0 ? fr::zero() : fr::random_element(&engine));
-    }
-    per_msm_scalars.emplace_back(std::move(s));
+    per_msm_scalars.emplace_back(gpu_testing::random_scalars(n, 5));
   }
 
   std::vector<curve::BN254::AffineElement> expected;
   expected.reserve(lengths.size());
-  for (size_t i = 0; i < lengths.size(); ++i) {
-    auto scalar_span = PolynomialSpan<const fr>{
-        0, std::span<const fr>(per_msm_scalars[i].data(),
-                               per_msm_scalars[i].size())};
-    expected.emplace_back(bb::gpu::bn254::msm(scalar_span, points, 8U));
+  for (const auto &scalars : per_msm_scalars) {
+    expected.emplace_back(
+        bb::gpu::bn254::msm(gpu_testing::polynomial_span(scalars), points, 8U));
   }
 
   std::vector<std::span<fr>> scalar_spans;
   std::vector<std::span<const curve::BN254::AffineElement>> point_spans;
   scalar_spans.reserve(lengths.size());
   point_spans.reserve(lengths.size());
-  for (size_t i = 0; i < lengths.size(); ++i) {
-    scalar_spans.emplace_back(per_msm_scalars[i].data(),
-                              per_msm_scalars[i].size());
-    point_spans.emplace_back(points.data(), per_msm_scalars[i].size());
+  for (auto &scalars : per_msm_scalars) {
+    scalar_spans.emplace_back(scalars.data(), scalars.size());
+    point_spans.emplace_back(points.data(), scalars.size());
   }
-  const auto actual = bb::gpu::bn254::batch_msm(
-      point_spans, scalar_spans, /*handle_edge_cases=*/false, 8U);
+  const auto actual = bb::gpu::bn254::batch_msm(point_spans, scalar_spans, 8U);
   ASSERT_EQ(actual.size(), lengths.size());
   for (size_t i = 0; i < lengths.size(); ++i) {
     EXPECT_EQ(actual[i], expected[i]) << "i=" << i << " len=" << lengths[i];
@@ -936,30 +665,20 @@ TEST(GpuBn254, BatchMsmHeterogeneousLengthsMatchOracle) {
 TEST(GpuBn254, CommitmentKeyBatchMsmTemplateDispatchesToFused) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
   constexpr size_t POINTS = 24;
   constexpr size_t BATCH = 4;
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < POINTS; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(POINTS);
   bb::gpu::bn254::shutdown();
   bb::gpu::init_commitment_key_srs<curve::BN254>(points);
 
-  std::vector<std::vector<fr>> per_msm_scalars(BATCH);
-  for (size_t k = 0; k < BATCH; ++k) {
-    for (size_t i = 0; i < POINTS; ++i) {
-      per_msm_scalars[k].emplace_back(
-          (k + i) % 5 == 0 ? fr::zero() : fr::random_element(&engine));
-    }
-  }
+  auto per_msm_scalars = gpu_testing::random_batched_scalars(BATCH, POINTS, 5);
 
   const auto expected =
       gpu_testing::oracle_per_poly_msm(points, per_msm_scalars, 8U);
   auto scalar_spans = gpu_testing::make_scalar_spans(per_msm_scalars);
   auto point_spans = gpu_testing::make_point_spans(points, BATCH, POINTS);
   const auto actual = bb::gpu::commitment_key_batch_msm<curve::BN254>(
-      point_spans, scalar_spans, /*handle_edge_cases=*/false);
+      point_spans, scalar_spans);
   ASSERT_EQ(actual.size(), BATCH);
   for (size_t k = 0; k < BATCH; ++k) {
     EXPECT_EQ(actual[k], expected[k]) << "k=" << k;
@@ -969,31 +688,18 @@ TEST(GpuBn254, CommitmentKeyBatchMsmTemplateDispatchesToFused) {
 TEST(GpuBn254, BatchMsmLargeNAndKMatchesOracle) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
   constexpr size_t POINTS = size_t{1} << 16;
   constexpr size_t BATCH = 8;
-  std::vector<curve::BN254::AffineElement> points;
-  points.reserve(POINTS);
-  for (size_t i = 0; i < POINTS; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(POINTS);
   gpu_testing::upload_test_srs(points);
 
-  std::vector<std::vector<fr>> per_msm_scalars(BATCH);
-  for (size_t k = 0; k < BATCH; ++k) {
-    per_msm_scalars[k].reserve(POINTS);
-    for (size_t i = 0; i < POINTS; ++i) {
-      per_msm_scalars[k].emplace_back(
-          (k + i) % 7 == 0 ? fr::zero() : fr::random_element(&engine));
-    }
-  }
+  auto per_msm_scalars = gpu_testing::random_batched_scalars(BATCH, POINTS, 7);
 
   const auto expected =
       gpu_testing::oracle_per_poly_msm(points, per_msm_scalars, 0U);
   auto scalar_spans = gpu_testing::make_scalar_spans(per_msm_scalars);
   auto point_spans = gpu_testing::make_point_spans(points, BATCH, POINTS);
-  const auto actual = bb::gpu::bn254::batch_msm(
-      point_spans, scalar_spans, /*handle_edge_cases=*/false, 0U);
+  const auto actual = bb::gpu::bn254::batch_msm(point_spans, scalar_spans, 0U);
   ASSERT_EQ(actual.size(), BATCH);
   for (size_t k = 0; k < BATCH; ++k) {
     EXPECT_EQ(actual[k], expected[k]) << "k=" << k;
@@ -1003,29 +709,18 @@ TEST(GpuBn254, BatchMsmLargeNAndKMatchesOracle) {
 TEST(GpuBn254, BatchMsmBatchSizeBeyondFusedCapChunks) {
   BB_REQUIRE_CUDA_DEVICE();
 
-  auto &engine = numeric::get_debug_randomness();
   constexpr size_t POINTS = 24;
   constexpr size_t BATCH = 20;
-  std::vector<curve::BN254::AffineElement> points;
-  for (size_t i = 0; i < POINTS; ++i) {
-    points.emplace_back(curve::BN254::AffineElement::random_element(&engine));
-  }
+  const auto points = gpu_testing::random_points(POINTS);
   gpu_testing::upload_test_srs(points);
 
-  std::vector<std::vector<fr>> per_msm_scalars(BATCH);
-  for (size_t k = 0; k < BATCH; ++k) {
-    for (size_t i = 0; i < POINTS; ++i) {
-      per_msm_scalars[k].emplace_back(
-          (k + i) % 6 == 0 ? fr::zero() : fr::random_element(&engine));
-    }
-  }
+  auto per_msm_scalars = gpu_testing::random_batched_scalars(BATCH, POINTS, 6);
 
   const auto expected =
       gpu_testing::oracle_per_poly_msm(points, per_msm_scalars, 6U);
   auto scalar_spans = gpu_testing::make_scalar_spans(per_msm_scalars);
   auto point_spans = gpu_testing::make_point_spans(points, BATCH, POINTS);
-  const auto actual = bb::gpu::bn254::batch_msm(
-      point_spans, scalar_spans, /*handle_edge_cases=*/false, 6U);
+  const auto actual = bb::gpu::bn254::batch_msm(point_spans, scalar_spans, 6U);
   ASSERT_EQ(actual.size(), BATCH);
   for (size_t k = 0; k < BATCH; ++k) {
     EXPECT_EQ(actual[k], expected[k]) << "k=" << k;

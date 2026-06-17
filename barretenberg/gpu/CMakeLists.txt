@@ -1,16 +1,16 @@
 find_package(CUDAToolkit REQUIRED)
 
 set(BB_GPU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
+set(BB_GPU_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(BB_GPU_CPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cpp/src")
 
 set(BB_GPU_HEADERS
     include/barretenberg/gpu/common/cuda_defines.cuh
-    include/barretenberg/gpu/common/cuda_error.cuh
+    include/barretenberg/gpu/common/cuda_error.hpp
     include/barretenberg/gpu/common/cub_helpers.cuh
     include/barretenberg/gpu/common/device_buffer_pool.hpp
     include/barretenberg/gpu/common/device_buffer.hpp
     include/barretenberg/gpu/common/device_span.hpp
-    include/barretenberg/gpu/common/gpu_msm_context.hpp
     include/barretenberg/gpu/common/nvtx.hpp
     include/barretenberg/gpu/commitment_schemes/commitment_key_msm.hpp
     include/barretenberg/gpu/fields/field.cuh
@@ -19,11 +19,7 @@ set(BB_GPU_HEADERS
     include/barretenberg/gpu/fields/bn254/fr32.cuh
     include/barretenberg/gpu/curves/bn254/bn254.cuh
     include/barretenberg/gpu/curves/bn254/fq32_g1.cuh
-    include/barretenberg/gpu/msm/msm.hpp
-    include/barretenberg/gpu/msm/msm_heuristics.hpp
-    include/barretenberg/gpu/msm/msm_profile.cuh
-    include/barretenberg/gpu/msm/msm_raw.cuh
-    include/barretenberg/gpu/msm/msm_buffers.hpp)
+    include/barretenberg/gpu/backend.hpp)
 
 if(TARGET barretenberg_headers)
     target_sources(barretenberg_headers INTERFACE
@@ -33,14 +29,19 @@ if(TARGET barretenberg_headers)
 endif()
 
 add_library(gpu_objects OBJECT EXCLUDE_FROM_ALL
+    src/common/cuda_error.cpp
+    src/common/cuda_stream.cu
+    src/common/device_memory.cu
     src/common/gpu_msm_context.cu
-    src/msm/msm.cpp
-    src/msm/msm.cu)
+    src/msm/bn254_msm.cpp
+    src/msm/bn254_msm.cu)
 set_target_properties(gpu_objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(gpu_objects
     PUBLIC "${BB_GPU_INCLUDE_DIR}"
     PRIVATE
+        "${BB_GPU_SRC_DIR}"
         "${BB_GPU_CPP_SOURCE_DIR}"
+        ${CUDAToolkit_INCLUDE_DIRS}
         ${MSGPACK_INCLUDE}
         ${TRACY_INCLUDE}
         ${LMDB_INCLUDE}
@@ -53,6 +54,7 @@ add_library(gpu STATIC $<TARGET_OBJECTS:gpu_objects>)
 target_include_directories(gpu
     PUBLIC "${BB_GPU_INCLUDE_DIR}"
     PRIVATE
+        "${BB_GPU_SRC_DIR}"
         "${BB_GPU_CPP_SOURCE_DIR}"
         ${MSGPACK_INCLUDE}
         ${TRACY_INCLUDE}
@@ -85,11 +87,13 @@ add_library(gpu_test_objects OBJECT
     tests/bn254_g1.test.cpp
     tests/bn254_test_kernels.cu
     tests/msm.test.cpp
+    tests/msm_perf_smoke.test.cpp
     tests/device_buffer.test.cpp
     tests/msm_heuristics.test.cpp)
 target_include_directories(gpu_test_objects
     PRIVATE
         "${BB_GPU_INCLUDE_DIR}"
+        "${BB_GPU_SRC_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests"
         "${BB_GPU_CPP_SOURCE_DIR}"
         ${MSGPACK_INCLUDE}
@@ -125,6 +129,7 @@ if(NOT FUZZING)
     target_include_directories(gpu_msm_bench
         PRIVATE
             "${BB_GPU_INCLUDE_DIR}"
+            "${BB_GPU_SRC_DIR}"
             "${BB_GPU_CPP_SOURCE_DIR}"
             ${MSGPACK_INCLUDE}
             ${TRACY_INCLUDE}

@@ -1,12 +1,13 @@
 #include "barretenberg/common/throw_or_abort.hpp"
 #include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
-#include "barretenberg/gpu/common/gpu_msm_context.hpp"
+#include "barretenberg/gpu/backend.hpp"
 #include "barretenberg/gpu/curves/bn254/bn254_conversions.hpp"
-#include "barretenberg/gpu/msm/msm_heuristics.hpp"
-#include "barretenberg/gpu/msm/msm_profile.cuh"
-#include "barretenberg/gpu/msm/msm_raw.cuh"
 #include "barretenberg/numeric/random/engine.hpp"
 #include "barretenberg/polynomials/polynomial.hpp"
+#include "common/gpu_msm_context.hpp"
+#include "msm/internal/msm_heuristics.hpp"
+#include "msm/internal/msm_profile.hpp"
+#include "msm/internal/msm_raw.hpp"
 
 #include <benchmark/benchmark.h>
 #include <cuda_runtime.h>
@@ -27,19 +28,6 @@ using Commitment = Curve::AffineElement;
 constexpr int MIN_LOG_NUM_POINTS = 10;
 constexpr int MAX_LOG_NUM_POINTS = 24;
 constexpr int MAX_CPU_CORRECTNESS_LOG_NUM_POINTS = 16;
-
-class ScopedMsmPrecomputeFactor {
-public:
-  explicit ScopedMsmPrecomputeFactor(const uint32_t factor) {
-    bb::gpu::bn254::set_msm_precompute_factor(factor);
-  }
-
-  ScopedMsmPrecomputeFactor(const ScopedMsmPrecomputeFactor &) = delete;
-  ScopedMsmPrecomputeFactor &
-  operator=(const ScopedMsmPrecomputeFactor &) = delete;
-
-  ~ScopedMsmPrecomputeFactor() { bb::gpu::bn254::set_msm_precompute_factor(4); }
-};
 
 bool cuda_available() {
   int device_count = 0;
@@ -87,15 +75,22 @@ size_t resolve_point_start_index(std::span<const Commitment> points) {
 
 Commitment gpu_profiled_msm(const BenchInput &input,
                             const uint32_t bits_per_slice,
+                            const uint32_t precompute_factor,
                             bb::gpu::bn254::msm_profile &profile) {
   const auto scalars = input.polynomial.coeffs();
 
   bb::gpu::bn254::fq32_affine_g1_t result{};
+  const bb::gpu::bn254::MsmRawOptions options{
+      .bits_per_slice = bits_per_slice,
+      .precompute_factor = precompute_factor,
+      .precompute_cache_min_length =
+          bb::gpu::MsmConfig{}.precompute_cache_min_length,
+  };
   bb::gpu::bn254::msm_raw_profiled_fq32(
       reinterpret_cast<const bb::gpu::bn254::host_fr_montgomery_t *>(
           scalars.data()),
-      scalars.size(), resolve_point_start_index(input.points), bits_per_slice,
-      &result, &profile);
+      scalars.size(), resolve_point_start_index(input.points), options, &result,
+      &profile);
   return to_cpu_point(result);
 }
 
@@ -105,10 +100,12 @@ Commitment gpu_profiled_msm(const BenchInput &input,
 }
 
 void assert_correctness(const BenchInput &input, const uint32_t bits_per_slice,
+                        const uint32_t precompute_factor,
                         const int log_num_points) {
   const Commitment expected = cpu_msm(input);
   bb::gpu::bn254::msm_profile profile{};
-  const Commitment actual = gpu_profiled_msm(input, bits_per_slice, profile);
+  const Commitment actual =
+      gpu_profiled_msm(input, bits_per_slice, precompute_factor, profile);
   if (actual != expected) {
     fail_correctness_check(log_num_points);
   }
@@ -116,31 +113,11 @@ void assert_correctness(const BenchInput &input, const uint32_t bits_per_slice,
 
 void add_profile(bb::gpu::bn254::msm_profile &totals,
                  const bb::gpu::bn254::msm_profile &profile) {
-  totals.h2d_points_ms += profile.h2d_points_ms;
-  totals.h2d_scalars_ms += profile.h2d_scalars_ms;
-  totals.scalar_copy_split_pipeline_ms += profile.scalar_copy_split_pipeline_ms;
-  totals.split_scalars_ms += profile.split_scalars_ms;
-  totals.precompute_bases_ms += profile.precompute_bases_ms;
-  totals.sort_records_ms += profile.sort_records_ms;
-  totals.encode_buckets_ms += profile.encode_buckets_ms;
-  totals.scan_bucket_offsets_ms += profile.scan_bucket_offsets_ms;
-  totals.build_bucket_jobs_ms += profile.build_bucket_jobs_ms;
-  totals.sort_bucket_jobs_ms += profile.sort_bucket_jobs_ms;
-  totals.bucket_distribution_ms += profile.bucket_distribution_ms;
-  totals.init_buckets_ms += profile.init_buckets_ms;
-  totals.accumulate_normal_buckets_ms += profile.accumulate_normal_buckets_ms;
-  totals.accumulate_large_buckets_ms += profile.accumulate_large_buckets_ms;
-  totals.reduce_buckets_ms += profile.reduce_buckets_ms;
-  totals.compose_windows_ms += profile.compose_windows_ms;
-  totals.final_accumulation_ms += profile.final_accumulation_ms;
-  totals.d2h_result_ms += profile.d2h_result_ms;
-  totals.total_profiled_ms += profile.total_profiled_ms;
-  totals.bits_per_slice += profile.bits_per_slice;
-  totals.active_buckets += profile.active_buckets;
-  totals.large_bucket_threshold += profile.large_bucket_threshold;
-  totals.precompute_factor += profile.precompute_factor;
-  totals.large_bucket_mode += profile.large_bucket_mode;
-  totals.large_bucket_chunk_count += profile.large_bucket_chunk_count;
+#define BB_GPU_SUM_PROFILE_FIELD(TYPE, NAME, INIT) totals.NAME += profile.NAME;
+  BB_GPU_MSM_PROFILE_FIELDS(BB_GPU_SUM_PROFILE_FIELD)
+#undef BB_GPU_SUM_PROFILE_FIELD
+  totals.has_large_buckets =
+      totals.has_large_buckets || profile.has_large_buckets;
 }
 
 void add_profile_counters(benchmark::State &state,
@@ -157,7 +134,6 @@ void add_profile_counters(benchmark::State &state,
 
   state.counters["c"] = benchmark::Counter(totals.bits_per_slice / iterations);
   state.counters["gpu_total_ms"] = totals.total_profiled_ms / iterations;
-  state.counters["h2d_points_ms"] = totals.h2d_points_ms / iterations;
   state.counters["scalar_ingest_ms"] = scalar_ingest_ms;
   state.counters["cold_precompute_ms"] = warmup_profile.precompute_bases_ms;
   state.counters["hot_precompute_ms"] = totals.precompute_bases_ms / iterations;
@@ -167,8 +143,6 @@ void add_profile_counters(benchmark::State &state,
       (totals.scan_bucket_offsets_ms + totals.build_bucket_jobs_ms +
        totals.sort_bucket_jobs_ms) /
       iterations;
-  state.counters["bucket_distribution_ms"] =
-      totals.bucket_distribution_ms / iterations;
   state.counters["bucket_accum_ms"] = (totals.accumulate_normal_buckets_ms +
                                        totals.accumulate_large_buckets_ms) /
                                       iterations;
@@ -178,8 +152,8 @@ void add_profile_counters(benchmark::State &state,
   state.counters["d2h_result_ms"] = totals.d2h_result_ms / iterations;
   state.counters["precompute_factor"] =
       benchmark::Counter(totals.precompute_factor / iterations);
-  state.counters["large_bucket_mode"] =
-      benchmark::Counter(totals.large_bucket_mode / iterations);
+  state.counters["has_large_buckets"] =
+      benchmark::Counter(totals.has_large_buckets ? 1.0 : 0.0);
   state.counters["large_bucket_chunks"] =
       benchmark::Counter(totals.large_bucket_chunk_count / iterations);
   state.counters["active_buckets"] =
@@ -196,7 +170,6 @@ void bench_gpu_msm_profiled(benchmark::State &state) {
 
   const size_t num_points = size_t{1} << state.range(0);
   const uint32_t precompute_factor = static_cast<uint32_t>(state.range(1));
-  const ScopedMsmPrecomputeFactor scoped_precompute_factor(precompute_factor);
   auto input = make_input(num_points);
   bb::gpu::default_msm_context().ensure_srs_uploaded(
       reinterpret_cast<const bb::gpu::bn254::host_affine_g1_montgomery_t *>(
@@ -206,20 +179,22 @@ void bench_gpu_msm_profiled(benchmark::State &state) {
       bb::gpu::bn254::get_auto_bits_per_slice(num_points, precompute_factor);
 
   bb::gpu::bn254::msm_profile warmup_profile{};
-  auto warmup_result = gpu_profiled_msm(*input, bits_per_slice, warmup_profile);
+  auto warmup_result = gpu_profiled_msm(*input, bits_per_slice,
+                                        precompute_factor, warmup_profile);
   benchmark::DoNotOptimize(warmup_result);
 
   bb::gpu::bn254::msm_profile totals{};
   for (auto _ : state) {
     bb::gpu::bn254::msm_profile profile{};
-    auto result = gpu_profiled_msm(*input, bits_per_slice, profile);
+    auto result =
+        gpu_profiled_msm(*input, bits_per_slice, precompute_factor, profile);
     benchmark::DoNotOptimize(result);
     add_profile(totals, profile);
   }
 
   add_profile_counters(state, totals, warmup_profile);
   if (state.range(0) <= MAX_CPU_CORRECTNESS_LOG_NUM_POINTS) {
-    assert_correctness(*input, bits_per_slice,
+    assert_correctness(*input, bits_per_slice, precompute_factor,
                        static_cast<int>(state.range(0)));
   }
 }
@@ -272,12 +247,18 @@ make_batch_input(const size_t num_points_per_msm, const uint32_t batch_size) {
 
 void gpu_profiled_batch_msm(
     const BatchBenchInput &input, const uint32_t batch_size,
-    const uint32_t bits_per_slice,
+    const uint32_t bits_per_slice, const uint32_t precompute_factor,
     std::vector<bb::gpu::bn254::fq32_affine_g1_t> &results,
     bb::gpu::bn254::msm_profile &profile) {
+  const bb::gpu::bn254::MsmRawOptions options{
+      .bits_per_slice = bits_per_slice,
+      .precompute_factor = precompute_factor,
+      .precompute_cache_min_length =
+          bb::gpu::MsmConfig{}.precompute_cache_min_length,
+  };
   bb::gpu::bn254::msm_raw_batch_profiled_fq32(
       input.scalar_pointers.data(), input.polynomials.front().size(),
-      batch_size, resolve_point_start_index(input.points), bits_per_slice,
+      batch_size, resolve_point_start_index(input.points), options,
       results.data(), &profile);
 }
 
@@ -313,7 +294,6 @@ void bench_gpu_batch_msm_profiled(benchmark::State &state) {
   const size_t num_points = size_t{1} << state.range(0);
   const uint32_t batch_size = static_cast<uint32_t>(state.range(1));
   const uint32_t precompute_factor = static_cast<uint32_t>(state.range(2));
-  const ScopedMsmPrecomputeFactor scoped_precompute_factor(precompute_factor);
 
   std::unique_ptr<BatchBenchInput> input;
   uint32_t bits_per_slice = 0;
@@ -334,8 +314,8 @@ void bench_gpu_batch_msm_profiled(benchmark::State &state) {
 
   bb::gpu::bn254::msm_profile warmup_profile{};
   try {
-    gpu_profiled_batch_msm(*input, batch_size, bits_per_slice, results,
-                           warmup_profile);
+    gpu_profiled_batch_msm(*input, batch_size, bits_per_slice,
+                           precompute_factor, results, warmup_profile);
   } catch (const std::exception &e) {
     state.SkipWithError(e.what());
     return;
@@ -345,8 +325,8 @@ void bench_gpu_batch_msm_profiled(benchmark::State &state) {
   bb::gpu::bn254::msm_profile totals{};
   for (auto _ : state) {
     bb::gpu::bn254::msm_profile profile{};
-    gpu_profiled_batch_msm(*input, batch_size, bits_per_slice, results,
-                           profile);
+    gpu_profiled_batch_msm(*input, batch_size, bits_per_slice,
+                           precompute_factor, results, profile);
     benchmark::DoNotOptimize(results);
     add_profile(totals, profile);
   }

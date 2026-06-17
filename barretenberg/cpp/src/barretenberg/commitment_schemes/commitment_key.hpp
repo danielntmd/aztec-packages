@@ -140,7 +140,7 @@ template <class Curve> class CommitmentKey {
             std::vector<Commitment> results;
 #ifdef BB_GPU_NATIVE
             if constexpr (gpu::commitment_key_msm_available<Curve>) {
-                results = gpu::commitment_key_batch_msm<Curve>(points_spans, scalar_spans, false);
+                results = gpu::commitment_key_batch_msm<Curve>(points_spans, scalar_spans);
             } else
 #endif
             {

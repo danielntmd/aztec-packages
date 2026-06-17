@@ -109,28 +109,6 @@ __global__ void compose_fq32_xyzz_window_sums_kernel(
   window_sums[window] = accumulator;
 }
 
-__global__ void final_fq32_xyzz_accumulation_kernel(
-    const fq32_xyzz_g1_t *window_sums, fq32_affine_g1_t *result,
-    const uint32_t bits_per_slice, const uint32_t num_windows,
-    const uint32_t remainder) {
-  const uint32_t msm_index = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (msm_index > 0) {
-    return;
-  }
-
-  fq32_xyzz_g1_t accumulator = fq32_xyzz_infinity();
-  for (uint32_t window = 0; window < num_windows; ++window) {
-    const uint32_t num_doublings = (window == num_windows - 1 && remainder != 0)
-                                       ? remainder
-                                       : bits_per_slice;
-    for (uint32_t i = 0; i < num_doublings; ++i) {
-      self_double(accumulator);
-    }
-    fq32_xyzz_add_assign(accumulator, window_sums[window]);
-  }
-  *result = fq32_xyzz_to_affine(accumulator);
-}
-
 __global__ void final_fq32_xyzz_accumulation_batched_kernel(
     const fq32_xyzz_g1_t *window_sums, fq32_affine_g1_t *results,
     const uint32_t bits_per_slice, const uint32_t num_windows_per_msm,

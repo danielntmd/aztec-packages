@@ -6,19 +6,18 @@ void accumulate_large_buckets_fq32_xyzz_chunked(
     const fq32_affine_g1_t *points, fq32_xyzz_g1_t *dense_buckets,
     const int num_active_buckets, const int large_bucket_threshold,
     const uint32_t bucket_job_blocks, const uint32_t chunk_size,
-    const int num_chunks, const int num_full_chunks, const int max_chunk_count,
+    const int num_chunks, const int num_full_chunks,
     DeviceSpan<int> large_bucket_chunk_counts,
     DeviceSpan<int> large_bucket_chunk_offsets,
     DeviceSpan<int> large_bucket_full_chunk_counts,
     DeviceSpan<int> large_bucket_full_chunk_offsets,
-    DeviceSpan<int> chunk_bucket_job_indices,
     DeviceSpan<int> exec_chunk_partial_indices,
     DeviceSpan<int> exec_chunk_point_offsets,
     DeviceSpan<int> exec_chunk_point_counts,
     DeviceSpan<fq32_xyzz_g1_t> chunk_partials, const cudaStream_t cuda_stream,
     void *stream, Recorder &recorder) {
   if (num_chunks == 0) {
-    recorder.set_large_bucket_config(MSM_LARGE_BUCKET_NONE, chunk_size, 0);
+    recorder.set_large_bucket_config(false, 0);
     return;
   }
 
@@ -27,7 +26,7 @@ void accumulate_large_buckets_fq32_xyzz_chunked(
       sorted_bucket_run_indices, bucket_sizes, bucket_offsets,
       large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
       large_bucket_full_chunk_counts.data(),
-      large_bucket_full_chunk_offsets.data(), chunk_bucket_job_indices.data(),
+      large_bucket_full_chunk_offsets.data(),
       exec_chunk_partial_indices.data(), exec_chunk_point_offsets.data(),
       exec_chunk_point_counts.data(), num_active_buckets, num_full_chunks,
       chunk_size);
@@ -43,38 +42,11 @@ void accumulate_large_buckets_fq32_xyzz_chunked(
   check_cuda(cudaGetLastError(),
              "accumulate_large_bucket_segments_fq32_xyzz_kernel launch");
 
-  if (max_chunk_count < LARGE_BUCKET_TREE_REDUCTION_MIN_CHUNKS) {
-    reduce_large_bucket_chunk_partials_fq32_xyzz_kernel<<<
-        bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
-        sorted_bucket_run_indices, unique_bucket_indices,
-        large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
-        chunk_partials.data(), dense_buckets, num_active_buckets);
-    check_cuda(cudaGetLastError(),
-               "reduce_large_bucket_chunk_partials_fq32_xyzz_kernel launch");
-    return;
-  }
-
-  for (int active_chunk_count = max_chunk_count; active_chunk_count > 1;
-       active_chunk_count = (active_chunk_count + 1) >> 1) {
-    reduce_large_bucket_chunk_partials_tree_fq32_xyzz_kernel<<<
-        chunk_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
-        large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
-        chunk_partials.data(), chunk_bucket_job_indices.data(), num_chunks);
-    check_cuda(
-        cudaGetLastError(),
-        "reduce_large_bucket_chunk_partials_tree_fq32_xyzz_kernel launch");
-    update_large_bucket_chunk_counts_kernel<<<bucket_job_blocks, BUCKET_THREADS,
-                                              0, cuda_stream>>>(
-        large_bucket_chunk_counts.data(), num_active_buckets);
-    check_cuda(cudaGetLastError(),
-               "update_large_bucket_chunk_counts_kernel launch");
-  }
-
-  scatter_large_bucket_chunk_partials_fq32_xyzz_kernel<<<
+  reduce_large_bucket_chunk_partials_fq32_xyzz_kernel<<<
       bucket_job_blocks, BUCKET_THREADS, 0, cuda_stream>>>(
       sorted_bucket_run_indices, unique_bucket_indices,
       large_bucket_chunk_counts.data(), large_bucket_chunk_offsets.data(),
       chunk_partials.data(), dense_buckets, num_active_buckets);
   check_cuda(cudaGetLastError(),
-             "scatter_large_bucket_chunk_partials_fq32_xyzz_kernel launch");
+             "reduce_large_bucket_chunk_partials_fq32_xyzz_kernel launch");
 }
