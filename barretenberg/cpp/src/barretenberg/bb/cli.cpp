@@ -32,11 +32,13 @@
 #include "barretenberg/srs/global_crs.hpp"
 #include "barretenberg/vm2/api_avm.hpp"
 #include <atomic>
-#include <exception>
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#ifndef __wasm__
+#include <exception>
 #include <nlohmann/json.hpp>
+#endif
 
 namespace bb {
 
@@ -85,6 +87,7 @@ void print_subcommand_options(const CLI::App* sub)
     }
 }
 
+#ifndef __wasm__
 int run_ultra_honk_worker(const API::Flags& base_flags)
 {
     UltraHonkAPI api;
@@ -127,6 +130,7 @@ int run_ultra_honk_worker(const API::Flags& base_flags)
     }
     return 0;
 }
+#endif
 
 /**
  * @brief Parse command line arguments and run the corresponding command.
@@ -501,12 +505,14 @@ int parse_and_run_cli_command(int argc, char* argv[])
 
     prove->add_flag("--verify", "Verify the proof natively, resulting in a boolean output. Useful for testing.");
 
+#ifndef __wasm__
     CLI::App* prove_ultra_honk_worker = app.add_subcommand(
         "prove_ultra_honk_worker", "[Internal testing] Run UltraHonk prove jobs from newline-delimited JSON on stdin.");
     prove_ultra_honk_worker->group(aztec_internal_group);
     add_verbose_flag(prove_ultra_honk_worker);
     add_debug_flag(prove_ultra_honk_worker);
     add_crs_path_option(prove_ultra_honk_worker);
+#endif
 
     /***************************************************************************************************************
      * Subcommand: write_vk
@@ -812,9 +818,11 @@ int parse_and_run_cli_command(int argc, char* argv[])
     }
 #endif
 
+#ifndef __wasm__
     if (prove_ultra_honk_worker->parsed()) {
         return run_ultra_honk_worker(flags);
     }
+#endif
 
     print_active_subcommands(app);
     info("Scheme is: ", flags.scheme, ", num threads: ", get_num_cpus());

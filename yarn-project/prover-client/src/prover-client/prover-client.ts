@@ -20,7 +20,7 @@ import { type TelemetryClient, getTelemetryClient } from '@aztec/telemetry-clien
 import type { ProverClientConfig } from '../config.js';
 import { ProvingOrchestrator } from '../orchestrator/orchestrator.js';
 import { BrokerCircuitProverFacade } from '../proving_broker/broker_prover_facade.js';
-import { InlineProofStore, type ProofStore, createProofStore } from '../proving_broker/proof_store/index.js';
+import { type ProofStore, createProofStore } from '../proving_broker/proof_store/index.js';
 import { ProvingAgent } from '../proving_broker/proving_agent.js';
 import { ServerEpochProver } from './server-epoch-prover.js';
 
@@ -139,13 +139,12 @@ export class ProverClient implements EpochProverManager {
       throw new Error('Agent client not provided');
     }
 
-    const proofStore = new InlineProofStore();
     const prover = await buildServerCircuitProver(this.config, this.telemetry);
     const bindings = this.log.getBindings();
     this.agents = times(
       this.config.proverAgentCount,
       () =>
-        new ProvingAgent(this.agentClient!, proofStore, prover, [], this.config.proverAgentPollIntervalMs, bindings),
+        new ProvingAgent(this.agentClient!, this.proofStore, prover, [], this.config.proverAgentPollIntervalMs, bindings),
     );
 
     await Promise.all(this.agents.map(agent => agent.start()));

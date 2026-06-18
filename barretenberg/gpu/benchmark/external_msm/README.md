@@ -71,7 +71,7 @@ ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
   -S barretenberg/cpp \
   -B /tmp/aztec-bb-gpu-msm-bench \
   -G "Unix Makefiles" \
-  -DBB_LITE=ON \
+  -DMOBILE=ON \
   -DAVM=OFF \
   -DENABLE_HEAVY_TESTS=OFF \
   -DGPU_BACKEND=native \
@@ -214,6 +214,82 @@ check that the path runs and validates.
 There are two proof-generation benchmark entry points. Use the one that matches
 the production artifact available on the machine.
 
+Proof generation needs a full `bb` binary, not just the MSM benchmark runners.
+The MSM build above uses `MOBILE=ON`, which is appropriate for the external MSM
+suite but is not the right build for the rollup prover path. Build a separate
+GPU-enabled proof binary with `MOBILE=OFF`:
+
+```bash
+PATH=/path/to/zig:$PATH \
+ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache \
+ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
+/path/to/cmake \
+  -S barretenberg/cpp \
+  -B /tmp/aztec-bb-gpu-proof \
+  -G "Unix Makefiles" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMOBILE=OFF \
+  -DAVM=OFF \
+  -DENABLE_HEAVY_TESTS=OFF \
+  -DGPU_BACKEND=native \
+  -DCUDAToolkit_ROOT=/path/to/cuda-12.8 \
+  -DCMAKE_CUDA_COMPILER=/path/to/cuda-12.8/bin/nvcc \
+  -DCMAKE_CUDA_ARCHITECTURES=<compute-capability-without-dot> \
+  -DCMAKE_C_COMPILER=/absolute/path/to/barretenberg/cpp/scripts/zig-cc.sh \
+  -DCMAKE_CXX_COMPILER=/absolute/path/to/barretenberg/cpp/scripts/zig-c++.sh \
+  -DCMAKE_AR=/absolute/path/to/barretenberg/cpp/scripts/zig-ar.sh \
+  -DCMAKE_RANLIB=/absolute/path/to/barretenberg/cpp/scripts/zig-ranlib.sh
+
+PATH=/path/to/zig:$PATH \
+ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache \
+ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
+/path/to/cmake --build /tmp/aztec-bb-gpu-proof --target bb -- -j16
+```
+
+The e2e proof-input generation path depends on the normal generated TypeScript,
+Noir, and L1 artifacts. From a fresh rebase, run the normal bootstrap/build
+flow before attempting the e2e command:
+
+```bash
+PATH=/path/to/cmake/bin:/path/to/zig:$PATH \
+ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache \
+ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
+./bootstrap.sh build yarn-project
+```
+
+On the local 16 GB RTX 5060 Ti setup, the GPU proof `bb` target previously
+built successfully with `GPU_BACKEND=native`, `MOBILE=OFF`, `AVM=OFF`, and
+`CMAKE_CUDA_ARCHITECTURES=120`. After rebasing this benchmark branch onto
+`upstream/v4`, a clean focused `cmake --build --preset wasm-threads --target bb`
+check on `upstream/v4` also passed. Re-run the normal bootstrap flow on the
+target production machine before relying on e2e proof-generation timings.
+
+### Proof Input Reproducibility
+
+For CPU/GPU comparisons, keep the proof inputs fixed. The e2e flow below
+generates real proof jobs, but the complete proof-store directory should be
+treated as a captured fixture once it is generated. Replaying the same stored
+input URI through different `bb` binaries is deterministic enough for benchmark
+comparison; regenerating the e2e flow may produce a different proof-store layout
+or different job identifiers because the surrounding test runtime creates fresh
+state.
+
+Record these fields next to every proof benchmark result:
+
+| Field | Purpose |
+|---|---|
+| Proof input URI | Identifies the exact proof job being replayed. |
+| Proof store URI | Lets the prover resolve sibling artifacts and outputs. |
+| SHA256 of the input file | Confirms CPU and GPU replay used identical inputs. |
+| SHA256 of the output proof | Confirms repeated replays produced the same proof bytes. |
+| Git SHA/status and `bb` binary path | Ties the replay to the exact implementation. |
+| GPU env vars | Captures settings such as `BB_GPU_MSM_PRECOMPUTE_FACTOR` and `BB_GPU_MSM_MAX_BATCH_SIZE`. |
+
+Do not commit large generated proof stores into the repository. For production
+benchmarking, copy the captured proof-store directory to the target machine or
+store it in an external artifact location, then replay that same fixture for
+CPU and GPU runs.
+
 ### Captured Chonk IVC Inputs
 
 Use this when you have an `ivc-inputs.msgpack` file for the root rollup or other
@@ -257,6 +333,47 @@ node yarn-project/scripts/run_rollup_proof_job_bench.mjs \
 
 For non-file proof stores, pass `--proof-store` explicitly if it cannot be
 inferred from `--proof-uri`.
+
+To generate a stored root-rollup proof input locally, run the real-proof e2e
+prover flow with a file proof store. The first transfer test is the shortest
+targeted path that should advance into epoch proving and write rollup proof jobs:
+
+```bash
+env -u FAKE_PROOFS \
+  LD_LIBRARY_PATH=/path/to/cuda-12.8/lib64:$LD_LIBRARY_PATH \
+  BB_BINARY_PATH=/tmp/aztec-bb-gpu-proof/bin/bb \
+  ACVM_BINARY_PATH=/absolute/path/to/noir/noir-repo/target/release/acvm \
+  BB_WORKING_DIRECTORY=/tmp/aztec-gpu-e2e-bb-work \
+  ACVM_WORKING_DIRECTORY=/tmp/aztec-gpu-e2e-acvm-work \
+  BB_SKIP_CLEANUP=1 \
+  PROVER_REAL_PROOFS=1 \
+  PROVER_PROOF_STORE=file:///tmp/aztec-gpu-e2e-proof-store \
+  PROVER_AGENT_COUNT=1 \
+  LOG_LEVEL=info \
+  JEST_CACHE_DIR=/tmp/aztec-gpu-e2e-jest-cache \
+  yarn-project/end-to-end/scripts/run_test.sh simple e2e_prover/full \
+    "makes both public and private transfers"
+```
+
+After the e2e run succeeds, choose the generated root-rollup input:
+
+```bash
+find /tmp/aztec-gpu-e2e-proof-store/inputs/ROOT_ROLLUP -type f
+```
+
+Replay that proof job with the benchmark script:
+
+```bash
+node yarn-project/scripts/run_rollup_proof_job_bench.mjs \
+  --proof-uri file:///tmp/aztec-gpu-e2e-proof-store/inputs/ROOT_ROLLUP/<job-id> \
+  --proof-store file:///tmp/aztec-gpu-e2e-proof-store \
+  --bb-bin /tmp/aztec-bb-gpu-proof/bin/bb \
+  --acvm-bin /absolute/path/to/noir/noir-repo/target/release/acvm \
+  --output-dir /tmp/gpu-rollup-proof-job-root-rollup \
+  --expected-type ROOT_ROLLUP \
+  --warmups 1 \
+  --repeats 5
+```
 
 Report proof generation separately from MSM microbenchmarks. Proof timings
 include orchestration, witness/proving work, BB process behavior, and any
