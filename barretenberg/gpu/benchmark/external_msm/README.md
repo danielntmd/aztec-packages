@@ -49,6 +49,7 @@ production machine:
 | Batch-100 device-resident run | Compare the same `2^20 x 100` shape after scalars are already on device and results stay on device until after timing. | [Device-Resident Batch-100 Shape](#device-resident-batch-100-shape) |
 | Optional c-value sweep | Diagnose whether auto `c` is responsible for a performance shift. | [C-Value Sweep](#c-value-sweep) |
 | Root rollup / Chonk IVC proof | Measure proof generation using captured proof inputs or a stored rollup proof job. | [Proof Generation](#proof-generation) |
+| Proof-store replay | Replay every captured proof job from a real-proof e2e store through the native prover path. | [Proof-Store Replay](#proof-store-replay) |
 
 The MSM wrapper writes metadata automatically. The proof-generation scripts
 write run records and summaries, but do not currently capture the full machine
@@ -285,10 +286,31 @@ Record these fields next to every proof benchmark result:
 | Git SHA/status and `bb` binary path | Ties the replay to the exact implementation. |
 | GPU env vars | Captures settings such as `BB_GPU_MSM_PRECOMPUTE_FACTOR` and `BB_GPU_MSM_MAX_BATCH_SIZE`. |
 
-Do not commit large generated proof stores into the repository. For production
-benchmarking, copy the captured proof-store directory to the target machine or
-store it in an external artifact location, then replay that same fixture for
-CPU and GPU runs.
+Do not commit large ad-hoc generated proof stores into the repository. For
+production benchmarking, replay a fixed fixture for CPU and GPU runs. This
+benchmark includes a small committed proof-store fixture so production machines
+can reproduce the same proof inputs directly from git.
+
+The committed sanity fixture is:
+
+```text
+barretenberg/gpu/benchmark/proof_generation/fixtures/aztec-gpu-e2e-proof-store-sanity-full.tar.gz
+```
+
+with SHA256:
+
+```text
+333740f7da89537a2ca21df67a8754f59585298b000b36606707005220a5880e
+```
+
+Extract it on the target machine with:
+
+```bash
+tar -C /tmp -xzf barretenberg/gpu/benchmark/proof_generation/fixtures/aztec-gpu-e2e-proof-store-sanity-full.tar.gz
+```
+
+Then use `file:///tmp/aztec-gpu-e2e-proof-store-sanity-full` as the
+`--proof-store` value.
 
 ### Captured Chonk IVC Inputs
 
@@ -378,6 +400,76 @@ node yarn-project/scripts/run_rollup_proof_job_bench.mjs \
 Report proof generation separately from MSM microbenchmarks. Proof timings
 include orchestration, witness/proving work, BB process behavior, and any
 configured cleanup policy; they are not isolated MSM timings.
+
+### Proof-Store Replay
+
+Use this when you want a broader production-shaped proof benchmark without
+timing the full e2e node/sequencer/test harness. The script discovers every
+captured proof input under a local file proof store, replays each job
+sequentially through `BBNativeRollupProver`, and writes total, per-type, and
+per-job timings. Each prover method verifies the generated proof before
+returning, so a successful row means the proof was generated and verified.
+
+First inspect the captured fixture:
+
+```bash
+node yarn-project/scripts/run_proof_store_replay_bench.mjs \
+  --proof-store file:///tmp/aztec-gpu-e2e-proof-store \
+  --output-dir /tmp/gpu-proof-store-replay-list \
+  --list
+```
+
+Then run CPU and GPU replays against the same proof-store fixture:
+
+```bash
+node yarn-project/scripts/run_proof_store_replay_bench.mjs \
+  --proof-store file:///tmp/aztec-gpu-e2e-proof-store \
+  --bb-bin /path/to/cpu/bb \
+  --acvm-bin /absolute/path/to/noir/noir-repo/target/release/acvm \
+  --output-dir /tmp/cpu-proof-store-replay \
+  --warmups 0 \
+  --repeats 1
+```
+
+```bash
+BB_GPU_MSM_PRECOMPUTE_FACTOR=1 \
+BB_GPU_MSM_MAX_BATCH_SIZE=1 \
+node yarn-project/scripts/run_proof_store_replay_bench.mjs \
+  --proof-store file:///tmp/aztec-gpu-e2e-proof-store \
+  --bb-bin /path/to/gpu/bb \
+  --acvm-bin /absolute/path/to/noir/noir-repo/target/release/acvm \
+  --output-dir /tmp/gpu-proof-store-replay \
+  --warmups 0 \
+  --repeats 1
+```
+
+`BB_GPU_MSM_MAX_BATCH_SIZE=1` is only needed on smaller GPUs when the fused
+root-rollup batch exceeds available memory. On production hardware, prefer the
+default fused path unless memory preflight fails.
+
+If the captured store includes `PUBLIC_VM`, the replay uses `bb avm_prove` for
+that job and therefore needs a `bb` binary built with AVM support.
+`PUBLIC_TX_BASE_ROLLUP` can also require AVM recursion support. For a
+rollup/MSM-focused replay using an `AVM=OFF` proof binary, exclude those jobs:
+
+```bash
+--exclude-types PUBLIC_VM,PUBLIC_TX_BASE_ROLLUP
+```
+
+The replay script writes:
+
+| File | Contents |
+|---|---|
+| `metadata.json` | Command, git state, GPU env vars, `nvidia-smi`, discovered proof inputs, and input SHA256 hashes. |
+| `raw.jsonl` | Per-job records plus one suite-total record per repeat. |
+| `summary.json` | Aggregated total, per-type, and per-job records. |
+| `summary.md` | Human-readable tables for reporting. |
+
+This is not a full epoch wall-clock benchmark. It intentionally excludes node
+startup, transaction submission, sequencer timing, publication, and prover-agent
+scheduling noise. Use the original `e2e_prover/full` command as the full-system
+smoke benchmark and the proof-store replay as the production-shaped proving
+benchmark.
 
 ## C-Value Sweep
 
