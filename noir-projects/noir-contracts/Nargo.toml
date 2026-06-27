@@ -78,6 +78,7 @@ members = [
     "contracts/test/static_child_contract",
     "contracts/test/static_parent_contract",
     "contracts/test/storage_proof_test_contract",
+    "contracts/test/storage_proof_recursive_verifier_contract",
     "contracts/test/test_contract",
     "contracts/test/test_log_contract",
     "contracts/test/tx_effect_oracle_test_contract",

@@ -82,8 +82,8 @@ function compile {
     cache_upload circuit-$hash.tar.gz $json_path &> /dev/null
   fi
 
-  # No vks needed for simulated circuits.
-  [[ "$name" == *"simulated"* ]] && return
+  # No vks needed for simulated circuits or benchmark-only standalone proof circuits.
+  [[ "$name" == *"simulated"* || "$name" == "storage_proof_mpt" ]] && return
 
   # Add verification key to original json, similar to contracts.
   # This adds keyAsBytes and keyAsFields to the JSON artifact.

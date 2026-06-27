@@ -4,7 +4,7 @@ import { Fr } from '@aztec/foundation/curves/bn254';
 import { EthAddress } from '@aztec/foundation/eth-address';
 import { Capsule } from '@aztec/stdlib/tx';
 
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -17,8 +17,12 @@ const ACCOUNT_PROOF_CAPSULE_KEY_SEPARATOR = 101;
 const STORAGE_PROOF_CAPSULE_KEY_SEPARATOR = 102;
 const STORAGE_PROOF_NODE_CAPSULE_KEY_SEPARATOR = 103;
 const MAX_ACCOUNT_PROOF_LENGTH = 15;
+const RECURSIVE_VK_CAPSULE_SLOT = 200;
+const RECURSIVE_PROOF_CAPSULE_SLOT = 201;
+const RECURSIVE_PUBLIC_INPUTS_CAPSULE_SLOT = 202;
 /** Node: rows [[u64;4];16] (64) + row_exist [bool;16] (16) + node_type u8 (1) = 81 fields */
 const NODE_FIELD_COUNT = 81;
+const RECURSIVE_PROOF_FIXTURE_PATH = join(__dirname, './storage_proof_ultrahonk.json');
 
 // --- JSON fixture types ---
 
@@ -43,6 +47,13 @@ type StorageProofJSON = {
   storage_nodes: JsonNode[];
   account: JsonAccount;
   slot: { value: string[]; value_length: string };
+};
+
+type RecursiveProofJSON = {
+  vkAsFields: string[];
+  vkHash: string;
+  proofAsFields: string[];
+  publicInputs: string[];
 };
 
 // --- Serialization helpers (Noir struct Serialize layout) ---
@@ -170,4 +181,40 @@ export async function buildStorageProofCapsules(contractAddress: AztecAddress): 
   }
 
   return capsules;
+}
+
+export function loadRecursiveStorageProofArgs() {
+  const storageProofArgs = loadStorageProofArgs();
+  assertRecursiveProofFixtureExists();
+  const proof: RecursiveProofJSON = JSON.parse(readFileSync(RECURSIVE_PROOF_FIXTURE_PATH, 'utf8'));
+  return { ...storageProofArgs, vkHash: Fr.fromString(proof.vkHash) };
+}
+
+export function buildRecursiveStorageProofCapsules(contractAddress: AztecAddress): Capsule[] {
+  assertRecursiveProofFixtureExists();
+  const proof: RecursiveProofJSON = JSON.parse(readFileSync(RECURSIVE_PROOF_FIXTURE_PATH, 'utf8'));
+
+  return [
+    new Capsule(
+      contractAddress,
+      new Fr(RECURSIVE_VK_CAPSULE_SLOT),
+      proof.vkAsFields.map(field => Fr.fromString(field)),
+    ),
+    new Capsule(
+      contractAddress,
+      new Fr(RECURSIVE_PROOF_CAPSULE_SLOT),
+      proof.proofAsFields.map(field => Fr.fromString(field)),
+    ),
+    new Capsule(
+      contractAddress,
+      new Fr(RECURSIVE_PUBLIC_INPUTS_CAPSULE_SLOT),
+      proof.publicInputs.map(field => Fr.fromString(field)),
+    ),
+  ];
+}
+
+function assertRecursiveProofFixtureExists() {
+  if (!existsSync(RECURSIVE_PROOF_FIXTURE_PATH)) {
+    throw new Error(`Missing recursive storage proof fixture. Run generate_mpt_ultrahonk_proof.ts first.`);
+  }
 }

@@ -8,6 +8,7 @@ members = [
     "crates/types",
     "crates/protocol-test-utils",
     "crates/blob",
+    "crates/storage-proof-mpt",
     "crates/parity-base",
     "crates/parity-root",
     "crates/private-kernel-lib",
