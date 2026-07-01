@@ -99,6 +99,16 @@ ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
            gpu_msm_external_icicle_v4_bench -- -j16
 ```
 
+To compile the BB runner with Icicle's inline BN254 Fq arithmetic in the MSM
+curve formulas, configure a separate build directory with:
+
+```bash
+-DBB_GPU_MSM_FIELD_BACKEND=icicle \
+-DBB_GPU_ICICLE_INCLUDE_DIRS="/path/to/icicle/include;/path/to/icicle/backend/cuda/include"
+```
+
+The default is `-DBB_GPU_MSM_FIELD_BACKEND=bb`.
+
 ## Runtime Inputs
 
 The runner needs CUDA runtime libraries and the Icicle libraries visible through

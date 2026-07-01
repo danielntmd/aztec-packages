@@ -4,6 +4,34 @@ set(BB_GPU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(BB_GPU_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(BB_GPU_CPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cpp/src")
 option(BB_ENABLE_GPU_MSM_EXTERNAL_BENCH "Build optional external GPU MSM comparison benchmark runners" OFF)
+set(BB_GPU_MSM_FIELD_BACKEND "bb" CACHE STRING "BN254 GPU MSM field arithmetic backend")
+set_property(CACHE BB_GPU_MSM_FIELD_BACKEND PROPERTY STRINGS bb icicle)
+set(BB_GPU_ICICLE_INCLUDE_DIRS "" CACHE STRING "Icicle include directories for the optional GPU MSM field backend")
+if(NOT BB_GPU_MSM_FIELD_BACKEND MATCHES "^(bb|icicle)$")
+    message(FATAL_ERROR "BB_GPU_MSM_FIELD_BACKEND must be one of: bb, icicle")
+endif()
+if(BB_GPU_MSM_FIELD_BACKEND STREQUAL "icicle")
+    if(NOT BB_GPU_ICICLE_INCLUDE_DIRS AND ICICLE_V4_INCLUDE_DIR)
+        set(BB_GPU_ICICLE_INCLUDE_DIRS "${ICICLE_V4_INCLUDE_DIR}" CACHE STRING
+            "Icicle include directories for the optional GPU MSM field backend" FORCE)
+    endif()
+    if(NOT BB_GPU_ICICLE_INCLUDE_DIRS AND ICICLE_V4_INSTALL_DIR)
+        set(BB_GPU_ICICLE_INCLUDE_DIRS "${ICICLE_V4_INSTALL_DIR}/include" CACHE STRING
+            "Icicle include directories for the optional GPU MSM field backend" FORCE)
+    endif()
+    if(NOT BB_GPU_ICICLE_INCLUDE_DIRS)
+        message(FATAL_ERROR "Set BB_GPU_ICICLE_INCLUDE_DIRS or ICICLE_V4_INCLUDE_DIR when "
+                            "BB_GPU_MSM_FIELD_BACKEND=icicle")
+    endif()
+endif()
+
+function(bb_gpu_apply_msm_field_backend TARGET_NAME)
+    if(BB_GPU_MSM_FIELD_BACKEND STREQUAL "icicle")
+        target_compile_definitions(${TARGET_NAME} PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:BB_GPU_USE_ICICLE_FIELD_KERNELS>)
+        target_include_directories(${TARGET_NAME} PRIVATE ${BB_GPU_ICICLE_INCLUDE_DIRS})
+    endif()
+endfunction()
 
 set(BB_GPU_HEADERS
     include/barretenberg/gpu/common/cuda_defines.cuh
@@ -17,6 +45,7 @@ set(BB_GPU_HEADERS
     include/barretenberg/gpu/fields/field.cuh
     include/barretenberg/gpu/fields/bn254/params.cuh
     include/barretenberg/gpu/fields/bn254/fq32.cuh
+    include/barretenberg/gpu/fields/bn254/icicle_fq32.cuh
     include/barretenberg/gpu/fields/bn254/fr32.cuh
     include/barretenberg/gpu/curves/bn254/bn254.cuh
     include/barretenberg/gpu/curves/bn254/fq32_g1.cuh
@@ -77,6 +106,8 @@ target_link_libraries(gpu
         polynomials
         CUDA::cudart
         ${BB_GPU_STDCXX_LIBRARY})
+bb_gpu_apply_msm_field_backend(gpu_objects)
+bb_gpu_apply_msm_field_backend(gpu)
 
 if(TARGET msgpack-c)
     add_dependencies(gpu_objects msgpack-c)
@@ -109,6 +140,7 @@ target_link_libraries(gpu_test_objects
         gpu
         GTest::gtest
         GTest::gmock_main)
+bb_gpu_apply_msm_field_backend(gpu_test_objects)
 
 add_executable(gpu_tests $<TARGET_OBJECTS:gpu_test_objects>)
 target_link_libraries(gpu_tests
@@ -146,6 +178,7 @@ if(NOT FUZZING)
             benchmark::benchmark
             CUDA::cudart
             ${BB_GPU_STDCXX_LIBRARY})
+    bb_gpu_apply_msm_field_backend(gpu_msm_bench)
     if(TARGET msgpack-c)
         add_dependencies(gpu_msm_bench msgpack-c)
     endif()
@@ -174,6 +207,7 @@ if(NOT FUZZING)
                 commitment_schemes
                 CUDA::cudart
                 ${BB_GPU_STDCXX_LIBRARY})
+        bb_gpu_apply_msm_field_backend(gpu_msm_external_bb_bench)
         if(TARGET msgpack-c)
             add_dependencies(gpu_msm_external_bb_bench msgpack-c)
         endif()

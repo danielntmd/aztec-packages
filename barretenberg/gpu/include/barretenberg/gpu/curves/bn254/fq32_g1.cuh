@@ -4,6 +4,9 @@
 
 #include "barretenberg/gpu/common/cuda_defines.cuh"
 #include "barretenberg/gpu/fields/bn254/fq32.cuh"
+#ifdef BB_GPU_USE_ICICLE_FIELD_KERNELS
+#include "barretenberg/gpu/fields/bn254/icicle_fq32.cuh"
+#endif
 
 namespace bb::gpu::bn254 {
 
@@ -22,19 +25,35 @@ struct alignas(32) fq32_xyzz_g1_t {
 };
 
 BB_GPU_HD_FORCEINLINE fq32_t fq32_add(const fq32_t &lhs, const fq32_t &rhs) {
+#ifdef BB_GPU_USE_ICICLE_FIELD_KERNELS
+  return detail::icicle_fq32_add(lhs, rhs);
+#else
   return add(lhs, rhs);
+#endif
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t fq32_sub(const fq32_t &lhs, const fq32_t &rhs) {
+#ifdef BB_GPU_USE_ICICLE_FIELD_KERNELS
+  return detail::icicle_fq32_sub(lhs, rhs);
+#else
   return sub(lhs, rhs);
+#endif
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t fq32_mul(const fq32_t &lhs, const fq32_t &rhs) {
+#ifdef BB_GPU_USE_ICICLE_FIELD_KERNELS
+  return detail::icicle_fq32_mul(lhs, rhs);
+#else
   return mul_straightline(lhs, rhs);
+#endif
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t fq32_sqr(const fq32_t &value) {
+#ifdef BB_GPU_USE_ICICLE_FIELD_KERNELS
+  return detail::icicle_fq32_sqr(value);
+#else
   return fq32_mul(value, value);
+#endif
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t fq32_inv(const fq32_t &value) {
