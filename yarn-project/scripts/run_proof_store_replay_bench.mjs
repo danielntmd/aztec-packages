@@ -4,12 +4,12 @@ import { createLogger } from '@aztec/foundation/log';
 import { createProofStore } from '@aztec/prover-client/broker';
 import { ProvingRequestType } from '@aztec/stdlib/proofs';
 
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
 const logger = createLogger('gpu-proof-store-replay-bench');
@@ -275,6 +275,8 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
   const runDir = resolve(args.outputDir, runName);
   const bbDir = join(runDir, 'bb');
   const acvmDir = join(runDir, 'acvm');
+
+  const setupStart = performance.now();
   await mkdir(bbDir, { recursive: true });
   await mkdir(acvmDir, { recursive: true });
 
@@ -285,23 +287,32 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     acvmWorkingDirectory: acvmDir,
     bbSkipCleanup: true,
   });
+  const setupMs = performance.now() - setupStart;
 
   const suiteStart = performance.now();
   const records = [];
   for (let jobIndex = 0; jobIndex < jobs.length; jobIndex++) {
     const jobRef = jobs[jobIndex];
+    const jobStart = performance.now();
+    const inputLoadStart = performance.now();
     const job = await proofStore.getProofInput(jobRef.proofUri);
+    const inputLoadMs = performance.now() - inputLoadStart;
     if (job.type !== jobRef.type) {
       throw new Error(
         `Discovered ${jobRef.typeName} for ${jobRef.proofUri}, but proof store decoded ${proofTypeName(job.type)}`,
       );
     }
 
-    const start = performance.now();
+    const proofGenerationStart = performance.now();
     const result = await dispatchProof(prover, job.type, job.inputs);
-    const elapsedMs = performance.now() - start;
+    const proofGenerationMs = performance.now() - proofGenerationStart;
+
+    const proofOutputStart = performance.now();
     const proofBuffer = extractProofBuffer(result);
     const proofStats = await maybeFileStats(join(bbDir, 'proof'));
+    const proofOutputMs = performance.now() - proofOutputStart;
+    const elapsedMs = performance.now() - jobStart;
+    const stageTotalMs = inputLoadMs + proofGenerationMs + proofOutputMs;
     const record = {
       benchmark: 'proof-store-replay-job',
       repeat,
@@ -314,6 +325,11 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       inputSizeBytes: jobRef.inputSizeBytes,
       inputSha256: jobRef.inputSha256,
       elapsedMs,
+      inputLoadMs,
+      proofGenerationMs,
+      proofOutputMs,
+      stageTotalMs,
+      overheadMs: elapsedMs - stageTotalMs,
       verified: true,
       proofSizeBytes: proofBuffer?.length ?? proofStats.bytes,
       proofGzipSizeBytes: proofBuffer ? gzipSync(proofBuffer).length : proofStats.gzipBytes,
@@ -329,16 +345,28 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     console.log(
       `${warmup ? 'warmup' : 'run'} ${repeat} job ${jobIndex + 1}/${jobs.length} ${jobRef.typeName} ${elapsedMs.toFixed(
         3,
-      )} ms`,
+      )} ms proof=${proofGenerationMs.toFixed(3)} ms overhead=${(elapsedMs - stageTotalMs).toFixed(3)} ms`,
     );
   }
 
-  const totalElapsedMs = performance.now() - suiteStart;
+  const jobLoopElapsedMs = performance.now() - suiteStart;
+  const inputLoadMs = records.reduce((sum, record) => sum + record.inputLoadMs, 0);
+  const proofGenerationMs = records.reduce((sum, record) => sum + record.proofGenerationMs, 0);
+  const proofOutputMs = records.reduce((sum, record) => sum + record.proofOutputMs, 0);
+  const stageTotalMs = setupMs + inputLoadMs + proofGenerationMs + proofOutputMs;
+  const elapsedMs = setupMs + jobLoopElapsedMs;
   const suiteRecord = {
     benchmark: 'proof-store-replay-suite',
     repeat,
     warmup,
-    elapsedMs: totalElapsedMs,
+    elapsedMs,
+    setupMs,
+    jobLoopElapsedMs,
+    inputLoadMs,
+    proofGenerationMs,
+    proofOutputMs,
+    stageTotalMs,
+    overheadMs: elapsedMs - stageTotalMs,
     jobs: records.length,
     runDir,
     bbDir,
@@ -411,8 +439,11 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
   const measuredSuites = suiteRecords.filter(record => !record.warmup);
   const measuredJobs = jobRecords.filter(record => !record.warmup);
   const suiteElapsed = measuredSuites.map(record => record.elapsedMs);
+  const suiteSetup = measuredSuites.map(record => record.setupMs);
+  const suiteAvgField = field => avg(measuredSuites.map(record => record[field]));
   const byType = [...groupBy(measuredJobs, record => record.proofType)].map(([proofType, records]) => {
     const elapsed = records.map(record => record.elapsedMs);
+    const avgFor = field => avg(records.map(record => record[field]));
     return {
       proofType,
       samples: records.length,
@@ -421,6 +452,11 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
       elapsedMsMin: Math.min(...elapsed),
       elapsedMsMax: Math.max(...elapsed),
       elapsedMsStdev: stdev(elapsed),
+      inputLoadMsAvg: avgFor('inputLoadMs'),
+      proofGenerationMsAvg: avgFor('proofGenerationMs'),
+      proofOutputMsAvg: avgFor('proofOutputMs'),
+      stageTotalMsAvg: avgFor('stageTotalMs'),
+      overheadMsAvg: avgFor('overheadMs'),
     };
   });
   byType.sort((a, b) => proofTypeSortIndex(a.proofType) - proofTypeSortIndex(b.proofType));
@@ -435,6 +471,12 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
     elapsedMsMin: Math.min(...suiteElapsed),
     elapsedMsMax: Math.max(...suiteElapsed),
     elapsedMsStdev: stdev(suiteElapsed),
+    setupMsAvg: avg(suiteSetup),
+    inputLoadMsAvg: suiteAvgField('inputLoadMs'),
+    proofGenerationMsAvg: suiteAvgField('proofGenerationMs'),
+    proofOutputMsAvg: suiteAvgField('proofOutputMs'),
+    stageTotalMsAvg: suiteAvgField('stageTotalMs'),
+    overheadMsAvg: suiteAvgField('overheadMs'),
     suiteRecords: measuredSuites,
     byType,
     records: measuredJobs,
@@ -459,27 +501,41 @@ async function writeSummaryMd(outputDir, summary) {
     `| total min ms | ${formatMs(summary.elapsedMsMin)} |`,
     `| total max ms | ${formatMs(summary.elapsedMsMax)} |`,
     `| total stdev ms | ${formatMs(summary.elapsedMsStdev)} |`,
+    `| setup avg ms | ${formatMs(summary.setupMsAvg)} |`,
+    `| input load avg ms | ${formatMs(summary.inputLoadMsAvg)} |`,
+    `| proof generation avg ms | ${formatMs(summary.proofGenerationMsAvg)} |`,
+    `| output avg ms | ${formatMs(summary.proofOutputMsAvg)} |`,
+    `| stage total avg ms | ${formatMs(summary.stageTotalMsAvg)} |`,
+    `| overhead avg ms | ${formatMs(summary.overheadMsAvg)} |`,
     '',
     '## By Type',
     '',
-    '| proof type | samples | jobs/repeat | avg ms | min ms | max ms | stdev ms |',
-    '|---|---:|---:|---:|---:|---:|---:|',
+    '| proof type | samples | jobs/repeat | avg ms | stage total avg ms | proof generation avg ms | overhead avg ms | input load avg ms | output avg ms | min ms | max ms | stdev ms |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
     ...summary.byType.map(
       row =>
         `| ${row.proofType} | ${row.samples} | ${row.jobsPerRepeat} | ${formatMs(row.elapsedMsAvg)} | ${formatMs(
-          row.elapsedMsMin,
-        )} | ${formatMs(row.elapsedMsMax)} | ${formatMs(row.elapsedMsStdev)} |`,
+          row.stageTotalMsAvg,
+        )} | ${formatMs(
+          row.proofGenerationMsAvg,
+        )} | ${formatMs(row.overheadMsAvg)} | ${formatMs(row.inputLoadMsAvg)} | ${formatMs(
+          row.proofOutputMsAvg,
+        )} | ${formatMs(row.elapsedMsMin)} | ${formatMs(row.elapsedMsMax)} | ${formatMs(row.elapsedMsStdev)} |`,
     ),
     '',
     '## Jobs',
     '',
-    '| repeat | index | proof type | elapsed ms | input sha256 | proof sha256 | proof bytes |',
-    '|---:|---:|---|---:|---|---|---:|',
+    '| repeat | index | proof type | elapsed ms | stage total ms | proof generation ms | overhead ms | input load ms | output ms | input sha256 | proof sha256 | proof bytes |',
+    '|---:|---:|---|---:|---:|---:|---:|---:|---:|---|---|---:|',
     ...summary.records.map(
       record =>
-        `| ${record.repeat} | ${record.jobIndex} | ${record.proofType} | ${formatMs(record.elapsedMs)} | ${
-          record.inputSha256
-        } | ${record.proofSha256 ?? ''} | ${record.proofSizeBytes ?? ''} |`,
+        `| ${record.repeat} | ${record.jobIndex} | ${record.proofType} | ${formatMs(record.elapsedMs)} | ${formatMs(
+          record.stageTotalMs,
+        )} | ${formatMs(
+          record.proofGenerationMs,
+        )} | ${formatMs(record.overheadMs)} | ${formatMs(record.inputLoadMs)} | ${formatMs(
+          record.proofOutputMs,
+        )} | ${record.inputSha256} | ${record.proofSha256 ?? ''} | ${record.proofSizeBytes ?? ''} |`,
     ),
     '',
   ];

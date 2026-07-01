@@ -461,9 +461,9 @@ The replay script writes:
 | File | Contents |
 |---|---|
 | `metadata.json` | Command, git state, GPU env vars, `nvidia-smi`, discovered proof inputs, and input SHA256 hashes. |
-| `raw.jsonl` | Per-job records plus one suite-total record per repeat. |
-| `summary.json` | Aggregated total, per-type, and per-job records. |
-| `summary.md` | Human-readable tables for reporting. |
+| `raw.jsonl` | Per-job records plus one suite-total record per repeat, including setup, input-load, proof-generation, output, stage-total, and residual-overhead timings. |
+| `summary.json` | Aggregated total, per-type, and per-job records with timing splits that sum with overhead to the end-to-end elapsed time. |
+| `summary.md` | Human-readable tables for reporting the timing splits. |
 
 This is not a full epoch wall-clock benchmark. It intentionally excludes node
 startup, transaction submission, sequencer timing, publication, and prover-agent
