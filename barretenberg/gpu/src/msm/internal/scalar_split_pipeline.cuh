@@ -251,13 +251,6 @@ void split_device_scalars_batched_pipeline(
     const cudaStream_t main_stream, Recorder &recorder) {
   bb::gpu::ScopedNvtxRange nvtx_range(recorder.scalar_copy_split_range_name());
 
-  const bool record_profile = recorder.enabled();
-  const OptionalTimingEvent split_start_event(record_profile);
-  const OptionalTimingEvent split_stop_event(record_profile);
-
-  split_start_event.record(main_stream,
-                           "cudaEventRecord device scalar split start");
-
   const uint32_t split_blocks_x =
       ceil_div_u32(num_scalars_per_msm, SPLIT_THREADS);
   const dim3 grid_dim(split_blocks_x, batch_size, 1);
@@ -275,16 +268,4 @@ void split_device_scalars_batched_pipeline(
         batch_size);
   }
   check_cuda(cudaGetLastError(), "split_device_scalars_batched_kernel launch");
-
-  split_stop_event.record(main_stream,
-                          "cudaEventRecord device scalar split stop");
-
-  if (record_profile) {
-    check_cuda(cudaEventSynchronize(split_stop_event.get()),
-               "cudaEventSynchronize device scalar split stop");
-    const float split_ms =
-        elapsed_ms(split_start_event.get(), split_stop_event.get());
-    recorder.set_scalar_copy_split_pipeline_ms(split_ms);
-    recorder.add_split_scalars_ms(split_ms);
-  }
 }

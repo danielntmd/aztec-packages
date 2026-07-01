@@ -166,11 +166,11 @@ python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
   --icicle-backend-dir /path/to/icicle-v4/backend
 ```
 
-The BB runner defaults to a maximum fused batch size of 16, so this shape runs
-as chunks `16+16+16+16+16+16+4`. Override this only for experiments:
+The BB API defaults to a maximum fused batch size of 16, so it chunks this
+shape internally as `16+16+16+16+16+16+4`. Lower this only for experiments:
 
 ```bash
---bb-max-fused-batch-size 100
+--bb-max-fused-batch-size 8
 ```
 
 On a 16 GB local GPU, the flat `2^20 x 100` BB fused path did not fit; its

@@ -248,51 +248,40 @@ run_batch(const bb::gpu::benchmark_msm::CpuInput &input,
           const uint32_t batch_size, const uint32_t precompute_factor,
           const uint32_t c, const uint32_t max_fused_batch_size,
           const double setup_ms) {
-  std::vector<const bb::gpu::bn254::host_fr_montgomery_t *> scalar_pointers;
-  std::vector<bb::gpu::bn254::fq32_affine_g1_t> raw_results;
-  raw_results.reserve(batch_size);
-  const bb::gpu::bn254::MsmRawOptions raw_options{
+  const bb::gpu::MsmConfig cfg{
       .bits_per_slice = c,
       .precompute_factor = precompute_factor,
       .precompute_cache_min_length =
           bb::gpu::MsmConfig{}.precompute_cache_min_length,
       .max_fused_batch_size = max_fused_batch_size,
   };
+  std::vector<std::span<const bb::gpu::benchmark_msm::Commitment>> point_spans(
+      batch_size, input.points);
+  std::vector<std::span<bb::gpu::benchmark_msm::Fr>> scalar_spans;
+  scalar_spans.reserve(batch_size);
+  auto *scalars = const_cast<bb::gpu::benchmark_msm::Fr *>(
+      input.scalars.data());
+  for (uint32_t batch = 0; batch < batch_size; ++batch) {
+    scalar_spans.emplace_back(scalars + static_cast<size_t>(batch) *
+                                            input.points.size(),
+                              input.points.size());
+  }
+
   bb::gpu::benchmark_msm::TimedRun run;
   run.memory_placement = "host";
   run.setup_wall_ms = setup_ms;
   bb::gpu::benchmark_msm::HostTimer timer;
-  for (uint32_t batch_offset = 0; batch_offset < batch_size;
-       batch_offset += max_fused_batch_size) {
-    const uint32_t chunk_size =
-        std::min<uint32_t>(max_fused_batch_size, batch_size - batch_offset);
-    scalar_pointers.clear();
-    scalar_pointers.reserve(chunk_size);
-    for (uint32_t batch = 0; batch < chunk_size; ++batch) {
-      scalar_pointers.push_back(
-          reinterpret_cast<const bb::gpu::bn254::host_fr_montgomery_t *>(
-              input.scalars.data() +
-              (batch_offset + batch) * input.points.size()));
-    }
-
-    std::vector<bb::gpu::bn254::fq32_affine_g1_t> chunk_results(chunk_size);
-    bb::gpu::bn254::msm_profile profile{};
-    bb::gpu::bn254::msm_raw_batch_profiled_fq32(
-        scalar_pointers.data(), input.points.size(), chunk_size,
-        resolve_point_start_index(input.points), raw_options,
-        chunk_results.data(), &profile);
-    apply_profile(run, profile);
-    raw_results.insert(raw_results.end(), chunk_results.begin(),
-                       chunk_results.end());
-  }
+  auto results =
+      bb::gpu::Backend<bb::curve::BN254>::batch_msm(point_spans, scalar_spans,
+                                                   cfg);
 
   run.outer_wall_ms = timer.elapsed_ms();
   run.backend_wall_ms = run.outer_wall_ms;
+  run.c = c;
   std::vector<std::string> result_ids;
-  result_ids.reserve(raw_results.size());
-  for (const auto &raw_result : raw_results) {
-    result_ids.push_back(bb::gpu::benchmark_msm::result_id(
-        bb::gpu::bn254::to_cpu_point(raw_result)));
+  result_ids.reserve(results.size());
+  for (const auto &result : results) {
+    result_ids.push_back(bb::gpu::benchmark_msm::result_id(result));
   }
   run.result = bb::gpu::benchmark_msm::join_result_ids(result_ids);
   (void)precompute_factor;
