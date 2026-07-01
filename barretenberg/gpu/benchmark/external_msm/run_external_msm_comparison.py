@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 RUNNERS = {
+    "cpu": "gpu_msm_external_cpu_bench",
     "bb": "gpu_msm_external_bb_bench",
     "icicle-v2.8.0": "gpu_msm_external_icicle_v2_bench",
     "icicle-v4.0.0": "gpu_msm_external_icicle_v4_bench",
@@ -443,6 +444,8 @@ def main():
     unknown = sorted(set(implementations) - set(RUNNERS))
     if unknown:
         raise RuntimeError(f"unknown implementations: {', '.join(unknown)}")
+    if args.memory_placement == "device" and "cpu" in implementations:
+        raise RuntimeError("CPU runner only supports --memory-placement host")
     if args.memory_placement == "device" and "icicle-v2.8.0" in implementations:
         raise RuntimeError("Icicle v2.8.0 runner does not support --memory-placement device")
     c_values_list = c_values(args)

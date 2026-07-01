@@ -3,6 +3,7 @@
 #include "barretenberg/common/throw_or_abort.hpp"
 #include "barretenberg/ecc/curves/bn254/bn254.hpp"
 #include "barretenberg/numeric/random/engine.hpp"
+#include "barretenberg/srs/global_crs.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -218,34 +219,11 @@ inline uint64_t scalars_seed(const Options &options, const int log_num_points,
 }
 
 inline std::vector<Commitment> make_points(const size_t num_points,
-                                           const uint64_t seed) {
-  std::vector<Commitment> points;
-  points.resize(num_points);
-
-  using Element = Curve::Element;
-  constexpr size_t CHUNK_SIZE = 1 << 16;
-  std::vector<Element> chunk;
-  chunk.resize(std::min(CHUNK_SIZE, num_points));
-
-  const Element generator = Element::one();
-  Element current = generator * Fr(seed == 0 ? 1ULL : seed);
-  size_t offset = 0;
-  while (offset < num_points) {
-    const size_t chunk_size = std::min(CHUNK_SIZE, num_points - offset);
-    if (chunk.size() != chunk_size) {
-      chunk.resize(chunk_size);
-    }
-    for (size_t i = 0; i < chunk_size; ++i) {
-      chunk[i] = current;
-      current += generator;
-    }
-    Element::batch_normalize(chunk.data(), chunk_size);
-    for (size_t i = 0; i < chunk_size; ++i) {
-      points[offset + i] = static_cast<Commitment>(chunk[i]);
-    }
-    offset += chunk_size;
-  }
-  return points;
+                                           [[maybe_unused]] const uint64_t seed) {
+  bb::srs::init_bn254_file_crs_factory(bb::srs::bb_crs_path());
+  auto crs = bb::srs::get_crs_factory<Curve>()->get_crs(num_points);
+  const auto points = crs->get_monomial_points().subspan(0, num_points);
+  return {points.begin(), points.end()};
 }
 
 inline uint64_t splitmix64(uint64_t &state) {

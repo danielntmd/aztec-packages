@@ -1,7 +1,7 @@
 # External GPU MSM Benchmarks
 
-This directory contains the benchmark harness for comparing the native BB GPU
-BN254 MSM implementation against Icicle v2.8.0 and Icicle v4.x.
+This directory contains the benchmark harness for comparing CPU BN254 MSM, the
+native BB GPU BN254 MSM implementation, Icicle v2.8.0, and Icicle v4.x.
 
 The harness is intended for production-machine performance runs where the SRS
 or point table is already prepared and scalar inputs are fresh per MSM. It is
@@ -13,6 +13,7 @@ The CMake targets are:
 
 | Target | Backend |
 |---|---|
+| `gpu_msm_external_cpu_bench` | CPU Pippenger |
 | `gpu_msm_external_bb_bench` | Native BB GPU MSM |
 | `gpu_msm_external_icicle_v2_bench` | Icicle v2.8.0 adapter |
 | `gpu_msm_external_icicle_v4_bench` | Icicle v4.x adapter |
@@ -34,8 +35,8 @@ The wrapper supports two scalar/result memory placements:
 | `--memory-placement host` | Points are resident, scalars are passed from host memory, and results are returned to host inside the backend call. |
 | `--memory-placement device` | Points, scalars, and results are device-resident for the timed backend call. Scalar upload and result copy-back for validation happen outside `backend_wall_ms`. |
 
-Icicle v2.8.0 only supports `host` placement in this harness. BB and Icicle v4.x
-support both placements.
+The CPU runner and Icicle v2.8.0 only support `host` placement in this harness.
+BB and Icicle v4.x support both placements.
 
 ## Production Suite Overview
 
@@ -45,6 +46,7 @@ production machine:
 | Suite | Purpose | Command section |
 |---|---|---|
 | Main MSM sweep | Compare BB, Icicle v2.8.0, and Icicle v4.x across `2^10..2^24`, factors `1,4,8`, host scalars. | [Main MSM Sweep](#main-msm-sweep) |
+| CPU/GPU single MSM sweep | Add CPU Pippenger rows to the same single-MSM sweep schema. | [CPU/GPU Single MSM Sweep](#cpugpu-single-msm-sweep) |
 | Batch-100 host-scalar run | Compare the previous cost-report shape: `2^20 x 100`, `pf=1`, scalar transfer included in backend call. | [Batch-100 Cost-Analysis Shape](#batch-100-cost-analysis-shape) |
 | Batch-100 device-resident run | Compare the same `2^20 x 100` shape after scalars are already on device and results stay on device until after timing. | [Device-Resident Batch-100 Shape](#device-resident-batch-100-shape) |
 | Optional c-value sweep | Diagnose whether auto `c` is responsible for a performance shift. | [C-Value Sweep](#c-value-sweep) |
@@ -94,7 +96,8 @@ PATH=/path/to/zig:$PATH \
 ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache \
 ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
 /path/to/cmake --build /tmp/aztec-bb-gpu-msm-bench \
-  --target gpu_msm_external_bb_bench \
+  --target gpu_msm_external_cpu_bench \
+           gpu_msm_external_bb_bench \
            gpu_msm_external_icicle_v2_bench \
            gpu_msm_external_icicle_v4_bench -- -j16
 ```
@@ -154,6 +157,32 @@ python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
 
 Use `--allow-skips` only when a row is expected to exceed memory. Without that
 flag, missing rows fail the run.
+
+## CPU/GPU Single MSM Sweep
+
+Add `cpu` to the selected implementations when you want CPU Pippenger rows in
+the same raw JSONL files and summary table as the GPU backends:
+
+```bash
+python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
+  --build-dir /tmp/aztec-bb-gpu-msm-bench \
+  --output-dir /tmp/gpu-msm-external-main-with-cpu \
+  --implementations cpu,bb,icicle-v2.8.0,icicle-v4.0.0 \
+  --mode single \
+  --memory-placement host \
+  --min-log 10 \
+  --max-log 24 \
+  --log-step 2 \
+  --factors 1,4,8 \
+  --repeats 5 \
+  --c 0 \
+  --icicle-backend-dir /path/to/icicle-v4/backend
+```
+
+CPU rows use the same CRS monomial points and generated scalars as the GPU rows.
+CPU timing ignores `c` and precompute factor, but emits rows for each requested
+value so the wrapper can validate completeness and compare results across
+backends.
 
 ## Batch-100 Cost-Analysis Shape
 
@@ -516,6 +545,10 @@ Each raw JSONL record includes:
 | `comparison_ms` | `device_ms` when present, otherwise `backend_wall_ms`. |
 | `per_msm_ms` | `comparison_ms / batch_size`. |
 | `c` | Backend-reported or resolved c value. `requested_c` is added by the wrapper. |
+
+For CPU rows, `backend_wall_ms` is the timed CPU Pippenger region,
+`comparison_ms` equals `backend_wall_ms`, and CUDA/precompute fields are empty
+or zero.
 
 For the resident-points backend comparison:
 

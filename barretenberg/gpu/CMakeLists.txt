@@ -1,12 +1,18 @@
-find_package(CUDAToolkit REQUIRED)
+find_package(CUDAToolkit QUIET)
 
 set(BB_GPU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(BB_GPU_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(BB_GPU_CPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cpp/src")
+set(BB_GPU_EXTERNAL_MSM_BENCH_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/external_msm")
 option(BB_ENABLE_GPU_MSM_EXTERNAL_BENCH "Build optional external GPU MSM comparison benchmark runners" OFF)
 set(BB_GPU_MSM_FIELD_BACKEND "bb" CACHE STRING "BN254 GPU MSM field arithmetic backend")
 set_property(CACHE BB_GPU_MSM_FIELD_BACKEND PROPERTY STRINGS bb icicle)
 set(BB_GPU_ICICLE_INCLUDE_DIRS "" CACHE STRING "Icicle include directories for the optional GPU MSM field backend")
+find_library(BB_GPU_STDCXX_LIBRARY
+    NAMES stdc++ libstdc++.so.6
+    PATHS /usr/lib/x86_64-linux-gnu /usr/lib/gcc/x86_64-linux-gnu/11
+    NO_DEFAULT_PATH
+    REQUIRED)
 if(NOT BB_GPU_MSM_FIELD_BACKEND MATCHES "^(bb|icicle)$")
     message(FATAL_ERROR "BB_GPU_MSM_FIELD_BACKEND must be one of: bb, icicle")
 endif()
@@ -33,6 +39,31 @@ function(bb_gpu_apply_msm_field_backend TARGET_NAME)
     endif()
 endfunction()
 
+function(bb_gpu_add_external_cpu_msm_bench)
+    add_executable(gpu_msm_external_cpu_bench
+        benchmark/external_msm/cpu_msm_runner.cpp)
+    target_include_directories(gpu_msm_external_cpu_bench
+        PRIVATE
+            "${BB_GPU_EXTERNAL_MSM_BENCH_INCLUDE_DIR}"
+            "${BB_GPU_CPP_SOURCE_DIR}"
+            ${MSGPACK_INCLUDE}
+            ${TRACY_INCLUDE}
+            ${LMDB_INCLUDE}
+            ${LIBDEFLATE_INCLUDE}
+            ${HTTPLIB_INCLUDE}
+            ${BACKWARD_INCLUDE}
+            ${NLOHMANN_JSON_INCLUDE})
+    target_link_libraries(gpu_msm_external_cpu_bench
+        PRIVATE
+            ecc
+            srs
+            common
+            ${BB_GPU_STDCXX_LIBRARY})
+    if(TARGET msgpack-c)
+        add_dependencies(gpu_msm_external_cpu_bench msgpack-c)
+    endif()
+endfunction()
+
 set(BB_GPU_HEADERS
     include/barretenberg/gpu/common/cuda_defines.cuh
     include/barretenberg/gpu/common/cuda_error.hpp
@@ -56,6 +87,14 @@ if(TARGET barretenberg_headers)
         FILE_SET HEADERS
         BASE_DIRS "${BB_GPU_INCLUDE_DIR}"
         FILES ${BB_GPU_HEADERS})
+endif()
+
+if(NOT CUDAToolkit_FOUND)
+    if(NOT FUZZING AND BB_ENABLE_GPU_MSM_EXTERNAL_BENCH)
+        bb_gpu_add_external_cpu_msm_bench()
+    endif()
+    message(STATUS "CUDAToolkit not found; skipping native CUDA GPU targets")
+    return()
 endif()
 
 add_library(gpu_objects OBJECT EXCLUDE_FROM_ALL
@@ -93,12 +132,6 @@ target_include_directories(gpu
         ${HTTPLIB_INCLUDE}
         ${BACKWARD_INCLUDE}
         ${NLOHMANN_JSON_INCLUDE})
-find_library(BB_GPU_STDCXX_LIBRARY
-    NAMES stdc++ libstdc++.so.6
-    PATHS /usr/lib/x86_64-linux-gnu /usr/lib/gcc/x86_64-linux-gnu/11
-    NO_DEFAULT_PATH
-    REQUIRED)
-
 target_link_libraries(gpu
     PUBLIC
         common
@@ -184,7 +217,7 @@ if(NOT FUZZING)
     endif()
 
     if(BB_ENABLE_GPU_MSM_EXTERNAL_BENCH)
-        set(BB_GPU_EXTERNAL_MSM_BENCH_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/external_msm")
+        bb_gpu_add_external_cpu_msm_bench()
 
         add_executable(gpu_msm_external_bb_bench
             benchmark/external_msm/bb_msm_runner.cpp)
@@ -205,6 +238,7 @@ if(NOT FUZZING)
             PRIVATE
                 gpu
                 commitment_schemes
+                srs
                 CUDA::cudart
                 ${BB_GPU_STDCXX_LIBRARY})
         bb_gpu_apply_msm_field_backend(gpu_msm_external_bb_bench)
@@ -257,6 +291,7 @@ if(NOT FUZZING)
             target_link_libraries(gpu_msm_external_icicle_v2_bench
                 PRIVATE
                     ecc
+                    srs
                     common
                     ${ICICLE_V28_LIBRARIES}
                     CUDA::cudart
@@ -315,6 +350,7 @@ if(NOT FUZZING)
             target_link_libraries(gpu_msm_external_icicle_v4_bench
                 PRIVATE
                     ecc
+                    srs
                     common
                     ${ICICLE_V4_LIBRARIES}
                     ${BB_GPU_STDCXX_LIBRARY})

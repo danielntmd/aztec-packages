@@ -12,11 +12,13 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <exception>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace {
 
@@ -253,14 +255,13 @@ run_batch(const bb::gpu::benchmark_msm::CpuInput &input,
       .precompute_factor = precompute_factor,
       .precompute_cache_min_length =
           bb::gpu::MsmConfig{}.precompute_cache_min_length,
-      .max_fused_batch_size = max_fused_batch_size,
   };
   std::vector<std::span<const bb::gpu::benchmark_msm::Commitment>> point_spans(
       batch_size, input.points);
   std::vector<std::span<bb::gpu::benchmark_msm::Fr>> scalar_spans;
   scalar_spans.reserve(batch_size);
-  auto *scalars = const_cast<bb::gpu::benchmark_msm::Fr *>(
-      input.scalars.data());
+  auto *scalars =
+      const_cast<bb::gpu::benchmark_msm::Fr *>(input.scalars.data());
   for (uint32_t batch = 0; batch < batch_size; ++batch) {
     scalar_spans.emplace_back(scalars + static_cast<size_t>(batch) *
                                             input.points.size(),
@@ -271,9 +272,17 @@ run_batch(const bb::gpu::benchmark_msm::CpuInput &input,
   run.memory_placement = "host";
   run.setup_wall_ms = setup_ms;
   bb::gpu::benchmark_msm::HostTimer timer;
-  auto results =
-      bb::gpu::Backend<bb::curve::BN254>::batch_msm(point_spans, scalar_spans,
-                                                   cfg);
+  std::vector<bb::curve::BN254::AffineElement> results;
+  results.reserve(batch_size);
+  for (uint32_t offset = 0; offset < batch_size;
+       offset += max_fused_batch_size) {
+    const uint32_t chunk_size =
+        std::min<uint32_t>(batch_size - offset, max_fused_batch_size);
+    auto chunk = bb::gpu::Backend<bb::curve::BN254>::batch_msm(
+        std::span(point_spans).subspan(offset, chunk_size),
+        std::span(scalar_spans).subspan(offset, chunk_size), cfg);
+    results.insert(results.end(), chunk.begin(), chunk.end());
+  }
 
   run.outer_wall_ms = timer.elapsed_ms();
   run.backend_wall_ms = run.outer_wall_ms;
