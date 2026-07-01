@@ -94,6 +94,7 @@ import {
   type BBFailure,
   type BBSuccess,
   BB_RESULT,
+  BB_BENCH_HIERARCHICAL_FILENAME,
   PROOF_FILENAME,
   PUBLIC_INPUTS_FILENAME,
   VK_FILENAME,
@@ -108,6 +109,54 @@ import { ProverInstrumentation } from '../../instrumentation.js';
 import { readProofsFromOutputDirectory } from '../proof_utils.js';
 
 const logger = createLogger('bb-prover');
+const PROOF_PROFILE_FILENAME = 'proof-profile.json';
+const PROOF_VERIFY_PROFILE_FILENAME = 'proof-verify-profile.json';
+
+async function readJsonFile(path: string) {
+  try {
+    return JSON.parse(await fs.readFile(path, 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeProofProfile(
+  workingDirectory: string,
+  profile: {
+    circuitType: ServerProtocolArtifact | 'avm-circuit';
+    circuitName: string;
+    witnessGenerationMs?: number;
+    bbProveMs: number;
+    bbBenchPath?: string;
+  },
+) {
+  if (process.env.BB_PROOF_BENCH !== '1') {
+    return;
+  }
+  const bbBenchPath = profile.bbBenchPath ?? path.join(workingDirectory, BB_BENCH_HIERARCHICAL_FILENAME);
+  const bbBench = await readJsonFile(bbBenchPath);
+  await fs.writeFile(
+    path.join(workingDirectory, PROOF_PROFILE_FILENAME),
+    JSON.stringify({ ...profile, bbBenchPath, bbBench }, null, 2) + '\n',
+  );
+}
+
+async function writeProofVerifyProfile(
+  workingDirectory: string,
+  profile: {
+    circuitType: ServerProtocolArtifact | 'avm-circuit';
+    circuitName: string;
+    bbVerifyMs: number;
+  },
+) {
+  if (process.env.BB_PROOF_BENCH !== '1') {
+    return;
+  }
+  await fs.writeFile(
+    path.join(workingDirectory, PROOF_VERIFY_PROFILE_FILENAME),
+    JSON.stringify(profile, null, 2) + '\n',
+  );
+}
 
 export interface BBProverConfig extends BBConfig, ACVMConfig {
   // list of circuits supported by this prover. defaults to all circuits if empty
@@ -511,6 +560,14 @@ export class BBNativeRollupProver implements ServerCircuitProver {
       throw new ProvingError(provingResult.reason, provingResult, provingResult.retry);
     }
 
+    await writeProofProfile(workingDirectory, {
+      circuitType,
+      circuitName,
+      witnessGenerationMs: witnessResult.duration,
+      bbProveMs: provingResult.durationMs,
+      bbBenchPath: provingResult.benchPath,
+    });
+
     return {
       circuitOutput: output,
       provingResult,
@@ -542,6 +599,12 @@ export class BBNativeRollupProver implements ServerCircuitProver {
       const appCircuitName = 'unknown' as const;
       this.instrumentation.recordAvmDuration('provingDuration', appCircuitName, provingResult.durationMs);
       this.instrumentation.recordAvmSize('proofSize', appCircuitName, avmProof.binaryProof.buffer.length);
+      await writeProofProfile(bbWorkingDirectory, {
+        circuitType: 'avm-circuit',
+        circuitName: circuitType,
+        bbProveMs: provingResult.durationMs,
+        bbBenchPath: provingResult.benchPath,
+      });
 
       logger.info(
         `Generated proof for ${circuitType}(${input.hints.tx.hash}) in ${Math.ceil(provingResult.durationMs)} ms`,
@@ -634,6 +697,7 @@ export class BBNativeRollupProver implements ServerCircuitProver {
     const verificationKey = this.getVerificationKeyDataForCircuit(circuitType);
     return await this.verifyInternal(proof, verificationKey, (proofPath, vkPath, _bbWorkingDirectory) =>
       verifyProof(this.config.bbBinaryPath, proofPath, vkPath, getUltraHonkFlavorForCircuit(circuitType), logger),
+      { circuitType, circuitName: circuitType },
     );
   }
 
@@ -643,6 +707,7 @@ export class BBNativeRollupProver implements ServerCircuitProver {
       /*verificationKey=*/ undefined,
       (proofPath, /*unused*/ _vkPath, bbWorkingDirectory) =>
         verifyAvmProof(this.config.bbBinaryPath, bbWorkingDirectory, proofPath, publicInputs, logger),
+      { circuitType: 'avm-circuit', circuitName: 'avm-circuit' },
     );
   }
   private async verifyInternal(
@@ -653,6 +718,10 @@ export class BBNativeRollupProver implements ServerCircuitProver {
       vkPath: string,
       bbWorkingDirectory: string,
     ) => Promise<BBFailure | BBSuccess>,
+    profile?: {
+      circuitType: ServerProtocolArtifact | 'avm-circuit';
+      circuitName: string;
+    },
   ) {
     const operation = async (bbWorkingDirectory: string) => {
       const publicInputsFileName = path.join(bbWorkingDirectory, PUBLIC_INPUTS_FILENAME);
@@ -673,9 +742,13 @@ export class BBNativeRollupProver implements ServerCircuitProver {
       }
 
       logger.info(`Successfully verified proof from key in ${result.durationMs} ms`);
+      if (profile) {
+        await writeProofVerifyProfile(bbWorkingDirectory, { ...profile, bbVerifyMs: result.durationMs });
+      }
+      return result;
     };
 
-    await this.runInTempDirectory(operation);
+    return await this.runInTempDirectory(operation);
   }
 
   /**

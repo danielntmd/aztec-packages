@@ -13,6 +13,7 @@ import type { UltraHonkFlavor } from '../honk.js';
 export const VK_FILENAME = 'vk';
 export const PUBLIC_INPUTS_FILENAME = 'public_inputs';
 export const PROOF_FILENAME = 'proof';
+export const BB_BENCH_HIERARCHICAL_FILENAME = 'bb-bench-hierarchical.json';
 export const AVM_INPUTS_FILENAME = 'avm_inputs.bin';
 export const AVM_BYTECODE_FILENAME = 'avm_bytecode.bin';
 export const AVM_PUBLIC_INPUTS_FILENAME = 'avm_public_inputs.bin';
@@ -32,6 +33,8 @@ export type BBSuccess = {
   vkDirectoryPath?: string;
   /** Full path of the proof. */
   proofPath?: string;
+  /** Full path of the hierarchical BB benchmark JSON, when BB_PROOF_BENCH=1. */
+  benchPath?: string;
   /** Full path of the contract. */
   contractPath?: string;
   /** The number of gates in the circuit. */
@@ -152,9 +155,14 @@ export async function executeBbChonkProof(
       log(`bb - ${message}`);
     };
 
+    const benchPath =
+      process.env.BB_PROOF_BENCH === '1' ? join(workingDirectory, BB_BENCH_HIERARCHICAL_FILENAME) : undefined;
     const args = ['-o', outputPath, '--ivc_inputs_path', inputsPath, '-v', '--scheme', 'chonk'];
     if (writeVk) {
       args.push('--write_vk');
+    }
+    if (benchPath) {
+      args.push('--bench_out_hierarchical', benchPath);
     }
     const result = await executeBB(pathToBB, 'prove', args, logFunction);
     const durationMs = timer.ms();
@@ -164,6 +172,7 @@ export async function executeBbChonkProof(
         status: BB_RESULT.SUCCESS,
         durationMs,
         proofPath: `${outputPath}`,
+        benchPath,
         pkPath: undefined,
         vkDirectoryPath: `${outputPath}`,
       };
@@ -254,6 +263,11 @@ export async function generateProof(
       inputWitnessFile,
       '-v',
     ]);
+    const benchPath =
+      process.env.BB_PROOF_BENCH === '1' ? join(workingDirectory, BB_BENCH_HIERARCHICAL_FILENAME) : undefined;
+    if (benchPath) {
+      args.push('--bench_out_hierarchical', benchPath);
+    }
     const loggingArg = log.level === 'debug' || log.level === 'trace' ? '-d' : log.level === 'verbose' ? '-v' : '';
     if (loggingArg !== '') {
       args.push(loggingArg);
@@ -271,6 +285,7 @@ export async function generateProof(
         status: BB_RESULT.SUCCESS,
         durationMs: duration,
         proofPath: `${outputPath}`,
+        benchPath,
         pkPath: undefined,
         vkDirectoryPath: `${outputPath}`,
       };

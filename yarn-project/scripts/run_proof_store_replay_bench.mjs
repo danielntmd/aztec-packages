@@ -13,6 +13,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
 const logger = createLogger('gpu-proof-store-replay-bench');
+const PROOF_PROFILE_FILENAME = 'proof-profile.json';
+const PROOF_VERIFY_PROFILE_FILENAME = 'proof-verify-profile.json';
+
+process.env.BB_PROOF_BENCH ??= '1';
 
 const PROOF_TYPE_ORDER = [
   'PUBLIC_VM',
@@ -176,6 +180,185 @@ function extractProofBuffer(result) {
   return Buffer.isBuffer(buffer) ? buffer : undefined;
 }
 
+function emptyNativeProfileSummary() {
+  return {
+    nativeProofs: 0,
+    witnessGenerationMs: 0,
+    bbProveMs: 0,
+    bbVerifyMs: 0,
+    bbBenchStagesMs: {
+      oinkProverMs: 0,
+      wireCommitmentsMs: 0,
+      sortedListAccumulatorMs: 0,
+      logDerivativeInverseMs: 0,
+      grandProductMs: 0,
+      sumcheckMs: 0,
+      pcsMs: 0,
+      commitmentKeyMs: 0,
+    },
+    bbBenchTopOps: [],
+  };
+}
+
+function benchCategoryForKey(key) {
+  if (key.includes('OinkProver::prove')) {
+    return 'oinkProverMs';
+  }
+  if (key.includes('execute_wire_commitments_round')) {
+    return 'wireCommitmentsMs';
+  }
+  if (key.includes('execute_sorted_list_accumulator_round')) {
+    return 'sortedListAccumulatorMs';
+  }
+  if (key.includes('execute_log_derivative_inverse_round')) {
+    return 'logDerivativeInverseMs';
+  }
+  if (key.includes('execute_grand_product_computation_round')) {
+    return 'grandProductMs';
+  }
+  if (key.toLowerCase().includes('sumcheck')) {
+    return 'sumcheckMs';
+  }
+  if (key.includes('CommitmentKey::')) {
+    return 'commitmentKeyMs';
+  }
+  if (
+    key.includes('Shplemini') ||
+    key.includes('Gemini') ||
+    key.includes('KZG') ||
+    key.includes('IPA') ||
+    key.includes('PCS') ||
+    key === 'compute_batched'
+  ) {
+    return 'pcsMs';
+  }
+  return undefined;
+}
+
+function addNativeProfileSummaries(left, right) {
+  const result = emptyNativeProfileSummary();
+  result.nativeProofs = left.nativeProofs + right.nativeProofs;
+  result.witnessGenerationMs = left.witnessGenerationMs + right.witnessGenerationMs;
+  result.bbProveMs = left.bbProveMs + right.bbProveMs;
+  result.bbVerifyMs = left.bbVerifyMs + right.bbVerifyMs;
+  for (const key of Object.keys(result.bbBenchStagesMs)) {
+    result.bbBenchStagesMs[key] = (left.bbBenchStagesMs[key] ?? 0) + (right.bbBenchStagesMs[key] ?? 0);
+  }
+  const topOps = new Map();
+  for (const op of [...left.bbBenchTopOps, ...right.bbBenchTopOps]) {
+    topOps.set(op.name, (topOps.get(op.name) ?? 0) + op.elapsedMs);
+  }
+  result.bbBenchTopOps = [...topOps.entries()]
+    .map(([name, elapsedMs]) => ({ name, elapsedMs }))
+    .sort((a, b) => b.elapsedMs - a.elapsedMs)
+    .slice(0, 20);
+  return result;
+}
+
+function summarizeNativeProfiles(nativeProfiles) {
+  const summary = emptyNativeProfileSummary();
+  const ops = new Map();
+  summary.nativeProofs = nativeProfiles.length;
+
+  for (const profile of nativeProfiles) {
+    summary.witnessGenerationMs += profile.witnessGenerationMs ?? 0;
+    summary.bbProveMs += profile.bbProveMs ?? 0;
+
+    for (const [key, entries] of Object.entries(profile.bbBench ?? {})) {
+      const elapsedMs = entries.reduce((sum, entry) => sum + (entry.time_max ?? entry.time ?? 0) / 1_000_000, 0);
+      if (elapsedMs === 0) {
+        continue;
+      }
+      ops.set(key, (ops.get(key) ?? 0) + elapsedMs);
+      const category = benchCategoryForKey(key);
+      if (category) {
+        summary.bbBenchStagesMs[category] += elapsedMs;
+      }
+    }
+  }
+
+  summary.bbBenchTopOps = [...ops.entries()]
+    .map(([name, elapsedMs]) => ({ name, elapsedMs }))
+    .sort((a, b) => b.elapsedMs - a.elapsedMs)
+    .slice(0, 20);
+  return summary;
+}
+
+function summarizeVerifyProfiles(verifyProfiles) {
+  return {
+    bbVerifyMs: verifyProfiles.reduce((sum, profile) => sum + (profile.bbVerifyMs ?? 0), 0),
+  };
+}
+
+async function listProfilePaths(rootPath, profileFilename) {
+  const paths = [];
+  async function visit(dir) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await visit(entryPath);
+      } else if (entry.isFile() && entry.name === profileFilename) {
+        paths.push(entryPath);
+      }
+    }
+  }
+  await visit(rootPath);
+  return paths;
+}
+
+async function listProofProfilePaths(rootPath) {
+  return await listProfilePaths(rootPath, PROOF_PROFILE_FILENAME);
+}
+
+async function listProofVerifyProfilePaths(rootPath) {
+  return await listProfilePaths(rootPath, PROOF_VERIFY_PROFILE_FILENAME);
+}
+
+async function readNewProofProfiles(rootPath, existingPaths) {
+  const paths = await listProofProfilePaths(rootPath);
+  const profiles = [];
+  for (const profilePath of paths) {
+    if (existingPaths.has(profilePath)) {
+      continue;
+    }
+    const profile = JSON.parse(await readFile(profilePath, 'utf8'));
+    profiles.push({
+      profilePath,
+      circuitType: profile.circuitType,
+      circuitName: profile.circuitName,
+      witnessGenerationMs: profile.witnessGenerationMs ?? 0,
+      bbProveMs: profile.bbProveMs ?? 0,
+      bbBenchPath: profile.bbBenchPath,
+      bbBench: profile.bbBench,
+    });
+  }
+  return profiles;
+}
+
+async function readNewProofVerifyProfiles(rootPath, existingPaths) {
+  const paths = await listProofVerifyProfilePaths(rootPath);
+  const profiles = [];
+  for (const profilePath of paths) {
+    if (existingPaths.has(profilePath)) {
+      continue;
+    }
+    const profile = JSON.parse(await readFile(profilePath, 'utf8'));
+    profiles.push({
+      profilePath,
+      circuitType: profile.circuitType,
+      circuitName: profile.circuitName,
+      bbVerifyMs: profile.bbVerifyMs ?? 0,
+    });
+  }
+  return profiles;
+}
+
 async function discoverProofInputs(args) {
   const rootPath = proofStoreRootPath(args.proofStore);
   const inputsPath = join(rootPath, 'inputs');
@@ -303,9 +486,21 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       );
     }
 
+    const knownProofProfiles = new Set(await listProofProfilePaths(bbDir));
+    const knownProofVerifyProfiles = new Set(await listProofVerifyProfilePaths(bbDir));
     const proofGenerationStart = performance.now();
     const result = await dispatchProof(prover, job.type, job.inputs);
     const proofGenerationMs = performance.now() - proofGenerationStart;
+    const nativeProofProfiles = await readNewProofProfiles(bbDir, knownProofProfiles);
+    const proofVerifyProfiles = await readNewProofVerifyProfiles(bbDir, knownProofVerifyProfiles);
+    const nativeProfileSummary = summarizeNativeProfiles(nativeProofProfiles);
+    const verifyProfileSummary = summarizeVerifyProfiles(proofVerifyProfiles);
+    nativeProfileSummary.bbVerifyMs = verifyProfileSummary.bbVerifyMs;
+    const proofInternalOverheadMs =
+      proofGenerationMs -
+      nativeProfileSummary.witnessGenerationMs -
+      nativeProfileSummary.bbProveMs -
+      nativeProfileSummary.bbVerifyMs;
 
     const proofOutputStart = performance.now();
     const proofBuffer = extractProofBuffer(result);
@@ -327,6 +522,22 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       elapsedMs,
       inputLoadMs,
       proofGenerationMs,
+      nativeProofs: nativeProfileSummary.nativeProofs,
+      witnessGenerationMs: nativeProfileSummary.witnessGenerationMs,
+      bbProveMs: nativeProfileSummary.bbProveMs,
+      bbVerifyMs: nativeProfileSummary.bbVerifyMs,
+      proofInternalOverheadMs,
+      bbBenchStagesMs: nativeProfileSummary.bbBenchStagesMs,
+      bbBenchTopOps: nativeProfileSummary.bbBenchTopOps,
+      nativeProofProfiles: nativeProofProfiles.map(profile => ({
+        profilePath: profile.profilePath,
+        circuitType: profile.circuitType,
+        circuitName: profile.circuitName,
+        witnessGenerationMs: profile.witnessGenerationMs,
+        bbProveMs: profile.bbProveMs,
+        bbBenchPath: profile.bbBenchPath,
+      })),
+      proofVerifyProfiles,
       proofOutputMs,
       stageTotalMs,
       overheadMs: elapsedMs - stageTotalMs,
@@ -345,13 +556,28 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     console.log(
       `${warmup ? 'warmup' : 'run'} ${repeat} job ${jobIndex + 1}/${jobs.length} ${jobRef.typeName} ${elapsedMs.toFixed(
         3,
-      )} ms proof=${proofGenerationMs.toFixed(3)} ms overhead=${(elapsedMs - stageTotalMs).toFixed(3)} ms`,
+      )} ms witgen=${nativeProfileSummary.witnessGenerationMs.toFixed(3)} ms bb=${nativeProfileSummary.bbProveMs.toFixed(
+        3,
+      )} ms verify=${nativeProfileSummary.bbVerifyMs.toFixed(3)} ms proof-overhead=${proofInternalOverheadMs.toFixed(
+        3,
+      )} ms overhead=${(elapsedMs - stageTotalMs).toFixed(3)} ms`,
     );
   }
 
   const jobLoopElapsedMs = performance.now() - suiteStart;
   const inputLoadMs = records.reduce((sum, record) => sum + record.inputLoadMs, 0);
   const proofGenerationMs = records.reduce((sum, record) => sum + record.proofGenerationMs, 0);
+  const nativeProfileSummary = records
+    .map(record => ({
+      nativeProofs: record.nativeProofs,
+      witnessGenerationMs: record.witnessGenerationMs,
+      bbProveMs: record.bbProveMs,
+      bbVerifyMs: record.bbVerifyMs,
+      bbBenchStagesMs: record.bbBenchStagesMs,
+      bbBenchTopOps: record.bbBenchTopOps,
+    }))
+    .reduce(addNativeProfileSummaries, emptyNativeProfileSummary());
+  const proofInternalOverheadMs = records.reduce((sum, record) => sum + record.proofInternalOverheadMs, 0);
   const proofOutputMs = records.reduce((sum, record) => sum + record.proofOutputMs, 0);
   const stageTotalMs = setupMs + inputLoadMs + proofGenerationMs + proofOutputMs;
   const elapsedMs = setupMs + jobLoopElapsedMs;
@@ -364,6 +590,13 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     jobLoopElapsedMs,
     inputLoadMs,
     proofGenerationMs,
+    nativeProofs: nativeProfileSummary.nativeProofs,
+    witnessGenerationMs: nativeProfileSummary.witnessGenerationMs,
+    bbProveMs: nativeProfileSummary.bbProveMs,
+    bbVerifyMs: nativeProfileSummary.bbVerifyMs,
+    proofInternalOverheadMs,
+    bbBenchStagesMs: nativeProfileSummary.bbBenchStagesMs,
+    bbBenchTopOps: nativeProfileSummary.bbBenchTopOps,
     proofOutputMs,
     stageTotalMs,
     overheadMs: elapsedMs - stageTotalMs,
@@ -394,6 +627,19 @@ function groupBy(records, keyFn) {
     groups.set(key, group);
   }
   return groups;
+}
+
+function summarizeNativeRecordGroup(records) {
+  return records
+    .map(record => ({
+      nativeProofs: record.nativeProofs ?? 0,
+      witnessGenerationMs: record.witnessGenerationMs ?? 0,
+      bbProveMs: record.bbProveMs ?? 0,
+      bbVerifyMs: record.bbVerifyMs ?? 0,
+      bbBenchStagesMs: record.bbBenchStagesMs ?? emptyNativeProfileSummary().bbBenchStagesMs,
+      bbBenchTopOps: record.bbBenchTopOps ?? [],
+    }))
+    .reduce(addNativeProfileSummaries, emptyNativeProfileSummary());
 }
 
 function safeExec(command, args) {
@@ -441,9 +687,11 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
   const suiteElapsed = measuredSuites.map(record => record.elapsedMs);
   const suiteSetup = measuredSuites.map(record => record.setupMs);
   const suiteAvgField = field => avg(measuredSuites.map(record => record[field]));
+  const suiteNative = summarizeNativeRecordGroup(measuredSuites);
   const byType = [...groupBy(measuredJobs, record => record.proofType)].map(([proofType, records]) => {
     const elapsed = records.map(record => record.elapsedMs);
     const avgFor = field => avg(records.map(record => record[field]));
+    const avgStage = field => avg(records.map(record => record.bbBenchStagesMs?.[field] ?? 0));
     return {
       proofType,
       samples: records.length,
@@ -457,6 +705,19 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
       proofOutputMsAvg: avgFor('proofOutputMs'),
       stageTotalMsAvg: avgFor('stageTotalMs'),
       overheadMsAvg: avgFor('overheadMs'),
+      nativeProofsAvg: avgFor('nativeProofs'),
+      witnessGenerationMsAvg: avgFor('witnessGenerationMs'),
+      bbProveMsAvg: avgFor('bbProveMs'),
+      bbVerifyMsAvg: avgFor('bbVerifyMs'),
+      proofInternalOverheadMsAvg: avgFor('proofInternalOverheadMs'),
+      oinkProverMsAvg: avgStage('oinkProverMs'),
+      wireCommitmentsMsAvg: avgStage('wireCommitmentsMs'),
+      sortedListAccumulatorMsAvg: avgStage('sortedListAccumulatorMs'),
+      logDerivativeInverseMsAvg: avgStage('logDerivativeInverseMs'),
+      grandProductMsAvg: avgStage('grandProductMs'),
+      sumcheckMsAvg: avgStage('sumcheckMs'),
+      pcsMsAvg: avgStage('pcsMs'),
+      commitmentKeyMsAvg: avgStage('commitmentKeyMs'),
     };
   });
   byType.sort((a, b) => proofTypeSortIndex(a.proofType) - proofTypeSortIndex(b.proofType));
@@ -477,6 +738,13 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
     proofOutputMsAvg: suiteAvgField('proofOutputMs'),
     stageTotalMsAvg: suiteAvgField('stageTotalMs'),
     overheadMsAvg: suiteAvgField('overheadMs'),
+    nativeProofsTotal: suiteNative.nativeProofs,
+    witnessGenerationMsTotal: suiteNative.witnessGenerationMs,
+    bbProveMsTotal: suiteNative.bbProveMs,
+    bbVerifyMsTotal: suiteNative.bbVerifyMs,
+    proofInternalOverheadMsTotal: measuredJobs.reduce((sum, record) => sum + (record.proofInternalOverheadMs ?? 0), 0),
+    bbBenchStagesMsTotal: suiteNative.bbBenchStagesMs,
+    bbBenchTopOps: suiteNative.bbBenchTopOps,
     suiteRecords: measuredSuites,
     byType,
     records: measuredJobs,
@@ -484,7 +752,7 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
 }
 
 function formatMs(value) {
-  return value.toFixed(3);
+  return (value ?? 0).toFixed(3);
 }
 
 async function writeSummaryMd(outputDir, summary) {
@@ -504,36 +772,71 @@ async function writeSummaryMd(outputDir, summary) {
     `| setup avg ms | ${formatMs(summary.setupMsAvg)} |`,
     `| input load avg ms | ${formatMs(summary.inputLoadMsAvg)} |`,
     `| proof generation avg ms | ${formatMs(summary.proofGenerationMsAvg)} |`,
+    `| native proofs total | ${summary.nativeProofsTotal} |`,
+    `| witgen total ms | ${formatMs(summary.witnessGenerationMsTotal)} |`,
+    `| bb prove total ms | ${formatMs(summary.bbProveMsTotal)} |`,
+    `| bb verify total ms | ${formatMs(summary.bbVerifyMsTotal)} |`,
+    `| proof internal overhead total ms | ${formatMs(summary.proofInternalOverheadMsTotal)} |`,
+    `| oink total ms | ${formatMs(summary.bbBenchStagesMsTotal.oinkProverMs)} |`,
+    `| wire commitments total ms | ${formatMs(summary.bbBenchStagesMsTotal.wireCommitmentsMs)} |`,
+    `| sorted list accumulator total ms | ${formatMs(summary.bbBenchStagesMsTotal.sortedListAccumulatorMs)} |`,
+    `| log-derivative inverse total ms | ${formatMs(summary.bbBenchStagesMsTotal.logDerivativeInverseMs)} |`,
+    `| grand product total ms | ${formatMs(summary.bbBenchStagesMsTotal.grandProductMs)} |`,
+    `| sumcheck total ms | ${formatMs(summary.bbBenchStagesMsTotal.sumcheckMs)} |`,
+    `| pcs total ms | ${formatMs(summary.bbBenchStagesMsTotal.pcsMs)} |`,
+    `| commitment key total ms | ${formatMs(summary.bbBenchStagesMsTotal.commitmentKeyMs)} |`,
     `| output avg ms | ${formatMs(summary.proofOutputMsAvg)} |`,
     `| stage total avg ms | ${formatMs(summary.stageTotalMsAvg)} |`,
     `| overhead avg ms | ${formatMs(summary.overheadMsAvg)} |`,
     '',
     '## By Type',
     '',
-    '| proof type | samples | jobs/repeat | avg ms | stage total avg ms | proof generation avg ms | overhead avg ms | input load avg ms | output avg ms | min ms | max ms | stdev ms |',
-    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    '| proof type | samples | jobs/repeat | avg ms | native proofs | witgen ms | bb prove ms | bb verify ms | proof overhead ms | oink ms | wire comm ms | sorted acc ms | log-derivative ms | grand product ms | sumcheck ms | pcs ms | commitment key ms | input load ms | output ms | overhead ms | min ms | max ms | stdev ms |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
     ...summary.byType.map(
       row =>
         `| ${row.proofType} | ${row.samples} | ${row.jobsPerRepeat} | ${formatMs(row.elapsedMsAvg)} | ${formatMs(
-          row.stageTotalMsAvg,
+          row.nativeProofsAvg,
         )} | ${formatMs(
-          row.proofGenerationMsAvg,
-        )} | ${formatMs(row.overheadMsAvg)} | ${formatMs(row.inputLoadMsAvg)} | ${formatMs(
+          row.witnessGenerationMsAvg,
+        )} | ${formatMs(row.bbProveMsAvg)} | ${formatMs(row.bbVerifyMsAvg)} | ${formatMs(
+          row.proofInternalOverheadMsAvg,
+        )} | ${formatMs(row.oinkProverMsAvg)} | ${formatMs(
+          row.wireCommitmentsMsAvg,
+        )} | ${formatMs(row.sortedListAccumulatorMsAvg)} | ${formatMs(row.logDerivativeInverseMsAvg)} | ${formatMs(
+          row.grandProductMsAvg,
+        )} | ${formatMs(row.sumcheckMsAvg)} | ${formatMs(row.pcsMsAvg)} | ${formatMs(
+          row.commitmentKeyMsAvg,
+        )} | ${formatMs(row.inputLoadMsAvg)} | ${formatMs(
           row.proofOutputMsAvg,
-        )} | ${formatMs(row.elapsedMsMin)} | ${formatMs(row.elapsedMsMax)} | ${formatMs(row.elapsedMsStdev)} |`,
+        )} | ${formatMs(row.overheadMsAvg)} | ${formatMs(row.elapsedMsMin)} | ${formatMs(
+          row.elapsedMsMax,
+        )} | ${formatMs(row.elapsedMsStdev)} |`,
     ),
+    '',
+    '## Top BB Ops',
+    '',
+    '| op | elapsed ms |',
+    '|---|---:|',
+    ...summary.bbBenchTopOps.map(op => `| ${op.name} | ${formatMs(op.elapsedMs)} |`),
     '',
     '## Jobs',
     '',
-    '| repeat | index | proof type | elapsed ms | stage total ms | proof generation ms | overhead ms | input load ms | output ms | input sha256 | proof sha256 | proof bytes |',
-    '|---:|---:|---|---:|---:|---:|---:|---:|---:|---|---|---:|',
+    '| repeat | index | proof type | elapsed ms | native proofs | witgen ms | bb prove ms | bb verify ms | proof overhead ms | oink ms | sumcheck ms | pcs ms | commitment key ms | overhead ms | input load ms | output ms | input sha256 | proof sha256 | proof bytes |',
+    '|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|',
     ...summary.records.map(
       record =>
         `| ${record.repeat} | ${record.jobIndex} | ${record.proofType} | ${formatMs(record.elapsedMs)} | ${formatMs(
-          record.stageTotalMs,
+          record.nativeProofs,
+        )} | ${formatMs(record.witnessGenerationMs)} | ${formatMs(record.bbProveMs)} | ${formatMs(
+          record.bbVerifyMs,
+        )} | ${formatMs(record.proofInternalOverheadMs)} | ${formatMs(
+          record.bbBenchStagesMs?.oinkProverMs,
+        )} | ${formatMs(record.bbBenchStagesMs?.sumcheckMs)} | ${formatMs(record.bbBenchStagesMs?.pcsMs)} | ${formatMs(
+          record.bbBenchStagesMs?.commitmentKeyMs,
         )} | ${formatMs(
-          record.proofGenerationMs,
-        )} | ${formatMs(record.overheadMs)} | ${formatMs(record.inputLoadMs)} | ${formatMs(
+          record.overheadMs,
+        )} | ${formatMs(record.inputLoadMs)} | ${formatMs(
           record.proofOutputMs,
         )} | ${record.inputSha256} | ${record.proofSha256 ?? ''} | ${record.proofSizeBytes ?? ''} |`,
     ),
