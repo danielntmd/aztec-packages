@@ -72,7 +72,7 @@ void build_constraints(Builder& builder, AcirFormat& constraints, const ProgramM
         builder.create_dyadic_range_constraint(
             constraint.witness,
             constraint.num_bits,
-            std::format("acir_format::build_constraints: range constraint at opcode index {} failed", opcode_idx));
+            format("acir_format::build_constraints: range constraint at opcode index ", opcode_idx, " failed"));
         gate_counter.track_diff(constraints.gates_per_opcode, opcode_idx);
     }
 
