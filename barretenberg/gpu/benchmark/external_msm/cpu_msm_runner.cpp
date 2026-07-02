@@ -1,3 +1,4 @@
+#include "barretenberg/common/thread.hpp"
 #include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
 #include "msm_benchmark_common.hpp"
 
@@ -28,6 +29,7 @@ TimedRun run_cpu_single(std::span<const Commitment> points,
   run.backend_host_total_ms = msm_wall_ms;
   run.memory_placement = "host";
   run.c = static_cast<uint32_t>(options.c);
+  run.cpu_threads = static_cast<uint32_t>(bb::get_num_cpus());
   run.result = bb::gpu::benchmark_msm::result_id(result);
   return run;
 }
@@ -65,6 +67,7 @@ TimedRun run_cpu_batch(std::span<const Commitment> points,
   run.backend_host_total_ms = msm_wall_ms;
   run.memory_placement = "host";
   run.c = static_cast<uint32_t>(options.c);
+  run.cpu_threads = static_cast<uint32_t>(bb::get_num_cpus());
   run.result = bb::gpu::benchmark_msm::join_result_ids(result_ids);
   return run;
 }

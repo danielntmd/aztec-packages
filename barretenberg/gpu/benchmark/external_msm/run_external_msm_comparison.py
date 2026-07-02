@@ -18,6 +18,7 @@ RUNNERS = {
 
 METADATA_ENV_KEYS = [
     "CUDA_VISIBLE_DEVICES",
+    "HARDWARE_CONCURRENCY",
     "ICICLE_BACKEND_INSTALL_DIR",
     "LD_LIBRARY_PATH",
     "PATH",
@@ -29,6 +30,9 @@ CMAKE_CACHE_KEYS = [
     "CMAKE_CUDA_COMPILER",
     "CMAKE_CXX_COMPILER",
     "CUDAToolkit_ROOT",
+    "MULTITHREADING",
+    "OMP_MULTITHREADING",
+    "TARGET_ARCH",
 ]
 
 
@@ -412,6 +416,7 @@ def summarize(records):
                 "reported_c_avg": statistics.fmean(value["c"] for value in values),
                 "large_bucket_count_avg": statistics.fmean(value["large_bucket_count"] for value in values),
                 "max_bucket_size_avg": statistics.fmean(value["max_bucket_size"] for value in values),
+                "cpu_threads_avg": avg(value.get("cpu_threads") for value in values),
                 "extreme_sample": bool(max_z > 3.5 and len(values) >= 5),
             }
         )
@@ -422,10 +427,10 @@ def write_markdown(path: Path, summaries):
     with path.open("w") as out:
         out.write(
             "| implementation | requested c | reported c avg | mode | memory | log_n | batch | factor | samples | "
-            "comparison avg ms | backend wall avg ms | device avg ms | outer wall avg ms | setup wall avg ms | "
+            "comparison avg ms | backend wall avg ms | device avg ms | outer wall avg ms | setup wall avg ms | cpu threads avg | "
             "precompute wall avg ms | extreme |\n"
         )
-        out.write("|---|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
+        out.write("|---|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
         for row in summaries:
             out.write(
                 f"| {row['implementation']} | {row['requested_c']} | {row['reported_c_avg']:.2f} | "
@@ -433,6 +438,7 @@ def write_markdown(path: Path, summaries):
                 f"{row['precompute_factor']} | {row['samples']} | {fmt(row['comparison_ms_avg'])} | "
                 f"{fmt(row['backend_wall_ms_avg'])} | {fmt(row['device_ms_avg'])} | "
                 f"{fmt(row['outer_wall_ms_avg'])} | {fmt(row['setup_wall_ms_avg'])} | "
+                f"{fmt(row['cpu_threads_avg'])} | "
                 f"{fmt(row['precompute_wall_ms_avg'])} | {row['extreme_sample']} |\n"
             )
 

@@ -72,6 +72,7 @@ struct TimedRun {
   uint64_t max_bucket_size = 0;
   uint32_t large_bucket_threshold = 0;
   uint32_t large_bucket_mode = 0;
+  uint32_t cpu_threads = 0;
   std::string result;
 
   double comparison_ms() const { return device_ms.value_or(backend_wall_ms); }
@@ -360,6 +361,7 @@ inline void write_record(std::ofstream &out, const std::string &implementation,
       << "\"max_bucket_size\":" << run.max_bucket_size << ","
       << "\"large_bucket_threshold\":" << run.large_bucket_threshold << ","
       << "\"large_bucket_mode\":" << run.large_bucket_mode << ","
+      << "\"cpu_threads\":" << run.cpu_threads << ","
       << "\"result\":\"" << json_escape(run.result) << "\""
       << "}\n";
 }

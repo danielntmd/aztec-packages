@@ -88,6 +88,9 @@ ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
 ```
 
 For example, use `-DCMAKE_CUDA_ARCHITECTURES=120` for compute capability 12.0.
+For CPU baselines collected on the target host, consider adding
+`-DTARGET_ARCH=native`; record that setting with the benchmark output because it
+can change CPU timings.
 
 Build the benchmark targets:
 
@@ -183,6 +186,10 @@ CPU rows use the same CRS monomial points and generated scalars as the GPU rows.
 CPU timing ignores `c` and precompute factor, but emits rows for each requested
 value so the wrapper can validate completeness and compare results across
 backends.
+
+The CPU runner uses Barretenberg's normal parallel-for thread count:
+`HARDWARE_CONCURRENCY` when set, otherwise `min(32, hardware_concurrency)`.
+Raw records include `cpu_threads`, and the wrapper summary reports the average.
 
 ## Batch-100 Cost-Analysis Shape
 
@@ -545,6 +552,7 @@ Each raw JSONL record includes:
 | `comparison_ms` | `device_ms` when present, otherwise `backend_wall_ms`. |
 | `per_msm_ms` | `comparison_ms / batch_size`. |
 | `c` | Backend-reported or resolved c value. `requested_c` is added by the wrapper. |
+| `cpu_threads` | Effective Barretenberg CPU thread count for CPU rows. Zero for GPU rows. |
 
 For CPU rows, `backend_wall_ms` is the timed CPU Pippenger region,
 `comparison_ms` equals `backend_wall_ms`, and CUDA/precompute fields are empty
