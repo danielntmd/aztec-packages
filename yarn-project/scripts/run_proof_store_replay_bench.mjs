@@ -43,6 +43,7 @@ const GPU_ENV_KEYS = [
   'BB_GPU_MSM_PRECOMPUTE_FACTOR',
   'BB_GPU_MSM_MAX_BATCH_SIZE',
   'BB_GPU_MSM_PREWARM_SRS_POINTS',
+  'BB_PROOF_BENCH_DEFER_PROFILE_WRITE',
   'BB_PROOF_BENCH_PERSISTENT_BB',
   'BB_BINARY_PATH',
   'ACVM_BINARY_PATH',
@@ -524,6 +525,8 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
   const records = [];
   for (let jobIndex = 0; jobIndex < jobs.length; jobIndex++) {
     const jobRef = jobs[jobIndex];
+    const knownProofProfiles = new Set(await listProofProfilePaths(bbDir));
+    const knownProofVerifyProfiles = new Set(await listProofVerifyProfilePaths(bbDir));
     const jobStart = performance.now();
     const inputLoadStart = performance.now();
     const job = await proofStore.getProofInput(jobRef.proofUri);
@@ -543,27 +546,30 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       }
     }
 
-    const knownProofProfiles = new Set(await listProofProfilePaths(bbDir));
-    const knownProofVerifyProfiles = new Set(await listProofVerifyProfilePaths(bbDir));
     const proofGenerationStart = performance.now();
     const result = await dispatchProof(prover, job.type, job.inputs);
     const proofGenerationMs = performance.now() - proofGenerationStart;
-    const nativeProofProfiles = await readNewProofProfiles(bbDir, knownProofProfiles);
-    const proofVerifyProfiles = await readNewProofVerifyProfiles(bbDir, knownProofVerifyProfiles);
-    const nativeProfileSummary = summarizeNativeProfiles(nativeProofProfiles);
-    const verifyProfileSummary = summarizeVerifyProfiles(proofVerifyProfiles);
-    nativeProfileSummary.bbVerifyMs = verifyProfileSummary.bbVerifyMs;
-    const proofInternalOverheadMs =
-      proofGenerationMs -
-      nativeProfileSummary.witnessGenerationMs -
-      nativeProfileSummary.bbProveMs -
-      nativeProfileSummary.bbVerifyMs;
 
     const proofOutputStart = performance.now();
     const proofBuffer = extractProofBuffer(result);
     const proofStats = await maybeFileStats(join(bbDir, 'proof'));
     const proofOutputMs = performance.now() - proofOutputStart;
     const elapsedMs = performance.now() - jobStart;
+    const proofProfileWriteStart = performance.now();
+    await prover.flushDeferredProofProfiles();
+    const proofProfileWriteMs = performance.now() - proofProfileWriteStart;
+    const proofProfileReadStart = performance.now();
+    const nativeProofProfiles = await readNewProofProfiles(bbDir, knownProofProfiles);
+    const proofVerifyProfiles = await readNewProofVerifyProfiles(bbDir, knownProofVerifyProfiles);
+    const nativeProfileSummary = summarizeNativeProfiles(nativeProofProfiles);
+    const verifyProfileSummary = summarizeVerifyProfiles(proofVerifyProfiles);
+    nativeProfileSummary.bbVerifyMs = verifyProfileSummary.bbVerifyMs;
+    const proofProfileReadMs = performance.now() - proofProfileReadStart;
+    const proofInternalOverheadMs =
+      proofGenerationMs -
+      nativeProfileSummary.witnessGenerationMs -
+      nativeProfileSummary.bbProveMs -
+      nativeProfileSummary.bbVerifyMs;
     const stageTotalMs = inputLoadMs + proofGenerationMs + proofOutputMs;
     const record = {
       benchmark: 'proof-store-replay-job',
@@ -579,6 +585,8 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       elapsedMs,
       inputLoadMs,
       proofGenerationMs,
+      proofProfileWriteMs,
+      proofProfileReadMs,
       nativeProofs: nativeProfileSummary.nativeProofs,
       witnessGenerationMs: nativeProfileSummary.witnessGenerationMs,
       bbProveMs: nativeProfileSummary.bbProveMs,
@@ -620,13 +628,20 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
         3,
       )} ms verify=${nativeProfileSummary.bbVerifyMs.toFixed(3)} ms proof-overhead=${proofInternalOverheadMs.toFixed(
         3,
+      )} ms profile-write=${proofProfileWriteMs.toFixed(
+        3,
+      )} ms profile-read=${proofProfileReadMs.toFixed(
+        3,
       )} ms overhead=${(elapsedMs - stageTotalMs).toFixed(3)} ms`,
     );
   }
 
-  const jobLoopElapsedMs = performance.now() - suiteStart;
+  const jobLoopWallMs = performance.now() - suiteStart;
+  const jobLoopElapsedMs = records.reduce((sum, record) => sum + record.elapsedMs, 0);
   const inputLoadMs = records.reduce((sum, record) => sum + record.inputLoadMs, 0);
   const proofGenerationMs = records.reduce((sum, record) => sum + record.proofGenerationMs, 0);
+  const proofProfileWriteMs = records.reduce((sum, record) => sum + record.proofProfileWriteMs, 0);
+  const proofProfileReadMs = records.reduce((sum, record) => sum + record.proofProfileReadMs, 0);
   const nativeProfileSummary = records
     .map(record => ({
       nativeProofs: record.nativeProofs,
@@ -641,7 +656,7 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
   const proofOutputMs = records.reduce((sum, record) => sum + record.proofOutputMs, 0);
   const stageTotalMs = inputLoadMs + proofGenerationMs + proofOutputMs;
   const elapsedMs = jobLoopElapsedMs;
-  const elapsedWithSetupMs = setupMs + jobLoopElapsedMs;
+  const elapsedWithSetupMs = setupMs + elapsedMs;
   const suiteRecord = {
     benchmark: 'proof-store-replay-suite',
     repeat,
@@ -653,8 +668,11 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     gpuSrsPrewarmSetupWallMs,
     gpuSrsPrewarmPoints,
     jobLoopElapsedMs,
+    jobLoopWallMs,
     inputLoadMs,
     proofGenerationMs,
+    proofProfileWriteMs,
+    proofProfileReadMs,
     nativeProofs: nativeProfileSummary.nativeProofs,
     witnessGenerationMs: nativeProfileSummary.witnessGenerationMs,
     bbProveMs: nativeProfileSummary.bbProveMs,
@@ -771,6 +789,8 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
       elapsedMsStdev: stdev(elapsed),
       inputLoadMsAvg: avgFor('inputLoadMs'),
       proofGenerationMsAvg: avgFor('proofGenerationMs'),
+      proofProfileWriteMsAvg: avgFor('proofProfileWriteMs'),
+      proofProfileReadMsAvg: avgFor('proofProfileReadMs'),
       proofOutputMsAvg: avgFor('proofOutputMs'),
       stageTotalMsAvg: avgFor('stageTotalMs'),
       overheadMsAvg: avgFor('overheadMs'),
@@ -813,6 +833,8 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
     gpuSrsPrewarmPointsMax: Math.max(...measuredSuites.map(record => record.gpuSrsPrewarmPoints ?? 0)),
     inputLoadMsAvg: suiteAvgField('inputLoadMs'),
     proofGenerationMsAvg: suiteAvgField('proofGenerationMs'),
+    proofProfileWriteMsAvg: suiteAvgField('proofProfileWriteMs'),
+    proofProfileReadMsAvg: suiteAvgField('proofProfileReadMs'),
     proofOutputMsAvg: suiteAvgField('proofOutputMs'),
     stageTotalMsAvg: suiteAvgField('stageTotalMs'),
     overheadMsAvg: suiteAvgField('overheadMs'),
@@ -854,6 +876,8 @@ async function writeSummaryMd(outputDir, summary) {
     `| gpu srs prewarm points max | ${summary.gpuSrsPrewarmPointsMax} |`,
     `| input load avg ms | ${formatMs(summary.inputLoadMsAvg)} |`,
     `| proof generation avg ms | ${formatMs(summary.proofGenerationMsAvg)} |`,
+    `| proof profile write avg ms | ${formatMs(summary.proofProfileWriteMsAvg)} |`,
+    `| proof profile read avg ms | ${formatMs(summary.proofProfileReadMsAvg)} |`,
     `| native proofs total | ${summary.nativeProofsTotal} |`,
     `| witgen total ms | ${formatMs(summary.witnessGenerationMsTotal)} |`,
     `| bb prove total ms | ${formatMs(summary.bbProveMsTotal)} |`,
@@ -878,8 +902,8 @@ async function writeSummaryMd(outputDir, summary) {
     '',
     '## By Type',
     '',
-    '| proof type | samples | jobs/repeat | avg ms | native proofs | witgen ms | bb prove ms | ultra honk api prove ms | bb verify ms | proof overhead ms | oink ms | wire comm ms | sorted acc ms | log-derivative ms | grand product ms | sumcheck ms | pcs ms | commitment key ms | gpu srs upload ms | gpu msm fit ms | gpu msm raw ms | gpu msm raw batch ms | input load ms | output ms | overhead ms | min ms | max ms | stdev ms |',
-    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    '| proof type | samples | jobs/repeat | avg ms | native proofs | witgen ms | bb prove ms | ultra honk api prove ms | bb verify ms | proof overhead ms | profile write ms | profile read ms | oink ms | wire comm ms | sorted acc ms | log-derivative ms | grand product ms | sumcheck ms | pcs ms | commitment key ms | gpu srs upload ms | gpu msm fit ms | gpu msm raw ms | gpu msm raw batch ms | input load ms | output ms | overhead ms | min ms | max ms | stdev ms |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
     ...summary.byType.map(
       row =>
         `| ${row.proofType} | ${row.samples} | ${row.jobsPerRepeat} | ${formatMs(row.elapsedMsAvg)} | ${formatMs(
@@ -890,6 +914,10 @@ async function writeSummaryMd(outputDir, summary) {
           row.bbVerifyMsAvg,
         )} | ${formatMs(
           row.proofInternalOverheadMsAvg,
+        )} | ${formatMs(
+          row.proofProfileWriteMsAvg,
+        )} | ${formatMs(
+          row.proofProfileReadMsAvg,
         )} | ${formatMs(row.oinkProverMsAvg)} | ${formatMs(
           row.wireCommitmentsMsAvg,
         )} | ${formatMs(row.sortedListAccumulatorMsAvg)} | ${formatMs(row.logDerivativeInverseMsAvg)} | ${formatMs(
@@ -913,8 +941,8 @@ async function writeSummaryMd(outputDir, summary) {
     '',
     '## Jobs',
     '',
-    '| repeat | index | proof type | elapsed ms | native proofs | witgen ms | bb prove ms | ultra honk api prove ms | bb verify ms | proof overhead ms | oink ms | sumcheck ms | pcs ms | commitment key ms | gpu srs upload ms | gpu msm fit ms | gpu msm raw ms | gpu msm raw batch ms | overhead ms | input load ms | output ms | input sha256 | proof sha256 | proof bytes |',
-    '|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|',
+    '| repeat | index | proof type | elapsed ms | native proofs | witgen ms | bb prove ms | ultra honk api prove ms | bb verify ms | proof overhead ms | profile write ms | profile read ms | oink ms | sumcheck ms | pcs ms | commitment key ms | gpu srs upload ms | gpu msm fit ms | gpu msm raw ms | gpu msm raw batch ms | overhead ms | input load ms | output ms | input sha256 | proof sha256 | proof bytes |',
+    '|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|',
     ...summary.records.map(
       record =>
         `| ${record.repeat} | ${record.jobIndex} | ${record.proofType} | ${formatMs(record.elapsedMs)} | ${formatMs(
@@ -924,6 +952,10 @@ async function writeSummaryMd(outputDir, summary) {
         )} | ${formatMs(
           record.bbVerifyMs,
         )} | ${formatMs(record.proofInternalOverheadMs)} | ${formatMs(
+          record.proofProfileWriteMs,
+        )} | ${formatMs(
+          record.proofProfileReadMs,
+        )} | ${formatMs(
           record.bbBenchStagesMs?.oinkProverMs,
         )} | ${formatMs(record.bbBenchStagesMs?.sumcheckMs)} | ${formatMs(record.bbBenchStagesMs?.pcsMs)} | ${formatMs(
           record.bbBenchStagesMs?.commitmentKeyMs,
@@ -945,6 +977,7 @@ async function writeSummaryMd(outputDir, summary) {
 async function main() {
   const args = parseArgs();
   args.outputDir = resolve(args.outputDir);
+  process.env.BB_PROOF_BENCH_DEFER_PROFILE_WRITE = '1';
   if (args.persistentBbWorker) {
     process.env.BB_PROOF_BENCH_PERSISTENT_BB = '1';
   }

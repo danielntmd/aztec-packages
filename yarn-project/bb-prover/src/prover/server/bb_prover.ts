@@ -160,6 +160,16 @@ async function writeProofVerifyProfile(
   );
 }
 
+type DeferredProofProfile = {
+  workingDirectory: string;
+  profile: Parameters<typeof writeProofProfile>[1];
+};
+
+type DeferredProofVerifyProfile = {
+  workingDirectory: string;
+  profile: Parameters<typeof writeProofVerifyProfile>[1];
+};
+
 export interface BBProverConfig extends BBConfig, ACVMConfig {
   // list of circuits supported by this prover. defaults to all circuits if empty
   circuitFilter?: ServerProtocolArtifact[];
@@ -171,6 +181,8 @@ export interface BBProverConfig extends BBConfig, ACVMConfig {
 export class BBNativeRollupProver implements ServerCircuitProver {
   private instrumentation: ProverInstrumentation;
   private persistentBBWorker?: UltraHonkProveWorker;
+  private deferredProofProfiles: DeferredProofProfile[] = [];
+  private deferredProofVerifyProfiles: DeferredProofVerifyProfile[] = [];
 
   constructor(
     private config: BBProverConfig,
@@ -189,6 +201,36 @@ export class BBNativeRollupProver implements ServerCircuitProver {
 
   public async prewarmGpuSrs(numPoints: number): Promise<number> {
     return (await this.getPersistentBBWorker()?.prewarmSrs(numPoints)) ?? 0;
+  }
+
+  public async flushDeferredProofProfiles(): Promise<void> {
+    const proofProfiles = this.deferredProofProfiles.splice(0);
+    const proofVerifyProfiles = this.deferredProofVerifyProfiles.splice(0);
+    for (const entry of proofProfiles) {
+      await writeProofProfile(entry.workingDirectory, entry.profile);
+    }
+    for (const entry of proofVerifyProfiles) {
+      await writeProofVerifyProfile(entry.workingDirectory, entry.profile);
+    }
+  }
+
+  private async writeOrDeferProofProfile(workingDirectory: string, profile: DeferredProofProfile['profile']) {
+    if (process.env.BB_PROOF_BENCH_DEFER_PROFILE_WRITE === '1') {
+      this.deferredProofProfiles.push({ workingDirectory, profile });
+      return;
+    }
+    await writeProofProfile(workingDirectory, profile);
+  }
+
+  private async writeOrDeferProofVerifyProfile(
+    workingDirectory: string,
+    profile: DeferredProofVerifyProfile['profile'],
+  ) {
+    if (process.env.BB_PROOF_BENCH_DEFER_PROFILE_WRITE === '1') {
+      this.deferredProofVerifyProfiles.push({ workingDirectory, profile });
+      return;
+    }
+    await writeProofVerifyProfile(workingDirectory, profile);
   }
 
   static async new(config: BBProverConfig, telemetry: TelemetryClient = getTelemetryClient()) {
@@ -579,7 +621,7 @@ export class BBNativeRollupProver implements ServerCircuitProver {
       throw new ProvingError(provingResult.reason, provingResult, provingResult.retry);
     }
 
-    await writeProofProfile(workingDirectory, {
+    await this.writeOrDeferProofProfile(workingDirectory, {
       circuitType,
       circuitName,
       witnessGenerationMs: witnessResult.duration,
@@ -618,7 +660,7 @@ export class BBNativeRollupProver implements ServerCircuitProver {
       const appCircuitName = 'unknown' as const;
       this.instrumentation.recordAvmDuration('provingDuration', appCircuitName, provingResult.durationMs);
       this.instrumentation.recordAvmSize('proofSize', appCircuitName, avmProof.binaryProof.buffer.length);
-      await writeProofProfile(bbWorkingDirectory, {
+      await this.writeOrDeferProofProfile(bbWorkingDirectory, {
         circuitType: 'avm-circuit',
         circuitName: circuitType,
         bbProveMs: provingResult.durationMs,
@@ -762,7 +804,7 @@ export class BBNativeRollupProver implements ServerCircuitProver {
 
       logger.info(`Successfully verified proof from key in ${result.durationMs} ms`);
       if (profile) {
-        await writeProofVerifyProfile(bbWorkingDirectory, { ...profile, bbVerifyMs: result.durationMs });
+        await this.writeOrDeferProofVerifyProfile(bbWorkingDirectory, { ...profile, bbVerifyMs: result.durationMs });
       }
       return result;
     };
