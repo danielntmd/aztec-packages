@@ -160,15 +160,6 @@ void run_fused_batch(std::span<std::span<curve::BN254::ScalarField>> scalars,
   }
 }
 
-void validate_srs_points_are_finite(
-    std::span<const curve::BN254::AffineElement> srs_points) {
-  for (const auto &point : srs_points) {
-    check_condition(!point.is_point_at_infinity() && point.on_curve(),
-                    "Backend<BN254>::init_srs: SRS points must be finite "
-                    "on-curve points");
-  }
-}
-
 } // namespace
 
 void Backend<curve::BN254>::init_srs(
@@ -177,7 +168,6 @@ void Backend<curve::BN254>::init_srs(
                 sizeof(curve::BN254::AffineElement));
   static_assert(alignof(host_affine_g1_montgomery_t) ==
                 alignof(curve::BN254::AffineElement));
-  validate_srs_points_are_finite(srs_points);
   default_msm_context().ensure_srs_uploaded(
       reinterpret_cast<const host_affine_g1_montgomery_t *>(srs_points.data()),
       srs_points.size());
