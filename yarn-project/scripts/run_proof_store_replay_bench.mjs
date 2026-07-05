@@ -231,43 +231,75 @@ function emptyNativeProfileSummary() {
     witnessGenerationMs: 0,
     bbProveMs: 0,
     bbVerifyMs: 0,
-    bbBenchStagesMs: {
-      oinkProverMs: 0,
+    bbAdditiveStagesMs: {
+      ultraHonkApiProveMs: 0,
+      ultraHonkApiOverheadMs: 0,
+      circuitProveMs: 0,
+      createCircuitMs: 0,
+      proverInstanceMs: 0,
+      oinkProveMs: 0,
+      sumcheckMs: 0,
+      pcsMs: 0,
+      commitmentsMs: 0,
+      gpuSrsUploadMs: 0,
+      otherCircuitProveMs: 0,
+      additiveTotalMs: 0,
+      additiveResidualMs: 0,
+    },
+    oinkAdditiveStagesMs: {
+      oinkProveMs: 0,
+      preambleMs: 0,
       wireCommitmentsMs: 0,
       sortedListAccumulatorMs: 0,
       logDerivativeInverseMs: 0,
       grandProductMs: 0,
-      ultraHonkApiProveMs: 0,
-      sumcheckMs: 0,
-      pcsMs: 0,
-      commitmentKeyMs: 0,
-      gpuSrsUploadMs: 0,
-      gpuMsmMemoryFitMs: 0,
-      gpuMsmRawMs: 0,
-      gpuMsmRawBatchMs: 0,
+      alphaMs: 0,
+      otherOinkMs: 0,
+      additiveResidualMs: 0,
     },
     bbBenchTopOps: [],
   };
 }
 
-function benchCategoryForKey(key) {
-  if (key === 'UltraHonkAPI::prove') {
-    return 'ultraHonkApiProveMs';
+function isPcsBenchKey(key) {
+  return (
+    key.includes('Shplemini') ||
+    key.includes('Gemini') ||
+    key.includes('KZG') ||
+    key.includes('IPA') ||
+    key.includes('PCS') ||
+    key === 'compute_batched'
+  );
+}
+
+function circuitProveCategoryForKey(key) {
+  if (key === 'create_circuit') {
+    return 'createCircuitMs';
+  }
+  if (key === 'ProverInstance(Circuit&)') {
+    return 'proverInstanceMs';
+  }
+  if (key === 'OinkProver::prove') {
+    return 'oinkProveMs';
+  }
+  if (key === 'sumcheck.prove') {
+    return 'sumcheckMs';
+  }
+  if (isPcsBenchKey(key)) {
+    return 'pcsMs';
+  }
+  if (key.includes('CommitmentKey::')) {
+    return 'commitmentsMs';
   }
   if (key === 'GPU::srs_upload') {
     return 'gpuSrsUploadMs';
   }
-  if (key === 'GPU::msm_memory_fit') {
-    return 'gpuMsmMemoryFitMs';
-  }
-  if (key === 'GPU::msm_raw') {
-    return 'gpuMsmRawMs';
-  }
-  if (key === 'GPU::msm_raw_batch') {
-    return 'gpuMsmRawBatchMs';
-  }
-  if (key.includes('OinkProver::prove')) {
-    return 'oinkProverMs';
+  return 'otherCircuitProveMs';
+}
+
+function oinkCategoryForKey(key) {
+  if (key.includes('execute_preamble_round')) {
+    return 'preambleMs';
   }
   if (key.includes('execute_wire_commitments_round')) {
     return 'wireCommitmentsMs';
@@ -281,23 +313,90 @@ function benchCategoryForKey(key) {
   if (key.includes('execute_grand_product_computation_round')) {
     return 'grandProductMs';
   }
-  if (key.toLowerCase().includes('sumcheck')) {
-    return 'sumcheckMs';
+  if (key.includes('generate_alpha_round')) {
+    return 'alphaMs';
   }
-  if (key.includes('CommitmentKey::')) {
-    return 'commitmentKeyMs';
+  return 'otherOinkMs';
+}
+
+function benchEntryMs(entry) {
+  return (entry.time_max ?? entry.time ?? 0) / 1_000_000;
+}
+
+function sumBenchEntries(bench, key, parent) {
+  return (bench[key] ?? [])
+    .filter(entry => parent === undefined || entry.parent === parent)
+    .reduce((sum, entry) => sum + benchEntryMs(entry), 0);
+}
+
+function addStageObjects(left, right) {
+  const result = { ...left };
+  for (const key of Object.keys(result)) {
+    result[key] = (left[key] ?? 0) + (right[key] ?? 0);
   }
-  if (
-    key.includes('Shplemini') ||
-    key.includes('Gemini') ||
-    key.includes('KZG') ||
-    key.includes('IPA') ||
-    key.includes('PCS') ||
-    key === 'compute_batched'
-  ) {
-    return 'pcsMs';
+  return result;
+}
+
+function summarizeAdditiveBenchStages(bench = {}) {
+  const summary = emptyNativeProfileSummary();
+  const bb = summary.bbAdditiveStagesMs;
+  const oink = summary.oinkAdditiveStagesMs;
+
+  bb.ultraHonkApiProveMs = sumBenchEntries(bench, 'UltraHonkAPI::prove', '_root');
+  bb.circuitProveMs = sumBenchEntries(bench, 'CircuitProve', 'UltraHonkAPI::prove');
+  bb.ultraHonkApiOverheadMs = Math.max(0, bb.ultraHonkApiProveMs - bb.circuitProveMs);
+
+  let circuitChildrenMs = 0;
+  for (const [key, entries] of Object.entries(bench)) {
+    for (const entry of entries) {
+      if (entry.parent !== 'CircuitProve') {
+        continue;
+      }
+      const elapsedMs = benchEntryMs(entry);
+      bb[circuitProveCategoryForKey(key)] += elapsedMs;
+      circuitChildrenMs += elapsedMs;
+    }
   }
-  return undefined;
+  bb.otherCircuitProveMs += Math.max(0, bb.circuitProveMs - circuitChildrenMs);
+  bb.additiveTotalMs =
+    bb.ultraHonkApiOverheadMs +
+    bb.createCircuitMs +
+    bb.proverInstanceMs +
+    bb.oinkProveMs +
+    bb.sumcheckMs +
+    bb.pcsMs +
+    bb.commitmentsMs +
+    bb.gpuSrsUploadMs +
+    bb.otherCircuitProveMs;
+  bb.additiveResidualMs = bb.ultraHonkApiProveMs - bb.additiveTotalMs;
+
+  oink.oinkProveMs = sumBenchEntries(bench, 'OinkProver::prove', 'CircuitProve');
+  let oinkChildrenMs = 0;
+  for (const [key, entries] of Object.entries(bench)) {
+    for (const entry of entries) {
+      if (entry.parent !== 'OinkProver::prove') {
+        continue;
+      }
+      const elapsedMs = benchEntryMs(entry);
+      oink[oinkCategoryForKey(key)] += elapsedMs;
+      oinkChildrenMs += elapsedMs;
+    }
+  }
+  oink.otherOinkMs += Math.max(0, oink.oinkProveMs - oinkChildrenMs);
+  oink.additiveResidualMs =
+    oink.oinkProveMs -
+    (oink.preambleMs +
+      oink.wireCommitmentsMs +
+      oink.sortedListAccumulatorMs +
+      oink.logDerivativeInverseMs +
+      oink.grandProductMs +
+      oink.alphaMs +
+      oink.otherOinkMs);
+
+  return {
+    bbAdditiveStagesMs: bb,
+    oinkAdditiveStagesMs: oink,
+  };
 }
 
 function addNativeProfileSummaries(left, right) {
@@ -306,8 +405,12 @@ function addNativeProfileSummaries(left, right) {
   result.witnessGenerationMs = left.witnessGenerationMs + right.witnessGenerationMs;
   result.bbProveMs = left.bbProveMs + right.bbProveMs;
   result.bbVerifyMs = left.bbVerifyMs + right.bbVerifyMs;
-  for (const key of Object.keys(result.bbBenchStagesMs)) {
-    result.bbBenchStagesMs[key] = (left.bbBenchStagesMs[key] ?? 0) + (right.bbBenchStagesMs[key] ?? 0);
+  for (const key of Object.keys(result.bbAdditiveStagesMs)) {
+    result.bbAdditiveStagesMs[key] = (left.bbAdditiveStagesMs?.[key] ?? 0) + (right.bbAdditiveStagesMs?.[key] ?? 0);
+  }
+  for (const key of Object.keys(result.oinkAdditiveStagesMs)) {
+    result.oinkAdditiveStagesMs[key] =
+      (left.oinkAdditiveStagesMs?.[key] ?? 0) + (right.oinkAdditiveStagesMs?.[key] ?? 0);
   }
   const topOps = new Map();
   for (const op of [...left.bbBenchTopOps, ...right.bbBenchTopOps]) {
@@ -328,17 +431,19 @@ function summarizeNativeProfiles(nativeProfiles) {
   for (const profile of nativeProfiles) {
     summary.witnessGenerationMs += profile.witnessGenerationMs ?? 0;
     summary.bbProveMs += profile.bbProveMs ?? 0;
+    const additiveStages = summarizeAdditiveBenchStages(profile.bbBench);
+    summary.bbAdditiveStagesMs = addStageObjects(summary.bbAdditiveStagesMs, additiveStages.bbAdditiveStagesMs);
+    summary.oinkAdditiveStagesMs = addStageObjects(
+      summary.oinkAdditiveStagesMs,
+      additiveStages.oinkAdditiveStagesMs,
+    );
 
     for (const [key, entries] of Object.entries(profile.bbBench ?? {})) {
-      const elapsedMs = entries.reduce((sum, entry) => sum + (entry.time_max ?? entry.time ?? 0) / 1_000_000, 0);
+      const elapsedMs = entries.reduce((sum, entry) => sum + benchEntryMs(entry), 0);
       if (elapsedMs === 0) {
         continue;
       }
       ops.set(key, (ops.get(key) ?? 0) + elapsedMs);
-      const category = benchCategoryForKey(key);
-      if (category) {
-        summary.bbBenchStagesMs[category] += elapsedMs;
-      }
     }
   }
 
@@ -631,7 +736,8 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       bbProveMs: nativeProfileSummary.bbProveMs,
       bbVerifyMs: nativeProfileSummary.bbVerifyMs,
       proofInternalOverheadMs,
-      bbBenchStagesMs: nativeProfileSummary.bbBenchStagesMs,
+      bbAdditiveStagesMs: nativeProfileSummary.bbAdditiveStagesMs,
+      oinkAdditiveStagesMs: nativeProfileSummary.oinkAdditiveStagesMs,
       bbBenchTopOps: nativeProfileSummary.bbBenchTopOps,
       nativeProofProfiles: nativeProofProfiles.map(profile => ({
         profilePath: profile.profilePath,
@@ -663,7 +769,7 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
         3,
       )} ms witgen=${nativeProfileSummary.witnessGenerationMs.toFixed(3)} ms bb=${nativeProfileSummary.bbProveMs.toFixed(
         3,
-      )} ms api=${nativeProfileSummary.bbBenchStagesMs.ultraHonkApiProveMs.toFixed(
+      )} ms api=${nativeProfileSummary.bbAdditiveStagesMs.ultraHonkApiProveMs.toFixed(
         3,
       )} ms verify=${nativeProfileSummary.bbVerifyMs.toFixed(3)} ms proof-overhead=${proofInternalOverheadMs.toFixed(
         3,
@@ -687,7 +793,8 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       witnessGenerationMs: record.witnessGenerationMs,
       bbProveMs: record.bbProveMs,
       bbVerifyMs: record.bbVerifyMs,
-      bbBenchStagesMs: record.bbBenchStagesMs,
+      bbAdditiveStagesMs: record.bbAdditiveStagesMs,
+      oinkAdditiveStagesMs: record.oinkAdditiveStagesMs,
       bbBenchTopOps: record.bbBenchTopOps,
     }))
     .reduce(addNativeProfileSummaries, emptyNativeProfileSummary());
@@ -719,7 +826,8 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     bbProveMs: nativeProfileSummary.bbProveMs,
     bbVerifyMs: nativeProfileSummary.bbVerifyMs,
     proofInternalOverheadMs,
-    bbBenchStagesMs: nativeProfileSummary.bbBenchStagesMs,
+    bbAdditiveStagesMs: nativeProfileSummary.bbAdditiveStagesMs,
+    oinkAdditiveStagesMs: nativeProfileSummary.oinkAdditiveStagesMs,
     bbBenchTopOps: nativeProfileSummary.bbBenchTopOps,
     proofOutputMs,
     stageTotalMs,
@@ -761,7 +869,8 @@ function summarizeNativeRecordGroup(records) {
       witnessGenerationMs: record.witnessGenerationMs ?? 0,
       bbProveMs: record.bbProveMs ?? 0,
       bbVerifyMs: record.bbVerifyMs ?? 0,
-      bbBenchStagesMs: record.bbBenchStagesMs ?? emptyNativeProfileSummary().bbBenchStagesMs,
+      bbAdditiveStagesMs: record.bbAdditiveStagesMs ?? emptyNativeProfileSummary().bbAdditiveStagesMs,
+      oinkAdditiveStagesMs: record.oinkAdditiveStagesMs ?? emptyNativeProfileSummary().oinkAdditiveStagesMs,
       bbBenchTopOps: record.bbBenchTopOps ?? [],
     }))
     .reduce(addNativeProfileSummaries, emptyNativeProfileSummary());
@@ -819,7 +928,8 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
   const byType = [...groupBy(measuredJobs, record => record.proofType)].map(([proofType, records]) => {
     const elapsed = records.map(record => record.elapsedMs);
     const avgFor = field => avg(records.map(record => record[field] ?? 0));
-    const avgStage = field => avg(records.map(record => record.bbBenchStagesMs?.[field] ?? 0));
+    const avgBbStage = field => avg(records.map(record => record.bbAdditiveStagesMs?.[field] ?? 0));
+    const avgOinkStage = field => avg(records.map(record => record.oinkAdditiveStagesMs?.[field] ?? 0));
     return {
       proofType,
       samples: records.length,
@@ -840,19 +950,12 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
       bbProveMsAvg: avgFor('bbProveMs'),
       bbVerifyMsAvg: avgFor('bbVerifyMs'),
       proofInternalOverheadMsAvg: avgFor('proofInternalOverheadMs'),
-      ultraHonkApiProveMsAvg: avgStage('ultraHonkApiProveMs'),
-      oinkProverMsAvg: avgStage('oinkProverMs'),
-      wireCommitmentsMsAvg: avgStage('wireCommitmentsMs'),
-      sortedListAccumulatorMsAvg: avgStage('sortedListAccumulatorMs'),
-      logDerivativeInverseMsAvg: avgStage('logDerivativeInverseMs'),
-      grandProductMsAvg: avgStage('grandProductMs'),
-      sumcheckMsAvg: avgStage('sumcheckMs'),
-      pcsMsAvg: avgStage('pcsMs'),
-      commitmentKeyMsAvg: avgStage('commitmentKeyMs'),
-      gpuSrsUploadMsAvg: avgStage('gpuSrsUploadMs'),
-      gpuMsmMemoryFitMsAvg: avgStage('gpuMsmMemoryFitMs'),
-      gpuMsmRawMsAvg: avgStage('gpuMsmRawMs'),
-      gpuMsmRawBatchMsAvg: avgStage('gpuMsmRawBatchMs'),
+      bbAdditiveStagesMsAvg: Object.fromEntries(
+        Object.keys(emptyNativeProfileSummary().bbAdditiveStagesMs).map(key => [key, avgBbStage(key)]),
+      ),
+      oinkAdditiveStagesMsAvg: Object.fromEntries(
+        Object.keys(emptyNativeProfileSummary().oinkAdditiveStagesMs).map(key => [key, avgOinkStage(key)]),
+      ),
     };
   });
   byType.sort((a, b) => proofTypeSortIndex(a.proofType) - proofTypeSortIndex(b.proofType));
@@ -886,7 +989,8 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
     bbProveMsTotal: suiteNative.bbProveMs,
     bbVerifyMsTotal: suiteNative.bbVerifyMs,
     proofInternalOverheadMsTotal: measuredJobs.reduce((sum, record) => sum + (record.proofInternalOverheadMs ?? 0), 0),
-    bbBenchStagesMsTotal: suiteNative.bbBenchStagesMs,
+    bbAdditiveStagesMsTotal: suiteNative.bbAdditiveStagesMs,
+    oinkAdditiveStagesMsTotal: suiteNative.oinkAdditiveStagesMs,
     bbBenchTopOps: suiteNative.bbBenchTopOps,
     suiteRecords: measuredSuites,
     byType,
@@ -895,7 +999,8 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
 }
 
 function formatMs(value) {
-  return (value ?? 0).toFixed(3);
+  const normalized = Math.abs(value ?? 0) < 0.0005 ? 0 : value ?? 0;
+  return normalized.toFixed(3);
 }
 
 async function writeSummaryMd(outputDir, summary) {
@@ -928,55 +1033,68 @@ async function writeSummaryMd(outputDir, summary) {
     `| bb prove total ms | ${formatMs(summary.bbProveMsTotal)} |`,
     `| bb verify total ms | ${formatMs(summary.bbVerifyMsTotal)} |`,
     `| proof internal overhead total ms | ${formatMs(summary.proofInternalOverheadMsTotal)} |`,
-    `| ultra honk api prove total ms | ${formatMs(summary.bbBenchStagesMsTotal.ultraHonkApiProveMs)} |`,
-    `| oink total ms | ${formatMs(summary.bbBenchStagesMsTotal.oinkProverMs)} |`,
-    `| wire commitments total ms | ${formatMs(summary.bbBenchStagesMsTotal.wireCommitmentsMs)} |`,
-    `| sorted list accumulator total ms | ${formatMs(summary.bbBenchStagesMsTotal.sortedListAccumulatorMs)} |`,
-    `| log-derivative inverse total ms | ${formatMs(summary.bbBenchStagesMsTotal.logDerivativeInverseMs)} |`,
-    `| grand product total ms | ${formatMs(summary.bbBenchStagesMsTotal.grandProductMs)} |`,
-    `| sumcheck total ms | ${formatMs(summary.bbBenchStagesMsTotal.sumcheckMs)} |`,
-    `| pcs total ms | ${formatMs(summary.bbBenchStagesMsTotal.pcsMs)} |`,
-    `| commitment key total ms | ${formatMs(summary.bbBenchStagesMsTotal.commitmentKeyMs)} |`,
-    `| gpu srs upload total ms | ${formatMs(summary.bbBenchStagesMsTotal.gpuSrsUploadMs)} |`,
-    `| gpu msm memory fit total ms | ${formatMs(summary.bbBenchStagesMsTotal.gpuMsmMemoryFitMs)} |`,
-    `| gpu msm raw total ms | ${formatMs(summary.bbBenchStagesMsTotal.gpuMsmRawMs)} |`,
-    `| gpu msm raw batch total ms | ${formatMs(summary.bbBenchStagesMsTotal.gpuMsmRawBatchMs)} |`,
+    `| bb additive ultra honk api prove total ms | ${formatMs(
+      summary.bbAdditiveStagesMsTotal.ultraHonkApiProveMs,
+    )} |`,
+    `| bb additive total ms | ${formatMs(summary.bbAdditiveStagesMsTotal.additiveTotalMs)} |`,
+    `| bb additive residual total ms | ${formatMs(summary.bbAdditiveStagesMsTotal.additiveResidualMs)} |`,
     `| output avg ms | ${formatMs(summary.proofOutputMsAvg)} |`,
     `| stage total avg ms | ${formatMs(summary.stageTotalMsAvg)} |`,
     `| overhead avg ms | ${formatMs(summary.overheadMsAvg)} |`,
     '',
-    '## By Type',
+    '## Proof Generation Additive By Type',
     '',
-    '| proof type | samples | jobs/repeat | avg ms | native proofs | witgen ms | bb prove ms | ultra honk api prove ms | bb verify ms | proof overhead ms | profile write ms | profile read ms | oink ms | wire comm ms | sorted acc ms | log-derivative ms | grand product ms | sumcheck ms | pcs ms | commitment key ms | gpu srs upload ms | gpu msm fit ms | gpu msm raw ms | gpu msm raw batch ms | input load ms | output ms | overhead ms | min ms | max ms | stdev ms |',
-    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    '| proof type | samples | jobs/repeat | avg ms | proof generation ms | witgen ms | bb prove ms | bb verify ms | proof overhead ms | additive residual ms | input load ms | output ms | harness overhead ms | min ms | max ms | stdev ms |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
     ...summary.byType.map(
-      row =>
-        `| ${row.proofType} | ${row.samples} | ${row.jobsPerRepeat} | ${formatMs(row.elapsedMsAvg)} | ${formatMs(
-          row.nativeProofsAvg,
-        )} | ${formatMs(
-          row.witnessGenerationMsAvg,
-        )} | ${formatMs(row.bbProveMsAvg)} | ${formatMs(row.ultraHonkApiProveMsAvg)} | ${formatMs(
-          row.bbVerifyMsAvg,
-        )} | ${formatMs(
-          row.proofInternalOverheadMsAvg,
-        )} | ${formatMs(
-          row.proofProfileWriteMsAvg,
-        )} | ${formatMs(
-          row.proofProfileReadMsAvg,
-        )} | ${formatMs(row.oinkProverMsAvg)} | ${formatMs(
-          row.wireCommitmentsMsAvg,
-        )} | ${formatMs(row.sortedListAccumulatorMsAvg)} | ${formatMs(row.logDerivativeInverseMsAvg)} | ${formatMs(
-          row.grandProductMsAvg,
-        )} | ${formatMs(row.sumcheckMsAvg)} | ${formatMs(row.pcsMsAvg)} | ${formatMs(
-          row.commitmentKeyMsAvg,
-        )} | ${formatMs(row.gpuSrsUploadMsAvg)} | ${formatMs(row.gpuMsmMemoryFitMsAvg)} | ${formatMs(
-          row.gpuMsmRawMsAvg,
-        )} | ${formatMs(row.gpuMsmRawBatchMsAvg)} | ${formatMs(row.inputLoadMsAvg)} | ${formatMs(
-          row.proofOutputMsAvg,
-        )} | ${formatMs(row.overheadMsAvg)} | ${formatMs(row.elapsedMsMin)} | ${formatMs(
-          row.elapsedMsMax,
-        )} | ${formatMs(row.elapsedMsStdev)} |`,
+      row => {
+        const additiveResidual =
+          row.proofGenerationMsAvg -
+          row.witnessGenerationMsAvg -
+          row.bbProveMsAvg -
+          row.bbVerifyMsAvg -
+          row.proofInternalOverheadMsAvg;
+        return `| ${row.proofType} | ${row.samples} | ${row.jobsPerRepeat} | ${formatMs(
+          row.elapsedMsAvg,
+        )} | ${formatMs(row.proofGenerationMsAvg)} | ${formatMs(row.witnessGenerationMsAvg)} | ${formatMs(
+          row.bbProveMsAvg,
+        )} | ${formatMs(row.bbVerifyMsAvg)} | ${formatMs(row.proofInternalOverheadMsAvg)} | ${formatMs(
+          additiveResidual,
+        )} | ${formatMs(row.inputLoadMsAvg)} | ${formatMs(row.proofOutputMsAvg)} | ${formatMs(
+          row.overheadMsAvg,
+        )} | ${formatMs(row.elapsedMsMin)} | ${formatMs(row.elapsedMsMax)} | ${formatMs(row.elapsedMsStdev)} |`;
+      },
     ),
+    '',
+    '## BB Additive By Type',
+    '',
+    '| proof type | ultra honk api prove ms | api overhead ms | circuit prove ms | create circuit ms | prover instance ms | oink ms | sumcheck ms | pcs ms | direct commitments ms | direct gpu srs ms | other circuit prove ms | additive total ms | residual ms |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    ...summary.byType.map(row => {
+      const bb = row.bbAdditiveStagesMsAvg;
+      return `| ${row.proofType} | ${formatMs(bb.ultraHonkApiProveMs)} | ${formatMs(
+        bb.ultraHonkApiOverheadMs,
+      )} | ${formatMs(bb.circuitProveMs)} | ${formatMs(bb.createCircuitMs)} | ${formatMs(
+        bb.proverInstanceMs,
+      )} | ${formatMs(bb.oinkProveMs)} | ${formatMs(bb.sumcheckMs)} | ${formatMs(bb.pcsMs)} | ${formatMs(
+        bb.commitmentsMs,
+      )} | ${formatMs(bb.gpuSrsUploadMs)} | ${formatMs(bb.otherCircuitProveMs)} | ${formatMs(
+        bb.additiveTotalMs,
+      )} | ${formatMs(bb.additiveResidualMs)} |`;
+    }),
+    '',
+    '## Oink Additive By Type',
+    '',
+    '| proof type | oink ms | preamble ms | wire commitments ms | sorted list accumulator ms | log-derivative inverse ms | grand product ms | alpha ms | other oink ms | residual ms |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    ...summary.byType.map(row => {
+      const oink = row.oinkAdditiveStagesMsAvg;
+      return `| ${row.proofType} | ${formatMs(oink.oinkProveMs)} | ${formatMs(oink.preambleMs)} | ${formatMs(
+        oink.wireCommitmentsMs,
+      )} | ${formatMs(oink.sortedListAccumulatorMs)} | ${formatMs(oink.logDerivativeInverseMs)} | ${formatMs(
+        oink.grandProductMs,
+      )} | ${formatMs(oink.alphaMs)} | ${formatMs(oink.otherOinkMs)} | ${formatMs(oink.additiveResidualMs)} |`;
+    }),
     '',
     '## Top BB Ops',
     '',
@@ -986,33 +1104,27 @@ async function writeSummaryMd(outputDir, summary) {
     '',
     '## Jobs',
     '',
-    '| repeat | index | proof type | elapsed ms | native proofs | witgen ms | bb prove ms | ultra honk api prove ms | bb verify ms | proof overhead ms | profile write ms | profile read ms | oink ms | sumcheck ms | pcs ms | commitment key ms | gpu srs upload ms | gpu msm fit ms | gpu msm raw ms | gpu msm raw batch ms | overhead ms | input load ms | output ms | input sha256 | proof sha256 | proof bytes |',
-    '|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|',
+    '| repeat | index | proof type | elapsed ms | proof generation ms | witgen ms | bb prove ms | bb verify ms | proof overhead ms | bb api ms | create circuit ms | prover instance ms | oink ms | sumcheck ms | pcs ms | direct commitments ms | direct gpu srs ms | other circuit prove ms | bb additive residual ms | input load ms | output ms | harness overhead ms | input sha256 | proof sha256 | proof bytes |',
+    '|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|',
     ...summary.records.map(
-      record =>
-        `| ${record.repeat} | ${record.jobIndex} | ${record.proofType} | ${formatMs(record.elapsedMs)} | ${formatMs(
-          record.nativeProofs,
-        )} | ${formatMs(record.witnessGenerationMs)} | ${formatMs(record.bbProveMs)} | ${formatMs(
-          record.bbBenchStagesMs?.ultraHonkApiProveMs,
-        )} | ${formatMs(
-          record.bbVerifyMs,
-        )} | ${formatMs(record.proofInternalOverheadMs)} | ${formatMs(
-          record.proofProfileWriteMs,
-        )} | ${formatMs(
-          record.proofProfileReadMs,
-        )} | ${formatMs(
-          record.bbBenchStagesMs?.oinkProverMs,
-        )} | ${formatMs(record.bbBenchStagesMs?.sumcheckMs)} | ${formatMs(record.bbBenchStagesMs?.pcsMs)} | ${formatMs(
-          record.bbBenchStagesMs?.commitmentKeyMs,
-        )} | ${formatMs(record.bbBenchStagesMs?.gpuSrsUploadMs)} | ${formatMs(
-          record.bbBenchStagesMs?.gpuMsmMemoryFitMs,
-        )} | ${formatMs(record.bbBenchStagesMs?.gpuMsmRawMs)} | ${formatMs(
-          record.bbBenchStagesMs?.gpuMsmRawBatchMs,
-        )} | ${formatMs(
-          record.overheadMs,
-        )} | ${formatMs(record.inputLoadMs)} | ${formatMs(
-          record.proofOutputMs,
-        )} | ${record.inputSha256} | ${record.proofSha256 ?? ''} | ${record.proofSizeBytes ?? ''} |`,
+      record => {
+        const bb = record.bbAdditiveStagesMs ?? emptyNativeProfileSummary().bbAdditiveStagesMs;
+        return `| ${record.repeat} | ${record.jobIndex} | ${record.proofType} | ${formatMs(
+          record.elapsedMs,
+        )} | ${formatMs(record.proofGenerationMs)} | ${formatMs(record.witnessGenerationMs)} | ${formatMs(
+          record.bbProveMs,
+        )} | ${formatMs(record.bbVerifyMs)} | ${formatMs(record.proofInternalOverheadMs)} | ${formatMs(
+          bb.ultraHonkApiProveMs,
+        )} | ${formatMs(bb.createCircuitMs)} | ${formatMs(bb.proverInstanceMs)} | ${formatMs(
+          bb.oinkProveMs,
+        )} | ${formatMs(bb.sumcheckMs)} | ${formatMs(bb.pcsMs)} | ${formatMs(bb.commitmentsMs)} | ${formatMs(
+          bb.gpuSrsUploadMs,
+        )} | ${formatMs(bb.otherCircuitProveMs)} | ${formatMs(bb.additiveResidualMs)} | ${formatMs(
+          record.inputLoadMs,
+        )} | ${formatMs(record.proofOutputMs)} | ${formatMs(record.overheadMs)} | ${record.inputSha256} | ${
+          record.proofSha256 ?? ''
+        } | ${record.proofSizeBytes ?? ''} |`;
+      },
     ),
     '',
   ];
