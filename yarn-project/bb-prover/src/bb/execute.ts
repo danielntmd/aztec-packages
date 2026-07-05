@@ -55,6 +55,15 @@ type BBExecResult = {
   signal: string | undefined;
 };
 
+type BBWorkerResponse = {
+  id: string;
+  status: 'ok' | 'error';
+  reason?: string;
+  duration_ms?: number;
+  prewarm_ms?: number;
+  bench_out_hierarchical?: string;
+};
+
 export const DEFAULT_BB_VERIFY_CONCURRENCY = 4;
 
 /**
@@ -203,6 +212,184 @@ function getArgs(flavor: UltraHonkFlavor) {
       return ['--scheme', 'ultra_honk', '--oracle_hash', 'poseidon2', '--ipa_accumulation'];
     }
   }
+}
+
+function getWorkerSettings(flavor: UltraHonkFlavor) {
+  switch (flavor) {
+    case 'ultra_honk':
+      return { oracleHashType: 'poseidon2', ipaAccumulation: false };
+    case 'ultra_keccak_honk':
+      return { oracleHashType: 'keccak', ipaAccumulation: false };
+    case 'ultra_starknet_honk':
+      return { oracleHashType: 'starknet', ipaAccumulation: false };
+    case 'ultra_rollup_honk':
+      return { oracleHashType: 'poseidon2', ipaAccumulation: true };
+  }
+}
+
+export class UltraHonkProveWorker {
+  private child?: proc.ChildProcessWithoutNullStreams;
+  private nextRequestId = 0;
+  private readonly pending = new Map<string, { resolve: (response: BBWorkerResponse) => void; reject: (err: Error) => void }>();
+
+  constructor(
+    private readonly pathToBB: string,
+    private readonly log: LogFn,
+  ) {}
+
+  async prewarmSrs(numPoints: number): Promise<number> {
+    if (numPoints <= 0) {
+      return 0;
+    }
+    const response = await this.send({ type: 'prewarm_srs', num_points: numPoints });
+    return response.prewarm_ms ?? 0;
+  }
+
+  async prove(
+    workingDirectory: string,
+    circuitName: string,
+    bytecode: Buffer,
+    verificationKey: Buffer,
+    inputWitnessFile: string,
+    flavor: UltraHonkFlavor,
+  ): Promise<BBFailure | BBSuccess> {
+    try {
+      await fs.access(workingDirectory);
+    } catch {
+      return { status: BB_RESULT.FAILURE, reason: `Working directory ${workingDirectory} does not exist` };
+    }
+
+    const binaryPresent = await fs
+      .access(this.pathToBB, fs.constants.R_OK)
+      .then(_ => true)
+      .catch(_ => false);
+    if (!binaryPresent) {
+      return { status: BB_RESULT.FAILURE, reason: `Failed to find bb binary at ${this.pathToBB}` };
+    }
+
+    const bytecodePath = `${workingDirectory}/${circuitName}-bytecode`;
+    const vkPath = `${workingDirectory}/${circuitName}-vk`;
+    const outputPath = `${workingDirectory}`;
+    const benchPath =
+      process.env.BB_PROOF_BENCH === '1' ? join(workingDirectory, BB_BENCH_HIERARCHICAL_FILENAME) : undefined;
+    const settings = getWorkerSettings(flavor);
+
+    try {
+      await Promise.all([fs.writeFile(bytecodePath, bytecode), fs.writeFile(vkPath, verificationKey)]);
+      const timer = new Timer();
+      const response = await this.send({
+        type: 'prove',
+        oracle_hash_type: settings.oracleHashType,
+        ipa_accumulation: settings.ipaAccumulation,
+        disable_zk: true,
+        write_vk: false,
+        output_format: 'binary',
+        bytecode_path: bytecodePath,
+        witness_path: inputWitnessFile,
+        vk_path: vkPath,
+        output_path: outputPath,
+        ...(benchPath ? { bench_out_hierarchical: benchPath } : {}),
+      });
+      return {
+        status: BB_RESULT.SUCCESS,
+        durationMs: timer.ms(),
+        proofPath: `${outputPath}`,
+        benchPath: response.bench_out_hierarchical ?? benchPath,
+        pkPath: undefined,
+        vkDirectoryPath: `${outputPath}`,
+      };
+    } catch (error) {
+      return { status: BB_RESULT.FAILURE, reason: `${error}`, retry: true };
+    }
+  }
+
+  async stop(): Promise<void> {
+    if (!this.child) {
+      return;
+    }
+    try {
+      await this.send({ type: 'shutdown' });
+    } catch {
+      this.child.kill('SIGKILL');
+    }
+  }
+
+  private ensureStarted() {
+    if (this.child) {
+      return;
+    }
+
+    const { HARDWARE_CONCURRENCY: _, BB_GPU_MSM_PREWARM_SRS_POINTS: __, ...env } = process.env;
+    if (process.env.HARDWARE_CONCURRENCY) {
+      env.HARDWARE_CONCURRENCY = process.env.HARDWARE_CONCURRENCY;
+    }
+
+    this.log(`Executing persistent BB worker with: ${this.pathToBB} prove_ultra_honk_worker`);
+    this.child = proc.spawn(this.pathToBB, ['prove_ultra_honk_worker'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env,
+    });
+
+    readline.createInterface({ input: this.child.stdout }).on('line', line => {
+      const prefix = 'BB_WORKER_RESULT ';
+      if (!line.startsWith(prefix)) {
+        this.log(line);
+        return;
+      }
+      let response: BBWorkerResponse;
+      try {
+        response = JSON.parse(line.slice(prefix.length));
+      } catch (err) {
+        this.log(`Failed to parse BB worker response: ${err}`);
+        return;
+      }
+      const pending = this.pending.get(response.id);
+      if (!pending) {
+        return;
+      }
+      this.pending.delete(response.id);
+      if (response.status === 'ok') {
+        pending.resolve(response);
+      } else {
+        pending.reject(new Error(response.reason ?? 'BB worker request failed'));
+      }
+    });
+    readline.createInterface({ input: this.child.stderr }).on('line', this.log);
+    this.child.on('close', (code, signal) => {
+      const err = new Error(`BB worker exited with code ${code} signal ${signal}`);
+      for (const pending of this.pending.values()) {
+        pending.reject(err);
+      }
+      this.pending.clear();
+      this.child = undefined;
+    });
+  }
+
+  private send(request: Record<string, unknown>): Promise<BBWorkerResponse> {
+    this.ensureStarted();
+    return new Promise<BBWorkerResponse>((resolve, reject) => {
+      const id = `${++this.nextRequestId}`;
+      this.pending.set(id, { resolve, reject });
+      this.child!.stdin.write(`${JSON.stringify({ id, ...request })}\n`, err => {
+        if (err) {
+          this.pending.delete(id);
+          reject(err);
+        }
+      });
+    });
+  }
+}
+
+export async function generateProofWithWorker(
+  worker: UltraHonkProveWorker,
+  workingDirectory: string,
+  circuitName: string,
+  bytecode: Buffer,
+  verificationKey: Buffer,
+  inputWitnessFile: string,
+  flavor: UltraHonkFlavor,
+): Promise<BBFailure | BBSuccess> {
+  return await worker.prove(workingDirectory, circuitName, bytecode, verificationKey, inputWitnessFile, flavor);
 }
 
 /**

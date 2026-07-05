@@ -32,12 +32,18 @@
 #include "barretenberg/srs/global_crs.hpp"
 #include "barretenberg/vm2/api_avm.hpp"
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <mutex>
 #ifndef __wasm__
 #include <exception>
 #include <nlohmann/json.hpp>
+#endif
+
+#ifdef BB_GPU_NATIVE
+#include "barretenberg/ecc/curves/bn254/bn254.hpp"
+#include "barretenberg/gpu/commitment_schemes/commitment_key_msm.hpp"
 #endif
 
 namespace bb {
@@ -88,6 +94,16 @@ void print_subcommand_options(const CLI::App* sub)
 }
 
 #ifndef __wasm__
+void prewarm_gpu_msm_srs(const size_t num_points)
+{
+#ifdef BB_GPU_NATIVE
+    auto crs = srs::get_crs_factory<curve::BN254>()->get_crs(num_points);
+    gpu::init_commitment_key_srs<curve::BN254>(crs->get_monomial_points());
+#else
+    static_cast<void>(num_points);
+#endif
+}
+
 int run_ultra_honk_worker(const API::Flags& base_flags)
 {
     UltraHonkAPI api;
@@ -104,6 +120,17 @@ int run_ultra_honk_worker(const API::Flags& base_flags)
                 std::cout << "BB_WORKER_RESULT " << response.dump() << std::endl;
                 return 0;
             }
+            if (request.value("type", "") == "prewarm_srs") {
+                const size_t num_points = request.at("num_points").get<size_t>();
+                const auto start = std::chrono::steady_clock::now();
+                prewarm_gpu_msm_srs(num_points);
+                const auto end = std::chrono::steady_clock::now();
+                response["status"] = "ok";
+                response["num_points"] = num_points;
+                response["prewarm_ms"] = std::chrono::duration<double, std::milli>(end - start).count();
+                std::cout << "BB_WORKER_RESULT " << response.dump() << std::endl;
+                continue;
+            }
 
             API::Flags flags = base_flags;
             flags.scheme = "ultra_honk";
@@ -119,8 +146,22 @@ int run_ultra_honk_worker(const API::Flags& base_flags)
             const std::filesystem::path output_path = request.at("output_path").get<std::string>();
             std::filesystem::create_directories(output_path);
 
+            const std::filesystem::path bench_out_hierarchical =
+                request.value("bench_out_hierarchical", std::string(""));
+            if (!bench_out_hierarchical.empty()) {
+                bb::detail::use_bb_bench = true;
+                bb::detail::GLOBAL_BENCH_STATS.clear();
+            }
+            const auto start = std::chrono::steady_clock::now();
             api.prove(flags, bytecode_path, witness_path, vk_path, output_path);
+            const auto end = std::chrono::steady_clock::now();
+            if (!bench_out_hierarchical.empty()) {
+                std::ofstream file(bench_out_hierarchical);
+                bb::detail::GLOBAL_BENCH_STATS.serialize_aggregate_data_json(file);
+                response["bench_out_hierarchical"] = bench_out_hierarchical.string();
+            }
             response["status"] = "ok";
+            response["duration_ms"] = std::chrono::duration<double, std::milli>(end - start).count();
         } catch (const std::exception& err) {
             response["id"] = request_id;
             response["status"] = "error";

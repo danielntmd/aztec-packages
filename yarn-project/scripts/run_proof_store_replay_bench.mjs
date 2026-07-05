@@ -42,11 +42,23 @@ const PROOF_TYPE_ORDER = [
 const GPU_ENV_KEYS = [
   'BB_GPU_MSM_PRECOMPUTE_FACTOR',
   'BB_GPU_MSM_MAX_BATCH_SIZE',
+  'BB_GPU_MSM_PREWARM_SRS_POINTS',
+  'BB_PROOF_BENCH_PERSISTENT_BB',
   'BB_BINARY_PATH',
   'ACVM_BINARY_PATH',
   'LD_LIBRARY_PATH',
   'CUDA_VISIBLE_DEVICES',
 ];
+
+const GPU_SRS_PREWARM_POINTS_BY_PROOF_TYPE = {
+  PUBLIC_CHONK_VERIFIER: 1 << 22,
+  PARITY_BASE: 1 << 22,
+  PARITY_ROOT: 1 << 22,
+  PRIVATE_TX_BASE_ROLLUP: 1 << 22,
+  BLOCK_ROOT_SINGLE_TX_FIRST_ROLLUP: 1 << 21,
+  CHECKPOINT_ROOT_SINGLE_BLOCK_ROLLUP: 1 << 23,
+  ROOT_ROLLUP: 1 << 24,
+};
 
 function parseArgs() {
   const args = {
@@ -54,6 +66,8 @@ function parseArgs() {
     warmups: 0,
     includeTypes: undefined,
     excludeTypes: new Set(),
+    gpuSrsPrewarmByType: false,
+    persistentBbWorker: false,
     list: false,
   };
   for (let i = 2; i < process.argv.length; i++) {
@@ -92,6 +106,12 @@ function parseArgs() {
         args.excludeTypes = new Set(parseTypeList(value));
         i++;
         break;
+      case '--gpu-srs-prewarm-by-type':
+        args.gpuSrsPrewarmByType = true;
+        break;
+      case '--persistent-bb-worker':
+        args.persistentBbWorker = true;
+        break;
       case '--list':
         args.list = true;
         break;
@@ -113,6 +133,10 @@ function parseArgs() {
     }
   }
   return args;
+}
+
+function maxGpuSrsPrewarmPointsForJobs(jobs) {
+  return jobs.reduce((max, job) => Math.max(max, GPU_SRS_PREWARM_POINTS_BY_PROOF_TYPE[job.typeName] ?? 0), 0);
 }
 
 function parseTypeList(value) {
@@ -192,15 +216,35 @@ function emptyNativeProfileSummary() {
       sortedListAccumulatorMs: 0,
       logDerivativeInverseMs: 0,
       grandProductMs: 0,
+      ultraHonkApiProveMs: 0,
       sumcheckMs: 0,
       pcsMs: 0,
       commitmentKeyMs: 0,
+      gpuSrsUploadMs: 0,
+      gpuMsmMemoryFitMs: 0,
+      gpuMsmRawMs: 0,
+      gpuMsmRawBatchMs: 0,
     },
     bbBenchTopOps: [],
   };
 }
 
 function benchCategoryForKey(key) {
+  if (key === 'UltraHonkAPI::prove') {
+    return 'ultraHonkApiProveMs';
+  }
+  if (key === 'GPU::srs_upload') {
+    return 'gpuSrsUploadMs';
+  }
+  if (key === 'GPU::msm_memory_fit') {
+    return 'gpuMsmMemoryFitMs';
+  }
+  if (key === 'GPU::msm_raw') {
+    return 'gpuMsmRawMs';
+  }
+  if (key === 'GPU::msm_raw_batch') {
+    return 'gpuMsmRawBatchMs';
+  }
   if (key.includes('OinkProver::prove')) {
     return 'oinkProverMs';
   }
@@ -470,6 +514,10 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     acvmWorkingDirectory: acvmDir,
     bbSkipCleanup: true,
   });
+  const gpuSrsPrewarmSetupStart = performance.now();
+  const gpuSrsPrewarmPoints = args.persistentBbWorker ? maxGpuSrsPrewarmPointsForJobs(jobs) : 0;
+  const gpuSrsPrewarmSetupMs = gpuSrsPrewarmPoints > 0 ? await prover.prewarmGpuSrs(gpuSrsPrewarmPoints) : 0;
+  const gpuSrsPrewarmSetupWallMs = performance.now() - gpuSrsPrewarmSetupStart;
   const setupMs = performance.now() - setupStart;
 
   const suiteStart = performance.now();
@@ -484,6 +532,15 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       throw new Error(
         `Discovered ${jobRef.typeName} for ${jobRef.proofUri}, but proof store decoded ${proofTypeName(job.type)}`,
       );
+    }
+
+    if (args.gpuSrsPrewarmByType && !args.persistentBbWorker) {
+      const prewarmPoints = GPU_SRS_PREWARM_POINTS_BY_PROOF_TYPE[jobRef.typeName];
+      if (prewarmPoints === undefined) {
+        delete process.env.BB_GPU_MSM_PREWARM_SRS_POINTS;
+      } else {
+        process.env.BB_GPU_MSM_PREWARM_SRS_POINTS = String(prewarmPoints);
+      }
     }
 
     const knownProofProfiles = new Set(await listProofProfilePaths(bbDir));
@@ -550,6 +607,7 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       acvmDir,
       bbBin: args.bbBin,
       acvmBin: args.acvmBin,
+      persistentBbWorker: args.persistentBbWorker,
     };
     records.push(record);
     await writeFile(rawPath, JSON.stringify(record) + '\n', { flag: 'a' });
@@ -557,6 +615,8 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
       `${warmup ? 'warmup' : 'run'} ${repeat} job ${jobIndex + 1}/${jobs.length} ${jobRef.typeName} ${elapsedMs.toFixed(
         3,
       )} ms witgen=${nativeProfileSummary.witnessGenerationMs.toFixed(3)} ms bb=${nativeProfileSummary.bbProveMs.toFixed(
+        3,
+      )} ms api=${nativeProfileSummary.bbBenchStagesMs.ultraHonkApiProveMs.toFixed(
         3,
       )} ms verify=${nativeProfileSummary.bbVerifyMs.toFixed(3)} ms proof-overhead=${proofInternalOverheadMs.toFixed(
         3,
@@ -579,14 +639,19 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     .reduce(addNativeProfileSummaries, emptyNativeProfileSummary());
   const proofInternalOverheadMs = records.reduce((sum, record) => sum + record.proofInternalOverheadMs, 0);
   const proofOutputMs = records.reduce((sum, record) => sum + record.proofOutputMs, 0);
-  const stageTotalMs = setupMs + inputLoadMs + proofGenerationMs + proofOutputMs;
-  const elapsedMs = setupMs + jobLoopElapsedMs;
+  const stageTotalMs = inputLoadMs + proofGenerationMs + proofOutputMs;
+  const elapsedMs = jobLoopElapsedMs;
+  const elapsedWithSetupMs = setupMs + jobLoopElapsedMs;
   const suiteRecord = {
     benchmark: 'proof-store-replay-suite',
     repeat,
     warmup,
     elapsedMs,
+    elapsedWithSetupMs,
     setupMs,
+    gpuSrsPrewarmSetupMs,
+    gpuSrsPrewarmSetupWallMs,
+    gpuSrsPrewarmPoints,
     jobLoopElapsedMs,
     inputLoadMs,
     proofGenerationMs,
@@ -606,6 +671,7 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     acvmDir,
   };
   await writeFile(rawPath, JSON.stringify(suiteRecord) + '\n', { flag: 'a' });
+  await prover.stop();
   return { suiteRecord, records };
 }
 
@@ -665,6 +731,8 @@ function collectMetadata(args, jobs) {
     warmups: args.warmups,
     includeTypes: args.includeTypes ? [...args.includeTypes] : null,
     excludeTypes: [...args.excludeTypes],
+    gpuSrsPrewarmByType: args.gpuSrsPrewarmByType,
+    persistentBbWorker: args.persistentBbWorker,
     env,
     git: {
       commit: safeExec('git', ['rev-parse', 'HEAD']),
@@ -685,12 +753,13 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
   const measuredSuites = suiteRecords.filter(record => !record.warmup);
   const measuredJobs = jobRecords.filter(record => !record.warmup);
   const suiteElapsed = measuredSuites.map(record => record.elapsedMs);
+  const suiteElapsedWithSetup = measuredSuites.map(record => record.elapsedWithSetupMs ?? record.elapsedMs);
   const suiteSetup = measuredSuites.map(record => record.setupMs);
   const suiteAvgField = field => avg(measuredSuites.map(record => record[field]));
   const suiteNative = summarizeNativeRecordGroup(measuredSuites);
   const byType = [...groupBy(measuredJobs, record => record.proofType)].map(([proofType, records]) => {
     const elapsed = records.map(record => record.elapsedMs);
-    const avgFor = field => avg(records.map(record => record[field]));
+    const avgFor = field => avg(records.map(record => record[field] ?? 0));
     const avgStage = field => avg(records.map(record => record.bbBenchStagesMs?.[field] ?? 0));
     return {
       proofType,
@@ -710,6 +779,7 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
       bbProveMsAvg: avgFor('bbProveMs'),
       bbVerifyMsAvg: avgFor('bbVerifyMs'),
       proofInternalOverheadMsAvg: avgFor('proofInternalOverheadMs'),
+      ultraHonkApiProveMsAvg: avgStage('ultraHonkApiProveMs'),
       oinkProverMsAvg: avgStage('oinkProverMs'),
       wireCommitmentsMsAvg: avgStage('wireCommitmentsMs'),
       sortedListAccumulatorMsAvg: avgStage('sortedListAccumulatorMs'),
@@ -718,6 +788,10 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
       sumcheckMsAvg: avgStage('sumcheckMs'),
       pcsMsAvg: avgStage('pcsMs'),
       commitmentKeyMsAvg: avgStage('commitmentKeyMs'),
+      gpuSrsUploadMsAvg: avgStage('gpuSrsUploadMs'),
+      gpuMsmMemoryFitMsAvg: avgStage('gpuMsmMemoryFitMs'),
+      gpuMsmRawMsAvg: avgStage('gpuMsmRawMs'),
+      gpuMsmRawBatchMsAvg: avgStage('gpuMsmRawBatchMs'),
     };
   });
   byType.sort((a, b) => proofTypeSortIndex(a.proofType) - proofTypeSortIndex(b.proofType));
@@ -732,7 +806,11 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
     elapsedMsMin: Math.min(...suiteElapsed),
     elapsedMsMax: Math.max(...suiteElapsed),
     elapsedMsStdev: stdev(suiteElapsed),
+    elapsedWithSetupMsAvg: avg(suiteElapsedWithSetup),
     setupMsAvg: avg(suiteSetup),
+    gpuSrsPrewarmSetupMsAvg: suiteAvgField('gpuSrsPrewarmSetupMs'),
+    gpuSrsPrewarmSetupWallMsAvg: suiteAvgField('gpuSrsPrewarmSetupWallMs'),
+    gpuSrsPrewarmPointsMax: Math.max(...measuredSuites.map(record => record.gpuSrsPrewarmPoints ?? 0)),
     inputLoadMsAvg: suiteAvgField('inputLoadMs'),
     proofGenerationMsAvg: suiteAvgField('proofGenerationMs'),
     proofOutputMsAvg: suiteAvgField('proofOutputMs'),
@@ -766,10 +844,14 @@ async function writeSummaryMd(outputDir, summary) {
     `| measured repeats | ${summary.samples} |`,
     `| jobs per repeat | ${summary.jobsPerRepeat} |`,
     `| total avg ms | ${formatMs(summary.elapsedMsAvg)} |`,
+    `| total incl setup avg ms | ${formatMs(summary.elapsedWithSetupMsAvg)} |`,
     `| total min ms | ${formatMs(summary.elapsedMsMin)} |`,
     `| total max ms | ${formatMs(summary.elapsedMsMax)} |`,
     `| total stdev ms | ${formatMs(summary.elapsedMsStdev)} |`,
     `| setup avg ms | ${formatMs(summary.setupMsAvg)} |`,
+    `| gpu srs prewarm setup avg ms | ${formatMs(summary.gpuSrsPrewarmSetupMsAvg)} |`,
+    `| gpu srs prewarm setup wall avg ms | ${formatMs(summary.gpuSrsPrewarmSetupWallMsAvg)} |`,
+    `| gpu srs prewarm points max | ${summary.gpuSrsPrewarmPointsMax} |`,
     `| input load avg ms | ${formatMs(summary.inputLoadMsAvg)} |`,
     `| proof generation avg ms | ${formatMs(summary.proofGenerationMsAvg)} |`,
     `| native proofs total | ${summary.nativeProofsTotal} |`,
@@ -777,6 +859,7 @@ async function writeSummaryMd(outputDir, summary) {
     `| bb prove total ms | ${formatMs(summary.bbProveMsTotal)} |`,
     `| bb verify total ms | ${formatMs(summary.bbVerifyMsTotal)} |`,
     `| proof internal overhead total ms | ${formatMs(summary.proofInternalOverheadMsTotal)} |`,
+    `| ultra honk api prove total ms | ${formatMs(summary.bbBenchStagesMsTotal.ultraHonkApiProveMs)} |`,
     `| oink total ms | ${formatMs(summary.bbBenchStagesMsTotal.oinkProverMs)} |`,
     `| wire commitments total ms | ${formatMs(summary.bbBenchStagesMsTotal.wireCommitmentsMs)} |`,
     `| sorted list accumulator total ms | ${formatMs(summary.bbBenchStagesMsTotal.sortedListAccumulatorMs)} |`,
@@ -785,21 +868,27 @@ async function writeSummaryMd(outputDir, summary) {
     `| sumcheck total ms | ${formatMs(summary.bbBenchStagesMsTotal.sumcheckMs)} |`,
     `| pcs total ms | ${formatMs(summary.bbBenchStagesMsTotal.pcsMs)} |`,
     `| commitment key total ms | ${formatMs(summary.bbBenchStagesMsTotal.commitmentKeyMs)} |`,
+    `| gpu srs upload total ms | ${formatMs(summary.bbBenchStagesMsTotal.gpuSrsUploadMs)} |`,
+    `| gpu msm memory fit total ms | ${formatMs(summary.bbBenchStagesMsTotal.gpuMsmMemoryFitMs)} |`,
+    `| gpu msm raw total ms | ${formatMs(summary.bbBenchStagesMsTotal.gpuMsmRawMs)} |`,
+    `| gpu msm raw batch total ms | ${formatMs(summary.bbBenchStagesMsTotal.gpuMsmRawBatchMs)} |`,
     `| output avg ms | ${formatMs(summary.proofOutputMsAvg)} |`,
     `| stage total avg ms | ${formatMs(summary.stageTotalMsAvg)} |`,
     `| overhead avg ms | ${formatMs(summary.overheadMsAvg)} |`,
     '',
     '## By Type',
     '',
-    '| proof type | samples | jobs/repeat | avg ms | native proofs | witgen ms | bb prove ms | bb verify ms | proof overhead ms | oink ms | wire comm ms | sorted acc ms | log-derivative ms | grand product ms | sumcheck ms | pcs ms | commitment key ms | input load ms | output ms | overhead ms | min ms | max ms | stdev ms |',
-    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    '| proof type | samples | jobs/repeat | avg ms | native proofs | witgen ms | bb prove ms | ultra honk api prove ms | bb verify ms | proof overhead ms | oink ms | wire comm ms | sorted acc ms | log-derivative ms | grand product ms | sumcheck ms | pcs ms | commitment key ms | gpu srs upload ms | gpu msm fit ms | gpu msm raw ms | gpu msm raw batch ms | input load ms | output ms | overhead ms | min ms | max ms | stdev ms |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
     ...summary.byType.map(
       row =>
         `| ${row.proofType} | ${row.samples} | ${row.jobsPerRepeat} | ${formatMs(row.elapsedMsAvg)} | ${formatMs(
           row.nativeProofsAvg,
         )} | ${formatMs(
           row.witnessGenerationMsAvg,
-        )} | ${formatMs(row.bbProveMsAvg)} | ${formatMs(row.bbVerifyMsAvg)} | ${formatMs(
+        )} | ${formatMs(row.bbProveMsAvg)} | ${formatMs(row.ultraHonkApiProveMsAvg)} | ${formatMs(
+          row.bbVerifyMsAvg,
+        )} | ${formatMs(
           row.proofInternalOverheadMsAvg,
         )} | ${formatMs(row.oinkProverMsAvg)} | ${formatMs(
           row.wireCommitmentsMsAvg,
@@ -807,7 +896,9 @@ async function writeSummaryMd(outputDir, summary) {
           row.grandProductMsAvg,
         )} | ${formatMs(row.sumcheckMsAvg)} | ${formatMs(row.pcsMsAvg)} | ${formatMs(
           row.commitmentKeyMsAvg,
-        )} | ${formatMs(row.inputLoadMsAvg)} | ${formatMs(
+        )} | ${formatMs(row.gpuSrsUploadMsAvg)} | ${formatMs(row.gpuMsmMemoryFitMsAvg)} | ${formatMs(
+          row.gpuMsmRawMsAvg,
+        )} | ${formatMs(row.gpuMsmRawBatchMsAvg)} | ${formatMs(row.inputLoadMsAvg)} | ${formatMs(
           row.proofOutputMsAvg,
         )} | ${formatMs(row.overheadMsAvg)} | ${formatMs(row.elapsedMsMin)} | ${formatMs(
           row.elapsedMsMax,
@@ -822,18 +913,24 @@ async function writeSummaryMd(outputDir, summary) {
     '',
     '## Jobs',
     '',
-    '| repeat | index | proof type | elapsed ms | native proofs | witgen ms | bb prove ms | bb verify ms | proof overhead ms | oink ms | sumcheck ms | pcs ms | commitment key ms | overhead ms | input load ms | output ms | input sha256 | proof sha256 | proof bytes |',
-    '|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|',
+    '| repeat | index | proof type | elapsed ms | native proofs | witgen ms | bb prove ms | ultra honk api prove ms | bb verify ms | proof overhead ms | oink ms | sumcheck ms | pcs ms | commitment key ms | gpu srs upload ms | gpu msm fit ms | gpu msm raw ms | gpu msm raw batch ms | overhead ms | input load ms | output ms | input sha256 | proof sha256 | proof bytes |',
+    '|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|',
     ...summary.records.map(
       record =>
         `| ${record.repeat} | ${record.jobIndex} | ${record.proofType} | ${formatMs(record.elapsedMs)} | ${formatMs(
           record.nativeProofs,
         )} | ${formatMs(record.witnessGenerationMs)} | ${formatMs(record.bbProveMs)} | ${formatMs(
+          record.bbBenchStagesMs?.ultraHonkApiProveMs,
+        )} | ${formatMs(
           record.bbVerifyMs,
         )} | ${formatMs(record.proofInternalOverheadMs)} | ${formatMs(
           record.bbBenchStagesMs?.oinkProverMs,
         )} | ${formatMs(record.bbBenchStagesMs?.sumcheckMs)} | ${formatMs(record.bbBenchStagesMs?.pcsMs)} | ${formatMs(
           record.bbBenchStagesMs?.commitmentKeyMs,
+        )} | ${formatMs(record.bbBenchStagesMs?.gpuSrsUploadMs)} | ${formatMs(
+          record.bbBenchStagesMs?.gpuMsmMemoryFitMs,
+        )} | ${formatMs(record.bbBenchStagesMs?.gpuMsmRawMs)} | ${formatMs(
+          record.bbBenchStagesMs?.gpuMsmRawBatchMs,
         )} | ${formatMs(
           record.overheadMs,
         )} | ${formatMs(record.inputLoadMs)} | ${formatMs(
@@ -848,6 +945,9 @@ async function writeSummaryMd(outputDir, summary) {
 async function main() {
   const args = parseArgs();
   args.outputDir = resolve(args.outputDir);
+  if (args.persistentBbWorker) {
+    process.env.BB_PROOF_BENCH_PERSISTENT_BB = '1';
+  }
   await mkdir(args.outputDir, { recursive: true });
 
   const jobs = await discoverProofInputs(args);

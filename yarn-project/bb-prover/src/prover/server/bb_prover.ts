@@ -98,8 +98,10 @@ import {
   PROOF_FILENAME,
   PUBLIC_INPUTS_FILENAME,
   VK_FILENAME,
+  UltraHonkProveWorker,
   generateAvmProof,
   generateProof,
+  generateProofWithWorker,
   verifyAvmProof,
   verifyProof,
 } from '../../bb/execute.js';
@@ -168,6 +170,7 @@ export interface BBProverConfig extends BBConfig, ACVMConfig {
  */
 export class BBNativeRollupProver implements ServerCircuitProver {
   private instrumentation: ProverInstrumentation;
+  private persistentBBWorker?: UltraHonkProveWorker;
 
   constructor(
     private config: BBProverConfig,
@@ -181,7 +184,11 @@ export class BBNativeRollupProver implements ServerCircuitProver {
   }
 
   public async stop(): Promise<void> {
-    await this.bbJsFactory.destroy();
+    await this.persistentBBWorker?.stop();
+  }
+
+  public async prewarmGpuSrs(numPoints: number): Promise<number> {
+    return (await this.getPersistentBBWorker()?.prewarmSrs(numPoints)) ?? 0;
   }
 
   static async new(config: BBProverConfig, telemetry: TelemetryClient = getTelemetryClient()) {
@@ -193,6 +200,16 @@ export class BBNativeRollupProver implements ServerCircuitProver {
     logger.info(`Using native ACVM at ${config.acvmBinaryPath} and working directory ${config.acvmWorkingDirectory}`);
 
     return new BBNativeRollupProver(config, telemetry);
+  }
+
+  private getPersistentBBWorker() {
+    if (process.env.BB_PROOF_BENCH_PERSISTENT_BB !== '1') {
+      return undefined;
+    }
+    this.persistentBBWorker ??= new UltraHonkProveWorker(this.config.bbBinaryPath, message =>
+      logger.info(`bb worker - ${message}`),
+    );
+    return this.persistentBBWorker;
   }
 
   /**
@@ -544,16 +561,18 @@ export class BBNativeRollupProver implements ServerCircuitProver {
     // Now prove the circuit from the generated witness
     logger.debug(`Proving ${circuitType}...`);
 
-    const provingResult = await generateProof(
-      this.config.bbBinaryPath,
+    const proofArgs = [
       workingDirectory,
       circuitType,
       Buffer.from(artifact.bytecode, 'base64'),
       this.getVerificationKeyDataForCircuit(circuitType).keyAsBytes,
       outputWitnessFile,
       getUltraHonkFlavorForCircuit(circuitType),
-      logger,
-    );
+    ] as const;
+    const worker = this.getPersistentBBWorker();
+    const provingResult = worker
+      ? await generateProofWithWorker(worker, ...proofArgs)
+      : await generateProof(this.config.bbBinaryPath, ...proofArgs, logger);
 
     if (provingResult.status === BB_RESULT.FAILURE) {
       logger.error(`Failed to generate proof for ${circuitType}: ${provingResult.reason}`);
