@@ -64,6 +64,11 @@ type BBWorkerResponse = {
   bench_out_hierarchical?: string;
 };
 
+type CircuitAssetPaths = {
+  bytecodePath: string;
+  vkPath: string;
+};
+
 export const DEFAULT_BB_VERIFY_CONCURRENCY = 4;
 
 /**
@@ -231,6 +236,7 @@ export class UltraHonkProveWorker {
   private child?: proc.ChildProcessWithoutNullStreams;
   private nextRequestId = 0;
   private readonly pending = new Map<string, { resolve: (response: BBWorkerResponse) => void; reject: (err: Error) => void }>();
+  private readonly circuitAssets = new Map<string, Promise<CircuitAssetPaths>>();
 
   constructor(
     private readonly pathToBB: string,
@@ -243,6 +249,29 @@ export class UltraHonkProveWorker {
     }
     const response = await this.send({ type: 'prewarm_srs', num_points: numPoints });
     return response.prewarm_ms ?? 0;
+  }
+
+  async prepareCircuit(
+    assetRootDirectory: string,
+    circuitName: string,
+    bytecode: Buffer,
+    verificationKey: Buffer,
+  ): Promise<number> {
+    const assetDirectory = join(assetRootDirectory, 'worker-assets');
+    const key = this.circuitAssetKey(assetDirectory, circuitName);
+    if (this.circuitAssets.has(key)) {
+      await this.circuitAssets.get(key);
+      return 0;
+    }
+
+    const timer = new Timer();
+    const writePromise = this.writeCircuitAssets(assetDirectory, circuitName, bytecode, verificationKey).catch(error => {
+      this.circuitAssets.delete(key);
+      throw error;
+    });
+    this.circuitAssets.set(key, writePromise);
+    await writePromise;
+    return timer.ms();
   }
 
   async prove(
@@ -267,15 +296,18 @@ export class UltraHonkProveWorker {
       return { status: BB_RESULT.FAILURE, reason: `Failed to find bb binary at ${this.pathToBB}` };
     }
 
-    const bytecodePath = `${workingDirectory}/${circuitName}-bytecode`;
-    const vkPath = `${workingDirectory}/${circuitName}-vk`;
+    const { bytecodePath, vkPath } = await this.getCircuitAssets(
+      dirname(workingDirectory),
+      circuitName,
+      bytecode,
+      verificationKey,
+    );
     const outputPath = `${workingDirectory}`;
     const benchPath =
       process.env.BB_PROOF_BENCH === '1' ? join(workingDirectory, BB_BENCH_HIERARCHICAL_FILENAME) : undefined;
     const settings = getWorkerSettings(flavor);
 
     try {
-      await Promise.all([fs.writeFile(bytecodePath, bytecode), fs.writeFile(vkPath, verificationKey)]);
       const timer = new Timer();
       const response = await this.send({
         type: 'prove',
@@ -301,6 +333,33 @@ export class UltraHonkProveWorker {
     } catch (error) {
       return { status: BB_RESULT.FAILURE, reason: `${error}`, retry: true };
     }
+  }
+
+  private async getCircuitAssets(
+    assetRootDirectory: string,
+    circuitName: string,
+    bytecode: Buffer,
+    verificationKey: Buffer,
+  ): Promise<CircuitAssetPaths> {
+    await this.prepareCircuit(assetRootDirectory, circuitName, bytecode, verificationKey);
+    return await this.circuitAssets.get(this.circuitAssetKey(join(assetRootDirectory, 'worker-assets'), circuitName))!;
+  }
+
+  private circuitAssetKey(assetDirectory: string, circuitName: string) {
+    return `${assetDirectory}/${circuitName}`;
+  }
+
+  private async writeCircuitAssets(
+    assetDirectory: string,
+    circuitName: string,
+    bytecode: Buffer,
+    verificationKey: Buffer,
+  ): Promise<CircuitAssetPaths> {
+    await fs.mkdir(assetDirectory, { recursive: true });
+    const bytecodePath = `${assetDirectory}/${circuitName}-bytecode`;
+    const vkPath = `${assetDirectory}/${circuitName}-vk`;
+    await Promise.all([fs.writeFile(bytecodePath, bytecode), fs.writeFile(vkPath, verificationKey)]);
+    return { bytecodePath, vkPath };
   }
 
   async stop(): Promise<void> {

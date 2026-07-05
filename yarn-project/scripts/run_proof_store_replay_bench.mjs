@@ -61,6 +61,26 @@ const GPU_SRS_PREWARM_POINTS_BY_PROOF_TYPE = {
   ROOT_ROLLUP: 1 << 24,
 };
 
+const PROOF_TYPE_ARTIFACTS = {
+  PUBLIC_CHONK_VERIFIER: 'PublicChonkVerifier',
+  PARITY_BASE: 'ParityBaseArtifact',
+  PARITY_ROOT: 'ParityRootArtifact',
+  PRIVATE_TX_BASE_ROLLUP: 'PrivateTxBaseRollupArtifact',
+  PUBLIC_TX_BASE_ROLLUP: 'PublicTxBaseRollupArtifact',
+  TX_MERGE_ROLLUP: 'TxMergeRollupArtifact',
+  BLOCK_ROOT_FIRST_ROLLUP: 'BlockRootFirstRollupArtifact',
+  BLOCK_ROOT_SINGLE_TX_FIRST_ROLLUP: 'BlockRootSingleTxFirstRollupArtifact',
+  BLOCK_ROOT_EMPTY_TX_FIRST_ROLLUP: 'BlockRootEmptyTxFirstRollupArtifact',
+  BLOCK_ROOT_ROLLUP: 'BlockRootRollupArtifact',
+  BLOCK_ROOT_SINGLE_TX_ROLLUP: 'BlockRootSingleTxRollupArtifact',
+  BLOCK_MERGE_ROLLUP: 'BlockMergeRollupArtifact',
+  CHECKPOINT_ROOT_ROLLUP: 'CheckpointRootRollupArtifact',
+  CHECKPOINT_ROOT_SINGLE_BLOCK_ROLLUP: 'CheckpointRootSingleBlockRollupArtifact',
+  CHECKPOINT_PADDING_ROLLUP: 'CheckpointPaddingRollupArtifact',
+  CHECKPOINT_MERGE_ROLLUP: 'CheckpointMergeRollupArtifact',
+  ROOT_ROLLUP: 'RootRollupArtifact',
+};
+
 function parseArgs() {
   const args = {
     repeats: 1,
@@ -498,6 +518,22 @@ async function dispatchProof(prover, type, inputs) {
   }
 }
 
+async function prewarmCircuitAssets(prover, jobs) {
+  const artifacts = new Set();
+  for (const job of jobs) {
+    const artifact = PROOF_TYPE_ARTIFACTS[job.typeName];
+    if (artifact) {
+      artifacts.add(artifact);
+    }
+  }
+
+  let prewarmMs = 0;
+  for (const artifact of artifacts) {
+    prewarmMs += await prover.prewarmProofCircuit(artifact);
+  }
+  return prewarmMs;
+}
+
 async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
   const runName = warmup ? `warmup_${repeat.toString().padStart(2, '0')}` : `run_${repeat.toString().padStart(2, '0')}`;
   const runDir = resolve(args.outputDir, runName);
@@ -519,6 +555,9 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
   const gpuSrsPrewarmPoints = args.persistentBbWorker ? maxGpuSrsPrewarmPointsForJobs(jobs) : 0;
   const gpuSrsPrewarmSetupMs = gpuSrsPrewarmPoints > 0 ? await prover.prewarmGpuSrs(gpuSrsPrewarmPoints) : 0;
   const gpuSrsPrewarmSetupWallMs = performance.now() - gpuSrsPrewarmSetupStart;
+  const circuitAssetPrewarmSetupStart = performance.now();
+  const circuitAssetPrewarmSetupMs = args.persistentBbWorker ? await prewarmCircuitAssets(prover, jobs) : 0;
+  const circuitAssetPrewarmSetupWallMs = performance.now() - circuitAssetPrewarmSetupStart;
   const setupMs = performance.now() - setupStart;
 
   const suiteStart = performance.now();
@@ -666,6 +705,8 @@ async function runSuite(args, proofStore, jobs, repeat, warmup, rawPath) {
     setupMs,
     gpuSrsPrewarmSetupMs,
     gpuSrsPrewarmSetupWallMs,
+    circuitAssetPrewarmSetupMs,
+    circuitAssetPrewarmSetupWallMs,
     gpuSrsPrewarmPoints,
     jobLoopElapsedMs,
     jobLoopWallMs,
@@ -830,6 +871,8 @@ function summarize(args, jobs, suiteRecords, jobRecords) {
     setupMsAvg: avg(suiteSetup),
     gpuSrsPrewarmSetupMsAvg: suiteAvgField('gpuSrsPrewarmSetupMs'),
     gpuSrsPrewarmSetupWallMsAvg: suiteAvgField('gpuSrsPrewarmSetupWallMs'),
+    circuitAssetPrewarmSetupMsAvg: suiteAvgField('circuitAssetPrewarmSetupMs'),
+    circuitAssetPrewarmSetupWallMsAvg: suiteAvgField('circuitAssetPrewarmSetupWallMs'),
     gpuSrsPrewarmPointsMax: Math.max(...measuredSuites.map(record => record.gpuSrsPrewarmPoints ?? 0)),
     inputLoadMsAvg: suiteAvgField('inputLoadMs'),
     proofGenerationMsAvg: suiteAvgField('proofGenerationMs'),
@@ -873,6 +916,8 @@ async function writeSummaryMd(outputDir, summary) {
     `| setup avg ms | ${formatMs(summary.setupMsAvg)} |`,
     `| gpu srs prewarm setup avg ms | ${formatMs(summary.gpuSrsPrewarmSetupMsAvg)} |`,
     `| gpu srs prewarm setup wall avg ms | ${formatMs(summary.gpuSrsPrewarmSetupWallMsAvg)} |`,
+    `| circuit asset prewarm setup avg ms | ${formatMs(summary.circuitAssetPrewarmSetupMsAvg)} |`,
+    `| circuit asset prewarm setup wall avg ms | ${formatMs(summary.circuitAssetPrewarmSetupWallMsAvg)} |`,
     `| gpu srs prewarm points max | ${summary.gpuSrsPrewarmPointsMax} |`,
     `| input load avg ms | ${formatMs(summary.inputLoadMsAvg)} |`,
     `| proof generation avg ms | ${formatMs(summary.proofGenerationMsAvg)} |`,

@@ -203,6 +203,20 @@ export class BBNativeRollupProver implements ServerCircuitProver {
     return (await this.getPersistentBBWorker()?.prewarmSrs(numPoints)) ?? 0;
   }
 
+  public async prewarmProofCircuit(circuitType: ServerProtocolArtifact): Promise<number> {
+    const worker = this.getPersistentBBWorker();
+    if (!worker) {
+      return 0;
+    }
+    const artifact = getServerCircuitArtifact(circuitType);
+    return await worker.prepareCircuit(
+      this.config.bbWorkingDirectory,
+      circuitType,
+      Buffer.from(artifact.bytecode, 'base64'),
+      this.getVerificationKeyDataForCircuit(circuitType).keyAsBytes,
+    );
+  }
+
   public async flushDeferredProofProfiles(): Promise<void> {
     const proofProfiles = this.deferredProofProfiles.splice(0);
     const proofVerifyProfiles = this.deferredProofVerifyProfiles.splice(0);
