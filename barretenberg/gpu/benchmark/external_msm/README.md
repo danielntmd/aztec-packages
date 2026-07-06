@@ -747,7 +747,9 @@ node yarn-project/scripts/run_proof_store_replay_bench.mjs \
   --list
 ```
 
-Then run CPU and GPU replays against the same proof-store fixture:
+Then run CPU and GPU replays against the same proof-store fixture. Use
+`--persistent-bb-worker` for reporting runs so the proof measurements use the
+persisted BB worker path instead of spawning a fresh `bb` process per proof:
 
 ```bash
 node yarn-project/scripts/run_proof_store_replay_bench.mjs \
@@ -756,7 +758,8 @@ node yarn-project/scripts/run_proof_store_replay_bench.mjs \
   --acvm-bin /absolute/path/to/noir/noir-repo/target/release/acvm \
   --output-dir /tmp/cpu-proof-store-replay \
   --warmups 0 \
-  --repeats 1
+  --repeats 1 \
+  --persistent-bb-worker
 ```
 
 ```bash
@@ -768,7 +771,8 @@ node yarn-project/scripts/run_proof_store_replay_bench.mjs \
   --acvm-bin /absolute/path/to/noir/noir-repo/target/release/acvm \
   --output-dir /tmp/gpu-proof-store-replay \
   --warmups 0 \
-  --repeats 1
+  --repeats 1 \
+  --persistent-bb-worker
 ```
 
 `BB_GPU_MSM_MAX_BATCH_SIZE=1` is only needed on smaller GPUs when the fused
