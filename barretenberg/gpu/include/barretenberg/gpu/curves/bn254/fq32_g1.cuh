@@ -57,7 +57,19 @@ BB_GPU_HD_FORCEINLINE fq32_t fq32_sqr(const fq32_t &value) {
 }
 
 BB_GPU_HD_FORCEINLINE fq32_t fq32_inv(const fq32_t &value) {
+#ifdef BB_GPU_USE_ICICLE_FIELD_KERNELS
+  return detail::icicle_fq32_inv(value);
+#else
   return inv(value);
+#endif
+}
+
+BB_GPU_HD_FORCEINLINE fq32_t fq32_neg(const fq32_t &value) {
+#ifdef BB_GPU_USE_ICICLE_FIELD_KERNELS
+  return detail::icicle_fq32_neg(value);
+#else
+  return neg(value);
+#endif
 }
 
 BB_GPU_HD_FORCEINLINE bool fq32_eq(const fq32_t &lhs, const fq32_t &rhs) {
@@ -111,7 +123,7 @@ fq32_xyzz_to_affine(const fq32_xyzz_g1_t &point) {
 BB_GPU_HD_FORCEINLINE fq32_affine_g1_t
 fq32_affine_neg(const fq32_affine_g1_t &point) {
   // EFD affine negation on short Weierstrass curves: -(x, y) = (x, -y).
-  return is_infinity(point) ? point : fq32_affine_g1_t{point.x, neg(point.y)};
+  return is_infinity(point) ? point : fq32_affine_g1_t{point.x, fq32_neg(point.y)};
 }
 
 BB_GPU_HD_FORCEINLINE bool fq32_on_curve(const fq32_affine_g1_t &point) {

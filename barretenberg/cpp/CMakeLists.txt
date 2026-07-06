@@ -39,6 +39,7 @@ option(SYNTAX_ONLY "only check syntax (-fsyntax-only)" OFF)
 option(ENABLE_WASM_BENCH "Enable BB_BENCH benchmarking support in WASM builds (dev only, not for releases)" OFF)
 option(AVM "enable building of vm2 module and bb-avm" ON)
 option(MOBILE "Build for mobile (excludes lmdb, world_state, vm2, nodejs_module)" OFF)
+option(BB_ENABLE_GPU_MSM_EXTERNAL_BENCH "Build optional external MSM comparison benchmark runners" OFF)
 set(GPU_BACKEND "none" CACHE STRING "GPU acceleration backend: none (default) or native (CUDA)")
 set(BB_CXX_STANDARD 20)
 
@@ -220,7 +221,7 @@ endif()
 
 add_subdirectory(src)
 
-if(GPU_BACKEND STREQUAL "native")
+if(GPU_BACKEND STREQUAL "native" OR BB_ENABLE_GPU_MSM_EXTERNAL_BENCH)
     add_subdirectory("${CMAKE_SOURCE_DIR}/../gpu" "${CMAKE_BINARY_DIR}/gpu")
 endif()
 

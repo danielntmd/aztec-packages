@@ -97,6 +97,14 @@ if(NOT CUDAToolkit_FOUND)
     return()
 endif()
 
+if(NOT GPU_BACKEND STREQUAL "native")
+    if(NOT FUZZING AND BB_ENABLE_GPU_MSM_EXTERNAL_BENCH)
+        bb_gpu_add_external_cpu_msm_bench()
+    endif()
+    message(STATUS "GPU_BACKEND is not native; skipping native CUDA GPU targets")
+    return()
+endif()
+
 add_library(gpu_objects OBJECT EXCLUDE_FROM_ALL
     src/common/cuda_error.cpp
     src/common/cuda_stream.cu

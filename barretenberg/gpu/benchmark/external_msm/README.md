@@ -1,7 +1,7 @@
 # External GPU MSM Benchmarks
 
 This directory contains the benchmark harness for comparing CPU BN254 MSM, the
-native BB GPU BN254 MSM implementation, Icicle v2.8.0, and Icicle v4.x.
+native BB GPU BN254 MSM implementation, and Icicle v4.x.
 
 The harness is intended for production-machine performance runs where the SRS
 or point table is already prepared and scalar inputs are fresh per MSM. It is
@@ -15,7 +15,6 @@ The CMake targets are:
 |---|---|
 | `gpu_msm_external_cpu_bench` | CPU Pippenger |
 | `gpu_msm_external_bb_bench` | Native BB GPU MSM |
-| `gpu_msm_external_icicle_v2_bench` | Icicle v2.8.0 adapter |
 | `gpu_msm_external_icicle_v4_bench` | Icicle v4.x adapter |
 
 The wrapper script is:
@@ -35,8 +34,8 @@ The wrapper supports two scalar/result memory placements:
 | `--memory-placement host` | Points are resident, scalars are passed from host memory, and results are returned to host inside the backend call. |
 | `--memory-placement device` | Points, scalars, and results are device-resident for the timed backend call. Scalar upload and result copy-back for validation happen outside `backend_wall_ms`. |
 
-The CPU runner and Icicle v2.8.0 only support `host` placement in this harness.
-BB and Icicle v4.x support both placements.
+The CPU runner only supports `host` placement in this harness. BB and Icicle
+v4.x support both placements.
 
 ## Production Suite Overview
 
@@ -45,10 +44,12 @@ production machine:
 
 | Suite | Purpose | Command section |
 |---|---|---|
-| Main MSM sweep | Compare BB, Icicle v2.8.0, and Icicle v4.x across `2^10..2^24`, factors `1,4,8`, host scalars. | [Main MSM Sweep](#main-msm-sweep) |
+| Main MSM sweep | Compare BB and Icicle v4.x across `2^10..2^24`, factors `1,4,8`, host scalars. | [Main MSM Sweep](#main-msm-sweep) |
 | CPU/GPU single MSM sweep | Add CPU Pippenger rows to the same single-MSM sweep schema. | [CPU/GPU Single MSM Sweep](#cpugpu-single-msm-sweep) |
+| BB+Icicle field single MSM sweep | Run the BB MSM runner from a separate build that uses Icicle's inline BN254 base-field arithmetic. | [BB+Icicle Field Single MSM Sweep](#bbicicle-field-single-msm-sweep) |
 | Batch-100 host-scalar run | Compare the previous cost-report shape: `2^20 x 100`, `pf=1`, scalar transfer included in backend call. | [Batch-100 Cost-Analysis Shape](#batch-100-cost-analysis-shape) |
 | Batch-100 device-resident run | Compare the same `2^20 x 100` shape after scalars are already on device and results stay on device until after timing. | [Device-Resident Batch-100 Shape](#device-resident-batch-100-shape) |
+| BB+Icicle field batch-100 runs | Run the `2^20 x 100` host and device batch shapes from the BB+Icicle field build. | [BB+Icicle Field Batch-100 Shapes](#bbicicle-field-batch-100-shapes) |
 | Optional c-value sweep | Diagnose whether auto `c` is responsible for a performance shift. | [C-Value Sweep](#c-value-sweep) |
 | Root rollup / Chonk IVC proof | Measure proof generation using captured proof inputs or a stored rollup proof job. | [Proof Generation](#proof-generation) |
 | Proof-store replay | Replay every captured proof job from a real-proof e2e store through the native prover path. | [Proof-Store Replay](#proof-store-replay) |
@@ -64,6 +65,30 @@ Configure BB with the native GPU backend and a CUDA architecture matching the
 production GPU. Do not rely on CMake's default CUDA architecture when collecting
 numbers for a report.
 
+The external benchmark runners are optional CMake targets; enable them with
+`BB_ENABLE_GPU_MSM_EXTERNAL_BENCH=ON`.
+
+The external Icicle v4 runner needs Icicle v4 headers, shared libraries, and
+the CUDA backend. Point CMake at them with `ICICLE_V4_INSTALL_DIR` or the
+explicit include/library cache entries:
+
+```bash
+-DICICLE_V4_INSTALL_DIR=/path/to/icicle-v4
+```
+
+Some Icicle v4 release installs do not copy every curve parameter header used
+by the external runner. In that case, use the source include directory and the
+installed library directory explicitly:
+
+```bash
+-DICICLE_V4_INCLUDE_DIR=/path/to/open-icicle/icicle/include \
+-DICICLE_V4_LIBRARY_DIR=/path/to/icicle-v4/lib
+```
+
+If the release artifact keeps the CUDA backend outside the library prefix, pass
+that backend directory at runtime with `--icicle-backend-dir` or set
+`ICICLE_BACKEND_INSTALL_DIR`.
+
 Example:
 
 ```bash
@@ -78,9 +103,11 @@ ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
   -DAVM=OFF \
   -DENABLE_HEAVY_TESTS=OFF \
   -DGPU_BACKEND=native \
+  -DBB_ENABLE_GPU_MSM_EXTERNAL_BENCH=ON \
   -DCUDAToolkit_ROOT=/path/to/cuda-12.8 \
   -DCMAKE_CUDA_COMPILER=/path/to/cuda-12.8/bin/nvcc \
   -DCMAKE_CUDA_ARCHITECTURES=<compute-capability-without-dot> \
+  -DICICLE_V4_INSTALL_DIR=/path/to/icicle-v4 \
   -DCMAKE_C_COMPILER=/absolute/path/to/barretenberg/cpp/scripts/zig-cc.sh \
   -DCMAKE_CXX_COMPILER=/absolute/path/to/barretenberg/cpp/scripts/zig-c++.sh \
   -DCMAKE_AR=/absolute/path/to/barretenberg/cpp/scripts/zig-ar.sh \
@@ -101,8 +128,35 @@ ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
 /path/to/cmake --build /tmp/aztec-bb-gpu-msm-bench \
   --target gpu_msm_external_cpu_bench \
            gpu_msm_external_bb_bench \
-           gpu_msm_external_icicle_v2_bench \
            gpu_msm_external_icicle_v4_bench -- -j16
+```
+
+On a CPU-only machine, build only the CPU MSM runner without enabling the native
+GPU backend or requiring CUDA:
+
+```bash
+PATH=/path/to/zig:$PATH \
+ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache \
+ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
+/path/to/cmake \
+  -S barretenberg/cpp \
+  -B /tmp/aztec-bb-cpu-msm-bench \
+  -G "Unix Makefiles" \
+  -DMOBILE=ON \
+  -DAVM=OFF \
+  -DENABLE_HEAVY_TESTS=OFF \
+  -DGPU_BACKEND=none \
+  -DBB_ENABLE_GPU_MSM_EXTERNAL_BENCH=ON \
+  -DCMAKE_C_COMPILER=/absolute/path/to/barretenberg/cpp/scripts/zig-cc.sh \
+  -DCMAKE_CXX_COMPILER=/absolute/path/to/barretenberg/cpp/scripts/zig-c++.sh \
+  -DCMAKE_AR=/absolute/path/to/barretenberg/cpp/scripts/zig-ar.sh \
+  -DCMAKE_RANLIB=/absolute/path/to/barretenberg/cpp/scripts/zig-ranlib.sh
+
+PATH=/path/to/zig:$PATH \
+ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache \
+ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache \
+/path/to/cmake --build /tmp/aztec-bb-cpu-msm-bench \
+  --target gpu_msm_external_cpu_bench -- -j16
 ```
 
 To compile the BB runner with Icicle's inline BN254 Fq arithmetic in the MSM
@@ -110,8 +164,24 @@ curve formulas, configure a separate build directory with:
 
 ```bash
 -DBB_GPU_MSM_FIELD_BACKEND=icicle \
+-DBB_ENABLE_GPU_MSM_EXTERNAL_BENCH=ON \
 -DBB_GPU_ICICLE_INCLUDE_DIRS="/path/to/icicle/include;/path/to/icicle/backend/cuda/include"
 ```
+
+For the proof replay and BB+Icicle field-kernel benchmarks, the full Icicle
+source tree is not required. A field-only header artifact is sufficient:
+
+```bash
+tar -C /tmp -xzf /path/to/icicle-v4-field-only-headers.tar.gz
+
+-DBB_GPU_MSM_FIELD_BACKEND=icicle \
+-DBB_ENABLE_GPU_MSM_EXTERNAL_BENCH=ON \
+-DBB_GPU_ICICLE_INCLUDE_DIRS=/tmp/icicle-v4-field-only-headers/include
+```
+
+This artifact should contain Icicle field, math, utility, and CUDA helper
+headers only. It should not contain `icicle/curves/**`; the BB integration uses
+`Field<bn254::fq_config>` directly for BN254 base-field arithmetic.
 
 The default is `-DBB_GPU_MSM_FIELD_BACKEND=bb`.
 
@@ -123,7 +193,7 @@ The runner needs CUDA runtime libraries and the Icicle libraries visible through
 Example:
 
 ```bash
-export LD_LIBRARY_PATH=/path/to/icicle-v2/lib:/path/to/icicle-v4/lib:/path/to/cuda-12.8/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/path/to/icicle-v4/lib:/path/to/cuda-12.8/lib64:$LD_LIBRARY_PATH
 ```
 
 For Icicle v4, either set `ICICLE_BACKEND_INSTALL_DIR` or pass
@@ -146,7 +216,7 @@ This is the broad comparison sweep used for the cost-analysis baseline:
 python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
   --build-dir /tmp/aztec-bb-gpu-msm-bench \
   --output-dir /tmp/gpu-msm-external-main \
-  --implementations bb,icicle-v2.8.0,icicle-v4.0.0 \
+  --implementations bb,icicle-v4.0.0 \
   --mode single \
   --memory-placement host \
   --min-log 10 \
@@ -170,7 +240,7 @@ the same raw JSONL files and summary table as the GPU backends:
 python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
   --build-dir /tmp/aztec-bb-gpu-msm-bench \
   --output-dir /tmp/gpu-msm-external-main-with-cpu \
-  --implementations cpu,bb,icicle-v2.8.0,icicle-v4.0.0 \
+  --implementations cpu,bb,icicle-v4.0.0 \
   --mode single \
   --memory-placement host \
   --min-log 10 \
@@ -190,12 +260,39 @@ backends.
 The CPU runner uses Barretenberg's normal parallel-for thread count:
 `HARDWARE_CONCURRENCY` when set, otherwise `min(32, hardware_concurrency)`.
 Raw records include `cpu_threads`, and the wrapper summary reports the average.
+Both single and batched CPU MSM rows use the unsafe SRS-point path: single calls
+`pippenger_unsafe`, and batch calls `batch_multi_scalar_mul(...,
+handle_edge_cases=false)`.
+
+## BB+Icicle Field Single MSM Sweep
+
+The BB+Icicle field-kernel variant is still the BB runner binary. The wrapper
+therefore emits `implementation=bb`; keep it in a separate output directory and
+record that the build directory was configured with
+`BB_GPU_MSM_FIELD_BACKEND=icicle`.
+
+```bash
+python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
+  --build-dir /tmp/aztec-bb-gpu-msm-bench-icicle-field \
+  --output-dir /tmp/gpu-msm-external-main-bb-icicle-field \
+  --implementations bb \
+  --mode single \
+  --memory-placement host \
+  --min-log 10 \
+  --max-log 24 \
+  --log-step 2 \
+  --factors 1,4,8 \
+  --repeats 5 \
+  --c 0
+```
 
 ## Batch-100 Cost-Analysis Shape
 
 This run matches the "100 random columns of length 2^20" shape discussed for
 the cost report. It uses precompute factor 1 and auto `c`. The host-placement
 version includes scalar host-to-device transfer inside the backend call.
+Pass `--batch-log 20` explicitly; the wrapper default is not the cost-report
+shape.
 
 ```bash
 python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
@@ -220,14 +317,15 @@ shape internally as `16+16+16+16+16+16+4`. Lower this only for experiments:
 ```
 
 On a 16 GB local GPU, the flat `2^20 x 100` BB fused path did not fit; its
-preflight estimated about 70.5 GB of transient allocation. Icicle v2.8.0 also
-did not fit locally for this shape under its preflight estimate. Icicle v4.x did
+preflight estimated about 70.5 GB of transient allocation. Icicle v4.x did
 complete locally.
 
 ## Device-Resident Batch-100 Shape
 
 Use this run to measure backend execution after scalar inputs have already been
 uploaded and results can stay on device until after timing.
+Pass `--batch-log 20` explicitly here as well so the host and device rows use
+the same `2^20 x 100` shape.
 
 ```bash
 python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
@@ -255,6 +353,182 @@ buffer. On the local 16 GB RTX 5060 Ti, a repeat-1 smoke completed with:
 
 Use production hardware numbers for reporting; the local row is only a sanity
 check that the path runs and validates.
+
+## BB+Icicle Field Batch-100 Shapes
+
+Run the same batch shapes from the BB+Icicle field build directory. As with the
+single-MSM sweep, the wrapper records these rows as `implementation=bb`, so keep
+the output directories distinct.
+
+Host scalars:
+
+```bash
+python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
+  --build-dir /tmp/aztec-bb-gpu-msm-bench-icicle-field \
+  --output-dir /tmp/gpu-msm-external-batch-2p20x100-bb-icicle-field \
+  --implementations bb \
+  --mode batch \
+  --memory-placement host \
+  --batch-log 20 \
+  --batch-size 100 \
+  --factors 1 \
+  --repeats 5 \
+  --c 0
+```
+
+Device-resident scalars:
+
+```bash
+python3 barretenberg/gpu/benchmark/external_msm/run_external_msm_comparison.py \
+  --build-dir /tmp/aztec-bb-gpu-msm-bench-icicle-field \
+  --output-dir /tmp/gpu-msm-external-batch-2p20x100-device-bb-icicle-field \
+  --implementations bb \
+  --mode batch \
+  --memory-placement device \
+  --batch-log 20 \
+  --batch-size 100 \
+  --factors 1 \
+  --repeats 5 \
+  --c 0
+```
+
+## MSM Cost Report Tables
+
+Use `summary.json` as the source for cost-report tables. The timing value is
+`comparison_ms_avg`, which is `device_ms` when the backend reports CUDA event
+time and otherwise `backend_wall_ms`. Point/SRS setup and precompute setup are
+not included.
+
+For the single-MSM sweep, report one row per backend and MSM size. If several
+precompute factors were run for the same backend and size, use the row with the
+lowest `comparison_ms_avg` and report that row's resolved `c` and precompute
+factor.
+
+| Backend | c | Precompute Factor | MSM Size | Best Avg (ms) | MSMs/$ |
+|---|---:|---:|---:|---:|---:|
+
+Single-MSM cost formula:
+
+```text
+MSMs/$ = (3600 / time_s) / cost_per_h
+time_s = Best Avg (ms) / 1000
+```
+
+For the batch-100 runs, report one row per backend and scalar location. Scalar
+location is the `memory_placement` value from `summary.json`: `host` or
+`device`. The `Avg (s)` column is the average time for the whole 100-column
+batch, not the per-MSM time.
+
+| Backend | Scalar Location | c | Avg (s) | MSMs/$ |
+|---|---|---:|---:|---:|
+
+Batch-100 cost formula:
+
+```text
+MSMs/$ = 100 * (3600 / time_s) / cost_per_h
+time_s = Avg (s)
+```
+
+This helper prints either layout from one or more output directories. Pass the
+BB+Icicle field build output with a label containing `ICICLE_FIELD` so the `bb`
+rows are displayed as `BB + Icicle`.
+
+```bash
+COST_PER_H=<instance-cost-per-hour> \
+REPORT=single \
+node - MAIN=/tmp/gpu-msm-external-main-with-cpu \
+       BB_ICICLE_FIELD=/tmp/gpu-msm-external-main-bb-icicle-field <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const costPerHour = Number(process.env.COST_PER_H);
+const report = process.env.REPORT || 'single';
+if (!Number.isFinite(costPerHour) || costPerHour <= 0) {
+  throw new Error('set COST_PER_H to the instance cost per hour');
+}
+
+function backendName(label, implementation) {
+  if (implementation === 'cpu') return 'BB CPU';
+  if (implementation === 'bb' && /ICICLE_FIELD/i.test(label)) return 'BB + Icicle';
+  if (implementation === 'bb') return 'BB GPU';
+  if (implementation === 'icicle-v4.0.0') return 'Icicle v4.0.0';
+  return implementation;
+}
+
+function loadRows() {
+  return process.argv.slice(2).flatMap(arg => {
+    const [label, dir] = arg.split('=');
+    if (!label || !dir) throw new Error(`expected LABEL=/path, got ${arg}`);
+    return JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8')).map(row => ({
+      ...row,
+      backend: backendName(label, row.implementation),
+    }));
+  });
+}
+
+function cValue(row) {
+  return row.backend === 'BB CPU' ? 'N/A' : String(Math.round(row.reported_c_avg));
+}
+
+function fmtNumber(value, digits = 3) {
+  return Number(value).toFixed(digits);
+}
+
+function fmtCost(value) {
+  return Math.round(value).toLocaleString('en-US');
+}
+
+function bestBy(rows, keyOf) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = keyOf(row);
+    const current = grouped.get(key);
+    if (!current || row.comparison_ms_avg < current.comparison_ms_avg) {
+      grouped.set(key, row);
+    }
+  }
+  return [...grouped.values()];
+}
+
+if (report === 'single') {
+  const rows = bestBy(
+    loadRows().filter(row => row.mode === 'single'),
+    row => `${row.backend}:${row.log_num_points}`,
+  ).sort((a, b) => a.backend.localeCompare(b.backend) || a.log_num_points - b.log_num_points);
+
+  console.log('| Backend | c | Precompute Factor | MSM Size | Best Avg (ms) | MSMs/$ |');
+  console.log('|---|---:|---:|---:|---:|---:|');
+  for (const row of rows) {
+    const msmsPerDollar = (3600 / (row.comparison_ms_avg / 1000)) / costPerHour;
+    const factor = row.backend === 'BB CPU' ? 'N/A' : row.precompute_factor;
+    console.log(`| ${row.backend} | ${cValue(row)} | ${factor} | 2^${row.log_num_points} | ${fmtNumber(row.comparison_ms_avg)} | ${fmtCost(msmsPerDollar)} |`);
+  }
+} else if (report === 'batch') {
+  const batchSize = Number(process.env.BATCH_SIZE || 100);
+  const rows = bestBy(
+    loadRows().filter(row => row.mode === 'batch' && row.batch_size === batchSize),
+    row => `${row.backend}:${row.memory_placement}`,
+  ).sort((a, b) => a.backend.localeCompare(b.backend) || a.memory_placement.localeCompare(b.memory_placement));
+
+  console.log('| Backend | Scalar Location | c | Avg (s) | MSMs/$ |');
+  console.log('|---|---|---:|---:|---:|');
+  for (const row of rows) {
+    const avgSeconds = row.comparison_ms_avg / 1000;
+    const msmsPerDollar = batchSize * (3600 / avgSeconds) / costPerHour;
+    console.log(`| ${row.backend} | ${row.memory_placement} | ${cValue(row)} | ${fmtNumber(avgSeconds)} | ${fmtCost(msmsPerDollar)} |`);
+  }
+} else {
+  throw new Error('REPORT must be single or batch');
+}
+NODE
+```
+
+For the batch table, rerun the same helper with `REPORT=batch`,
+`BATCH_SIZE=100`, and the host/device batch output directories:
+`HOST=/tmp/gpu-msm-external-batch-2p20x100`,
+`DEVICE=/tmp/gpu-msm-external-batch-2p20x100-device`,
+`HOST_ICICLE_FIELD=/tmp/gpu-msm-external-batch-2p20x100-bb-icicle-field`, and
+`DEVICE_ICICLE_FIELD=/tmp/gpu-msm-external-batch-2p20x100-device-bb-icicle-field`.
 
 ## Proof Generation
 
@@ -554,6 +828,12 @@ node yarn-project/scripts/run_proof_store_replay_bench.mjs \
   --persistent-bb-worker
 ```
 
+For the full non-AVM proof replay set used in the GPU MSM proof tables, use:
+
+```bash
+--include-types PUBLIC_CHONK_VERIFIER,PARITY_BASE,PARITY_ROOT,PRIVATE_TX_BASE_ROLLUP,BLOCK_ROOT_SINGLE_TX_FIRST_ROLLUP,CHECKPOINT_ROOT_SINGLE_BLOCK_ROLLUP,ROOT_ROLLUP
+```
+
 The adjusted proof time is:
 
 ```text
@@ -724,7 +1004,7 @@ Each raw JSONL record includes:
 | `precompute_device_ms` | CUDA event time for precomputation, when available. |
 | `outer_wall_ms` | Runner-level call region. For Icicle runners this includes host-side scalar format conversion before the backend call. |
 | `backend_wall_ms` | Backend call wall time. This is the closest cross-backend comparison field. |
-| `device_ms` | CUDA-event/profiled device time when available. BB and Icicle v2 expose this; Icicle v4 does not. |
+| `device_ms` | CUDA-event/profiled device time when available. BB exposes this; Icicle v4 does not. |
 | `comparison_ms` | `device_ms` when present, otherwise `backend_wall_ms`. |
 | `per_msm_ms` | `comparison_ms / batch_size`. |
 | `c` | Backend-reported or resolved c value. `requested_c` is added by the wrapper. |
