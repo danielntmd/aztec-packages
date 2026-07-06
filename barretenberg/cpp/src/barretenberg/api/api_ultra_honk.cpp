@@ -8,10 +8,32 @@
 #include "barretenberg/common/map.hpp"
 #include "barretenberg/common/throw_or_abort.hpp"
 #include "barretenberg/numeric/uint256/uint256.hpp"
+#include "barretenberg/srs/global_crs.hpp"
+
+#ifdef BB_GPU_NATIVE
+#include "barretenberg/ecc/curves/bn254/bn254.hpp"
+#include "barretenberg/gpu/commitment_schemes/commitment_key_msm.hpp"
+#endif
+
+#include <cstdlib>
+#include <string>
 
 namespace bb {
 
 namespace {
+
+void prewarm_gpu_msm_srs()
+{
+#ifdef BB_GPU_NATIVE
+    const char* value = std::getenv("BB_GPU_MSM_PREWARM_SRS_POINTS");
+    if (value == nullptr || *value == '\0') {
+        return;
+    }
+    const auto num_points = static_cast<size_t>(std::stoull(std::string(value)));
+    auto crs = srs::get_crs_factory<curve::BN254>()->get_crs(num_points);
+    gpu::init_commitment_key_srs<curve::BN254>(crs->get_monomial_points());
+#endif
+}
 
 void write_vk_outputs(const bbapi::CircuitComputeVk::Response& vk_response,
                       const std::filesystem::path& output_dir,
@@ -70,6 +92,7 @@ void UltraHonkAPI::prove(const Flags& flags,
                          const std::filesystem::path& vk_path,
                          const std::filesystem::path& output_dir)
 {
+    prewarm_gpu_msm_srs();
     BB_BENCH_NAME("UltraHonkAPI::prove");
     // Validate output directory
     if (output_dir == "-") {

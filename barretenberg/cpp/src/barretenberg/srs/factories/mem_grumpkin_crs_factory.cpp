@@ -1,4 +1,5 @@
 #include "mem_grumpkin_crs_factory.hpp"
+#include "barretenberg/common/bb_bench.hpp"
 #include "barretenberg/common/throw_or_abort.hpp"
 #include "barretenberg/ecc/curves/grumpkin/grumpkin.hpp"
 #include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
@@ -36,8 +37,9 @@ class MemGrumpkinCrs : public Crs<Grumpkin> {
 namespace bb::srs::factories {
 
 MemGrumpkinCrsFactory::MemGrumpkinCrsFactory(const std::vector<Grumpkin::AffineElement>& points)
-    : crs_(std::make_shared<MemGrumpkinCrs>(points))
 {
+    BB_BENCH_NAME("CRS::grumpkin_mem_init");
+    crs_ = std::make_shared<MemGrumpkinCrs>(points);
     if (points.empty() || !points[0].on_curve()) {
         throw_or_abort("invalid vector passed to MemGrumpkinCrsFactory");
     }

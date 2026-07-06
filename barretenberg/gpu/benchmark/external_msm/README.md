@@ -517,6 +517,182 @@ scheduling noise. Use the original `e2e_prover/full` command as the full-system
 smoke benchmark and the proof-store replay as the production-shaped proving
 benchmark.
 
+### CRS-Adjusted Proof Breakdown
+
+Use this reporting view when comparing steady-state CPU and GPU proof time
+after CRS/SRS setup. The raw replay timings remain in `raw.jsonl` and
+`summary.md`; the adjusted view is derived from those files.
+
+Run CPU and GPU with proof profiling and a persistent BB worker so setup and
+GPU SRS prewarm happen before the timed proof loop:
+
+```bash
+BB_PROOF_BENCH=1 \
+node yarn-project/scripts/run_proof_store_replay_bench.mjs \
+  --proof-store file:///tmp/aztec-gpu-e2e-proof-store-sanity-full \
+  --bb-bin /path/to/cpu/bb \
+  --acvm-bin /absolute/path/to/noir/noir-repo/target/release/acvm \
+  --output-dir /tmp/proof-replay-cpu \
+  --include-types PARITY_BASE,ROOT_ROLLUP \
+  --repeats 3 \
+  --persistent-bb-worker
+```
+
+```bash
+BB_PROOF_BENCH=1 \
+BB_GPU_MSM_PRECOMPUTE_FACTOR=1 \
+BB_GPU_MSM_MAX_BATCH_SIZE=16 \
+CUDA_VISIBLE_DEVICES=0 \
+LD_LIBRARY_PATH=/path/to/cuda-12.8/lib64:$LD_LIBRARY_PATH \
+node yarn-project/scripts/run_proof_store_replay_bench.mjs \
+  --proof-store file:///tmp/aztec-gpu-e2e-proof-store-sanity-full \
+  --bb-bin /path/to/gpu/bb \
+  --acvm-bin /absolute/path/to/noir/noir-repo/target/release/acvm \
+  --output-dir /tmp/proof-replay-gpu \
+  --include-types PARITY_BASE,ROOT_ROLLUP \
+  --repeats 3 \
+  --persistent-bb-worker
+```
+
+The adjusted proof time is:
+
+```text
+adjusted proof time =
+  elapsedMs
+  - sum(CRS::* native timers)
+  - sum(GPU::srs_upload native timers)
+```
+
+The compact additive columns are derived as:
+
+| Column | Source |
+|---|---|
+| `adjusted proof ms` | `elapsedMs - CRS::* - GPU::srs_upload` |
+| `witgen ms` | `witnessGenerationMs` |
+| `commitments/MSM ms` | Sum of all `CommitmentKey::commit` and `CommitmentKey::batch_commit` entries in `bb-bench-hierarchical.json` |
+| `sumcheck ms` | `bbAdditiveStagesMs.sumcheckMs` |
+| `pcs ms` | `bbAdditiveStagesMs.pcsMs` |
+| `prover core ms` | Adjusted `UltraHonkAPI::prove` time minus `commitments/MSM`, `sumcheck`, and `pcs` |
+| `verify/harness/overhead ms` | Remainder needed for the compact columns to sum to adjusted proof time |
+
+Use the saved hierarchical profiles rather than `summary.md`'s
+`direct commitments ms` field for `commitments/MSM`; some commitment timers are
+nested under Oink and circuit-construction parents and must be counted from the
+native profile directly.
+
+Generate the compact adjusted table from two replay output directories:
+
+```bash
+node - CPU=/tmp/proof-replay-cpu GPU=/tmp/proof-replay-gpu <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+
+const inputs = process.argv.slice(2).map(arg => {
+  const [label, dir] = arg.split('=');
+  if (!label || !dir) {
+    throw new Error(`Expected LABEL=/path/to/output, got ${arg}`);
+  }
+  return { label, dir };
+});
+
+function ms(ns) {
+  return (ns ?? 0) / 1_000_000;
+}
+
+function benchEntryMs(entry) {
+  return ms(entry.time_max ?? entry.time);
+}
+
+function readRecords(dir) {
+  return fs
+    .readFileSync(path.join(dir, 'raw.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
+    .filter(record => record.benchmark === 'proof-store-replay-job' && !record.warmup);
+}
+
+function readBench(record) {
+  const profile = record.nativeProofProfiles?.[0];
+  if (!profile?.bbBenchPath) {
+    throw new Error(`Missing bbBenchPath for ${record.proofType}`);
+  }
+  return JSON.parse(fs.readFileSync(profile.bbBenchPath, 'utf8'));
+}
+
+function sumBench(bench, pred) {
+  let total = 0;
+  for (const [name, entries] of Object.entries(bench)) {
+    if (!pred(name)) {
+      continue;
+    }
+    for (const entry of entries) {
+      total += benchEntryMs(entry);
+    }
+  }
+  return total;
+}
+
+function summarizeRecord(label, record) {
+  const bench = readBench(record);
+  const crs = sumBench(bench, name => name.startsWith('CRS::'));
+  const gpuSrs = sumBench(bench, name => name === 'GPU::srs_upload');
+  const commitments = sumBench(bench, name => name === 'CommitmentKey::commit' || name === 'CommitmentKey::batch_commit');
+  const adjustedApi = record.bbAdditiveStagesMs.ultraHonkApiProveMs - crs - gpuSrs;
+  const sumcheck = record.bbAdditiveStagesMs.sumcheckMs;
+  const pcs = record.bbAdditiveStagesMs.pcsMs;
+  const proverCore = adjustedApi - commitments - sumcheck - pcs;
+  const adjustedProof = record.elapsedMs - crs - gpuSrs;
+  const verifyHarnessOverhead = adjustedProof - record.witnessGenerationMs - proverCore - commitments - sumcheck - pcs;
+  return {
+    proofType: record.proofType,
+    backend: label,
+    adjustedProof,
+    witgen: record.witnessGenerationMs,
+    proverCore,
+    commitments,
+    sumcheck,
+    pcs,
+    verifyHarnessOverhead,
+  };
+}
+
+function average(rows) {
+  const result = { proofType: rows[0].proofType, backend: rows[0].backend, samples: rows.length };
+  for (const key of ['adjustedProof', 'witgen', 'proverCore', 'commitments', 'sumcheck', 'pcs', 'verifyHarnessOverhead']) {
+    result[key] = rows.reduce((sum, row) => sum + row[key], 0) / rows.length;
+  }
+  result.additiveTotal =
+    result.witgen + result.proverCore + result.commitments + result.sumcheck + result.pcs + result.verifyHarnessOverhead;
+  return result;
+}
+
+const grouped = new Map();
+for (const input of inputs) {
+  for (const record of readRecords(input.dir)) {
+    const row = summarizeRecord(input.label, record);
+    const key = `${row.proofType}:${row.backend}`;
+    grouped.set(key, [...(grouped.get(key) ?? []), row]);
+  }
+}
+
+const rows = [...grouped.values()].map(average).sort((a, b) => a.proofType.localeCompare(b.proofType) || a.backend.localeCompare(b.backend));
+const fmt = value => value.toFixed(3);
+
+console.log('| proof | backend | samples | adjusted proof ms | witgen ms | prover core ms | commitments/MSM ms | sumcheck ms | pcs ms | verify/harness/overhead ms | additive total ms |');
+console.log('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
+for (const row of rows) {
+  console.log(
+    `| ${row.proofType} | ${row.backend} | ${row.samples} | ${fmt(row.adjustedProof)} | ${fmt(row.witgen)} | ${fmt(row.proverCore)} | ${fmt(row.commitments)} | ${fmt(row.sumcheck)} | ${fmt(row.pcs)} | ${fmt(row.verifyHarnessOverhead)} | ${fmt(row.additiveTotal)} |`,
+  );
+}
+NODE
+```
+
+The `additive total ms` column should match `adjusted proof ms` up to rounding.
+If it does not, inspect the run's `raw.jsonl` and referenced
+`bb-bench-hierarchical.json` files before reporting the table.
+
 ## C-Value Sweep
 
 Use `--c-values` to run explicit `c` values. This is useful when checking

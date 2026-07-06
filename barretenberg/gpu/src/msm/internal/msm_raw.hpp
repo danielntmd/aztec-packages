@@ -30,6 +30,11 @@ void msm_raw_batch_fq32(const host_fr_montgomery_t *const *scalars,
                         size_t point_start_index, const MsmRawOptions &options,
                         fq32_affine_g1_t *results_host);
 
+bool msm_raw_batch_fq32_fits(size_t num_scalars_per_msm, uint32_t batch_size,
+                             const MsmRawOptions &options,
+                             size_t *required_bytes = nullptr,
+                             size_t *available_bytes = nullptr);
+
 } // namespace bb::gpu::bn254
 
 #endif // BB_GPU_NATIVE

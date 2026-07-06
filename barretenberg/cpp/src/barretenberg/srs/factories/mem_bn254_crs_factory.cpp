@@ -56,8 +56,9 @@ namespace bb::srs::factories {
 
 MemBn254CrsFactory::MemBn254CrsFactory(std::vector<g1::affine_element> const& points,
                                        g2::affine_element const& g2_point)
-    : crs_(std::make_shared<MemBn254Crs>(points, g2_point))
 {
+    BB_BENCH_NAME("CRS::bn254_mem_init");
+    crs_ = std::make_shared<MemBn254Crs>(points, g2_point);
     vinfo("Initialized ", curve::BN254::name, " CRS from memory with num points = ", crs_->get_monomial_size());
 }
 

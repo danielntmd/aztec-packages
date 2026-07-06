@@ -1,5 +1,6 @@
 #include "get_bn254_crs.hpp"
 #include "barretenberg/api/file_io.hpp"
+#include "barretenberg/common/bb_bench.hpp"
 #include "barretenberg/common/flock.hpp"
 #include "barretenberg/common/serialize.hpp"
 #include "barretenberg/ecc/curves/bn254/g1.hpp"
@@ -77,6 +78,7 @@ std::vector<g1::affine_element> get_bn254_g1_data(const std::filesystem::path& p
     size_t g1_downloaded_points = get_file_size(g1_path) / sizeof(g1::affine_element);
 
     if (g1_downloaded_points >= num_points) {
+        BB_BENCH_NAME("CRS::bn254_g1_load_cached");
         vinfo("using cached bn254 crs with num points ", std::to_string(g1_downloaded_points), " at ", g1_path);
         auto data = read_file(g1_path, num_points * sizeof(g1::affine_element));
         auto points = std::vector<g1::affine_element>(num_points);
@@ -99,6 +101,7 @@ std::vector<g1::affine_element> get_bn254_g1_data(const std::filesystem::path& p
     // Double-check after acquiring lock (another process may have downloaded while we waited)
     g1_downloaded_points = get_file_size(g1_path) / sizeof(g1::affine_element);
     if (g1_downloaded_points >= num_points) {
+        BB_BENCH_NAME("CRS::bn254_g1_load_cached");
         vinfo("using cached bn254 crs with num points ", std::to_string(g1_downloaded_points), " at ", g1_path);
         auto data = read_file(g1_path, num_points * sizeof(g1::affine_element));
         auto points = std::vector<g1::affine_element>(num_points);

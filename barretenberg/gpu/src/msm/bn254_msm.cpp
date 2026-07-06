@@ -3,6 +3,7 @@
 #include "barretenberg/gpu/backend.hpp"
 
 #include "barretenberg/common/assert.hpp"
+#include "barretenberg/common/bb_bench.hpp"
 #include "barretenberg/gpu/common/cuda_error.hpp"
 #include "barretenberg/gpu/curves/bn254/bn254_conversions.hpp"
 #include "common/gpu_msm_context.hpp"
@@ -62,13 +63,29 @@ struct BatchPlan {
   std::vector<FusedMsmBatch> fused_batches;
 };
 
+size_t select_fused_batch_size(const size_t num_scalars_per_msm,
+                               const size_t max_batch_size,
+                               const MsmConfig &cfg) {
+  BB_BENCH_NAME("GPU::msm_memory_fit");
+  for (size_t batch_size = max_batch_size; batch_size > 1; --batch_size) {
+    const auto options = resolve_msm_options(
+        cfg, num_scalars_per_msm, static_cast<uint32_t>(batch_size));
+    if (bn254::msm_raw_batch_fq32_fits(num_scalars_per_msm,
+                                       static_cast<uint32_t>(batch_size),
+                                       options)) {
+      return batch_size;
+    }
+  }
+  return 1;
+}
+
 // Partition `(points, scalars)` into fused dispatches grouped by shared
 // (num_scalars, point_start_index), then chunked at
 // GPU_MSM_MAX_FUSED_BATCH_SIZE.
 BatchPlan
 plan_batch_msm(std::span<std::span<const curve::BN254::AffineElement>> points,
                std::span<std::span<curve::BN254::ScalarField>> scalars,
-               GpuMsmContext &context) {
+               GpuMsmContext &context, const MsmConfig &cfg) {
   struct Entry {
     size_t input_index;
     size_t num_scalars;
@@ -118,8 +135,11 @@ plan_batch_msm(std::span<std::span<const curve::BN254::AffineElement>> points,
 
     size_t chunk_begin = group_begin;
     while (chunk_begin < group_end) {
-      const size_t chunk_size = std::min<size_t>(GPU_MSM_MAX_FUSED_BATCH_SIZE,
-                                                 group_end - chunk_begin);
+      const size_t max_chunk_size =
+          std::min<size_t>(GPU_MSM_MAX_FUSED_BATCH_SIZE,
+                           group_end - chunk_begin);
+      const size_t chunk_size = select_fused_batch_size(
+          entries[group_begin].num_scalars, max_chunk_size, cfg);
       FusedMsmBatch fused{
           .num_scalars_per_msm = entries[group_begin].num_scalars,
           .point_start_index = entries[group_begin].point_start_index,
@@ -152,9 +172,13 @@ void run_fused_batch(std::span<std::span<curve::BN254::ScalarField>> scalars,
   }
 
   std::vector<fq32_affine_g1_t> chunk_results(batch_size);
-  bn254::msm_raw_batch_fq32(scalar_pointers.data(), fused.num_scalars_per_msm,
-                            batch_size, fused.point_start_index, options,
-                            chunk_results.data());
+  {
+    BB_BENCH_NAME("GPU::msm_raw_batch");
+    bn254::msm_raw_batch_fq32(scalar_pointers.data(),
+                              fused.num_scalars_per_msm, batch_size,
+                              fused.point_start_index, options,
+                              chunk_results.data());
+  }
   for (size_t k = 0; k < fused.input_indices.size(); ++k) {
     results[fused.input_indices[k]] = to_cpu_point(chunk_results[k]);
   }
@@ -168,6 +192,7 @@ void Backend<curve::BN254>::init_srs(
                 sizeof(curve::BN254::AffineElement));
   static_assert(alignof(host_affine_g1_montgomery_t) ==
                 alignof(curve::BN254::AffineElement));
+  BB_BENCH_NAME("GPU::srs_upload");
   default_msm_context().ensure_srs_uploaded(
       reinterpret_cast<const host_affine_g1_montgomery_t *>(srs_points.data()),
       srs_points.size());
@@ -190,13 +215,16 @@ curve::BN254::AffineElement Backend<curve::BN254>::msm(
   const auto options = resolve_msm_options(cfg, scalars.size());
   const size_t cached_point_start_index =
       default_msm_context().get_srs_offset(
-          reinterpret_cast<const host_affine_g1_montgomery_t *>(points.data()),
-          points.size()) +
+      reinterpret_cast<const host_affine_g1_montgomery_t *>(points.data()),
+      points.size()) +
       scalars.start_index;
   fq32_affine_g1_t result{};
-  bn254::msm_raw_fq32(
-      reinterpret_cast<const host_fr_montgomery_t *>(scalars.span.data()),
-      scalars.size(), cached_point_start_index, options, &result);
+  {
+    BB_BENCH_NAME("GPU::msm_raw");
+    bn254::msm_raw_fq32(
+        reinterpret_cast<const host_fr_montgomery_t *>(scalars.span.data()),
+        scalars.size(), cached_point_start_index, options, &result);
+  }
   return to_cpu_point(result);
 }
 
@@ -211,7 +239,7 @@ std::vector<curve::BN254::AffineElement> Backend<curve::BN254>::batch_msm(
     return results;
   }
 
-  const auto plan = plan_batch_msm(points, scalars, default_msm_context());
+  const auto plan = plan_batch_msm(points, scalars, default_msm_context(), cfg);
   for (const size_t idx : plan.empty_input_indices) {
     results[idx] = curve::BN254::AffineElement::infinity();
   }

@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdlib>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <string_view>
@@ -44,6 +45,28 @@ template <class Curve> class CommitmentKey {
 
   protected:
     std::shared_ptr<srs::factories::Crs<Curve>> srs;
+
+    static bool msm_shape_log_enabled()
+    {
+        static const bool enabled = [] {
+            const char* value = std::getenv("BB_MSM_SHAPE_LOG");
+            return value != nullptr && value[0] != '\0' && value[0] != '0';
+        }();
+        return enabled;
+    }
+
+    static void log_msm_shape(const char* kind, size_t length, size_t start_index, size_t chunk_size = 1)
+    {
+        if (!msm_shape_log_enabled()) {
+            return;
+        }
+        std::fprintf(stderr,
+                     "BB_MSM_SHAPE kind=%s length=%zu start=%zu chunk_size=%zu\n",
+                     kind,
+                     length,
+                     start_index,
+                     chunk_size);
+    }
 
   public:
     size_t srs_size;
@@ -90,6 +113,7 @@ template <class Curve> class CommitmentKey {
                                   " points with an SRS of size ",
                                   get_monomial_size()));
         }
+        log_msm_shape("commit", polynomial.size(), polynomial.start_index);
 #ifdef BB_GPU_NATIVE
         if constexpr (gpu::commitment_key_msm_available<Curve>) {
             return gpu::commitment_key_msm<Curve>(polynomial, point_table);
@@ -130,6 +154,7 @@ template <class Curve> class CommitmentKey {
                                           " points with an SRS of size ",
                                           get_monomial_size()));
                 }
+                log_msm_shape("batch_commit", polynomial.size(), polynomial.start_index(), batch_size);
                 scalar_spans.emplace_back(polynomial.coeffs());
                 points_spans.emplace_back(point_table);
             }
