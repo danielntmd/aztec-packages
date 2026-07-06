@@ -169,19 +169,27 @@ curve formulas, configure a separate build directory with:
 ```
 
 For the proof replay and BB+Icicle field-kernel benchmarks, the full Icicle
-source tree is not required. A field-only header artifact is sufficient:
+source tree is not required at build time. Package a field-only header artifact
+from an Icicle v4 source checkout, then point BB at that artifact:
 
 ```bash
-tar -C /tmp -xzf /path/to/icicle-v4-field-only-headers.tar.gz
+barretenberg/gpu/benchmark/external_msm/package_icicle_field_headers.sh \
+  /path/to/open-icicle/icicle \
+  /tmp/icicle-v4-field-only-headers.tar.gz
+
+tar -C /tmp -xzf /tmp/icicle-v4-field-only-headers.tar.gz
 
 -DBB_GPU_MSM_FIELD_BACKEND=icicle \
 -DBB_ENABLE_GPU_MSM_EXTERNAL_BENCH=ON \
 -DBB_GPU_ICICLE_INCLUDE_DIRS=/tmp/icicle-v4-field-only-headers/include
 ```
 
-This artifact should contain Icicle field, math, utility, and CUDA helper
-headers only. It should not contain `icicle/curves/**`; the BB integration uses
-`Field<bn254::fq_config>` directly for BN254 base-field arithmetic.
+This artifact contains only the Icicle generic field/math/utility headers,
+`bn254_base.h`, and the CUDA helper headers needed by
+`Field<bn254::fq_config>`. It intentionally excludes `icicle/curves/**`,
+`icicle/fields/field_config.h`, and `icicle/fields/stark_fields/**`; the BB
+integration does not use curve wrappers or Goldilocks for BN254 base-field
+arithmetic.
 
 The default is `-DBB_GPU_MSM_FIELD_BACKEND=bb`.
 
