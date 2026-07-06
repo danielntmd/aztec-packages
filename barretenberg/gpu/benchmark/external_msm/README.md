@@ -799,6 +799,51 @@ scheduling noise. Use the original `e2e_prover/full` command as the full-system
 smoke benchmark and the proof-store replay as the production-shaped proving
 benchmark.
 
+### Overall Proof Comparison Table
+
+Use this table for the high-level CPU/GPU proof comparison. It reads
+`summary.json` from the CPU and GPU replay output directories and reports each
+proof type's `elapsedMsAvg`, not the profiling breakdown columns.
+
+```bash
+node - CPU=/tmp/cpu-proof-store-replay GPU=/tmp/gpu-proof-store-replay <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+
+const inputs = Object.fromEntries(process.argv.slice(2).map(arg => {
+  const [label, dir] = arg.split('=');
+  if (!label || !dir) {
+    throw new Error(`Expected LABEL=/path/to/output, got ${arg}`);
+  }
+  return [label, JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8'))];
+}));
+
+function byProof(summary) {
+  return new Map(summary.byType.map(row => [row.proofType, row]));
+}
+
+function fmtMs(value) {
+  return Number(value).toFixed(3);
+}
+
+function fmtSpeedup(cpuMs, gpuMs) {
+  return `${(cpuMs / gpuMs).toFixed(2)}x`;
+}
+
+const cpu = byProof(inputs.CPU);
+const gpu = byProof(inputs.GPU);
+const proofs = [...cpu.keys()].filter(proof => gpu.has(proof));
+
+console.log('| proof | CPU avg (ms) | GPU avg (ms) | speedup |');
+console.log('|---|---:|---:|---:|');
+for (const proof of proofs) {
+  const cpuMs = cpu.get(proof).elapsedMsAvg;
+  const gpuMs = gpu.get(proof).elapsedMsAvg;
+  console.log(`| ${proof} | ${fmtMs(cpuMs)} | ${fmtMs(gpuMs)} | ${fmtSpeedup(cpuMs, gpuMs)} |`);
+}
+NODE
+```
+
 ### CRS-Adjusted Proof Breakdown
 
 Use this reporting view when comparing steady-state CPU and GPU proof time
