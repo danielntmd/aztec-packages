@@ -803,12 +803,25 @@ benchmark.
 
 Use this table for the high-level CPU/GPU proof comparison. It reads
 `summary.json` from the CPU and GPU replay output directories and reports each
-proof type's `elapsedMsAvg`, not the profiling breakdown columns.
+proof type's `elapsedMsAvg`, not the profiling breakdown columns. Set
+`CPU_COST_PER_H` and `GPU_COST_PER_H` to the instance hourly prices used for the
+CPU and GPU runs.
 
 ```bash
+CPU_COST_PER_H=<cpu-instance-cost-per-hour> \
+GPU_COST_PER_H=<gpu-instance-cost-per-hour> \
 node - CPU=/tmp/cpu-proof-store-replay GPU=/tmp/gpu-proof-store-replay <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
+
+const cpuCostPerHour = Number(process.env.CPU_COST_PER_H);
+const gpuCostPerHour = Number(process.env.GPU_COST_PER_H);
+if (!Number.isFinite(cpuCostPerHour) || cpuCostPerHour <= 0) {
+  throw new Error('set CPU_COST_PER_H to the CPU instance cost per hour');
+}
+if (!Number.isFinite(gpuCostPerHour) || gpuCostPerHour <= 0) {
+  throw new Error('set GPU_COST_PER_H to the GPU instance cost per hour');
+}
 
 const inputs = Object.fromEntries(process.argv.slice(2).map(arg => {
   const [label, dir] = arg.split('=');
@@ -830,16 +843,24 @@ function fmtSpeedup(cpuMs, gpuMs) {
   return `${(cpuMs / gpuMs).toFixed(2)}x`;
 }
 
+function proofsPerDollar(ms, costPerHour) {
+  return (3600 / (ms / 1000)) / costPerHour;
+}
+
+function fmtCost(value) {
+  return Math.round(value).toLocaleString('en-US');
+}
+
 const cpu = byProof(inputs.CPU);
 const gpu = byProof(inputs.GPU);
 const proofs = [...cpu.keys()].filter(proof => gpu.has(proof));
 
-console.log('| proof | CPU avg (ms) | GPU avg (ms) | speedup |');
-console.log('|---|---:|---:|---:|');
+console.log('| proof | CPU avg (ms) | GPU avg (ms) | speedup | CPU proofs/$ | GPU proofs/$ |');
+console.log('|---|---:|---:|---:|---:|---:|');
 for (const proof of proofs) {
   const cpuMs = cpu.get(proof).elapsedMsAvg;
   const gpuMs = gpu.get(proof).elapsedMsAvg;
-  console.log(`| ${proof} | ${fmtMs(cpuMs)} | ${fmtMs(gpuMs)} | ${fmtSpeedup(cpuMs, gpuMs)} |`);
+  console.log(`| ${proof} | ${fmtMs(cpuMs)} | ${fmtMs(gpuMs)} | ${fmtSpeedup(cpuMs, gpuMs)} | ${fmtCost(proofsPerDollar(cpuMs, cpuCostPerHour))} | ${fmtCost(proofsPerDollar(gpuMs, gpuCostPerHour))} |`);
 }
 NODE
 ```
