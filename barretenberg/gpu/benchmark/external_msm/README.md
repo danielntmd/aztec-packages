@@ -779,6 +779,29 @@ node yarn-project/scripts/run_proof_store_replay_bench.mjs \
 root-rollup batch exceeds available memory. On production hardware, prefer the
 default fused path unless memory preflight fails.
 
+`ROOT_ROLLUP` is a `2^24` circuit proof, not just a `2^24` MSM. The prover keeps
+many field polynomials, proving-key objects, relation temporaries, PCS state, and
+CRS/SRS data live around the MSM calls. On 16 GiB hosts this can exceed RAM even
+when standalone `2^24` MSM benchmarks fit. For constrained hosts, run root
+rollup with BB low-memory polynomial backing and make sure `/tmp` points to a
+disk with enough free space:
+
+```bash
+BB_GPU_MSM_PRECOMPUTE_FACTOR=1 \
+BB_GPU_MSM_MAX_BATCH_SIZE=1 \
+node yarn-project/scripts/run_proof_store_replay_bench.mjs \
+  --proof-store file:///tmp/aztec-gpu-e2e-proof-store \
+  --bb-bin /path/to/gpu/bb \
+  --acvm-bin /absolute/path/to/noir/noir-repo/target/release/acvm \
+  --output-dir /tmp/gpu-proof-store-root-lowmem \
+  --include-types ROOT_ROLLUP \
+  --warmups 0 \
+  --repeats 1 \
+  --persistent-bb-worker \
+  --bb-slow-low-memory \
+  --bb-storage-budget 64g
+```
+
 If the captured store includes `PUBLIC_VM`, the replay uses `bb avm_prove` for
 that job and therefore needs a `bb` binary built with AVM support.
 `PUBLIC_TX_BASE_ROLLUP` can also require AVM recursion support. For a

@@ -28,6 +28,7 @@
 #include "barretenberg/common/bb_bench.hpp"
 #include "barretenberg/common/thread.hpp"
 #include "barretenberg/common/version.hpp"
+#include "barretenberg/polynomials/backing_memory.hpp"
 #include "barretenberg/srs/factories/native_crs_factory.hpp"
 #include "barretenberg/srs/global_crs.hpp"
 #include "barretenberg/vm2/api_avm.hpp"
@@ -139,6 +140,14 @@ int run_ultra_honk_worker(const API::Flags& base_flags)
             flags.disable_zk = request.value("disable_zk", true);
             flags.write_vk = request.value("write_vk", false);
             flags.output_format = request.value("output_format", "binary");
+            flags.slow_low_memory = request.value("slow_low_memory", base_flags.slow_low_memory);
+            flags.storage_budget = request.value("storage_budget", base_flags.storage_budget);
+            slow_low_memory = flags.slow_low_memory;
+#if !defined(__wasm__) || defined(ENABLE_WASM_BENCH)
+            if (!flags.storage_budget.empty()) {
+                storage_budget = parse_size_string(flags.storage_budget);
+            }
+#endif
 
             const std::filesystem::path bytecode_path = request.at("bytecode_path").get<std::string>();
             const std::filesystem::path witness_path = request.at("witness_path").get<std::string>();

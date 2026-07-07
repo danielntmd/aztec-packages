@@ -45,6 +45,8 @@ const GPU_ENV_KEYS = [
   'BB_GPU_MSM_PREWARM_SRS_POINTS',
   'BB_PROOF_BENCH_DEFER_PROFILE_WRITE',
   'BB_PROOF_BENCH_PERSISTENT_BB',
+  'BB_SLOW_LOW_MEMORY',
+  'BB_STORAGE_BUDGET',
   'BB_BINARY_PATH',
   'ACVM_BINARY_PATH',
   'LD_LIBRARY_PATH',
@@ -89,6 +91,8 @@ function parseArgs() {
     excludeTypes: new Set(),
     gpuSrsPrewarmByType: false,
     persistentBbWorker: false,
+    bbSlowLowMemory: false,
+    bbStorageBudget: undefined,
     list: false,
   };
   for (let i = 2; i < process.argv.length; i++) {
@@ -132,6 +136,13 @@ function parseArgs() {
         break;
       case '--persistent-bb-worker':
         args.persistentBbWorker = true;
+        break;
+      case '--bb-slow-low-memory':
+        args.bbSlowLowMemory = true;
+        break;
+      case '--bb-storage-budget':
+        args.bbStorageBudget = value;
+        i++;
         break;
       case '--list':
         args.list = true;
@@ -901,6 +912,8 @@ function collectMetadata(args, jobs) {
     excludeTypes: [...args.excludeTypes],
     gpuSrsPrewarmByType: args.gpuSrsPrewarmByType,
     persistentBbWorker: args.persistentBbWorker,
+    bbSlowLowMemory: args.bbSlowLowMemory,
+    bbStorageBudget: args.bbStorageBudget ?? null,
     env,
     git: {
       commit: safeExec('git', ['rev-parse', 'HEAD']),
@@ -1135,6 +1148,12 @@ async function main() {
   const args = parseArgs();
   args.outputDir = resolve(args.outputDir);
   process.env.BB_PROOF_BENCH_DEFER_PROFILE_WRITE = '1';
+  if (args.bbSlowLowMemory) {
+    process.env.BB_SLOW_LOW_MEMORY = '1';
+  }
+  if (args.bbStorageBudget) {
+    process.env.BB_STORAGE_BUDGET = args.bbStorageBudget;
+  }
   if (args.persistentBbWorker) {
     process.env.BB_PROOF_BENCH_PERSISTENT_BB = '1';
   }

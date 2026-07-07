@@ -69,6 +69,28 @@ type CircuitAssetPaths = {
   vkPath: string;
 };
 
+function envFlag(name: string) {
+  const value = process.env[name]?.toLowerCase();
+  return value === '1' || value === 'true';
+}
+
+function proofMemorySettings() {
+  return {
+    slowLowMemory: envFlag('BB_SLOW_LOW_MEMORY'),
+    storageBudget: process.env.BB_STORAGE_BUDGET,
+  };
+}
+
+function addProofMemoryArgs(args: string[]) {
+  const settings = proofMemorySettings();
+  if (settings.slowLowMemory) {
+    args.push('--slow_low_memory');
+  }
+  if (settings.storageBudget) {
+    args.push('--storage_budget', settings.storageBudget);
+  }
+}
+
 export const DEFAULT_BB_VERIFY_CONCURRENCY = 4;
 
 /**
@@ -306,6 +328,7 @@ export class UltraHonkProveWorker {
     const benchPath =
       process.env.BB_PROOF_BENCH === '1' ? join(workingDirectory, BB_BENCH_HIERARCHICAL_FILENAME) : undefined;
     const settings = getWorkerSettings(flavor);
+    const memorySettings = proofMemorySettings();
 
     try {
       const timer = new Timer();
@@ -320,6 +343,8 @@ export class UltraHonkProveWorker {
         witness_path: inputWitnessFile,
         vk_path: vkPath,
         output_path: outputPath,
+        slow_low_memory: memorySettings.slowLowMemory,
+        ...(memorySettings.storageBudget ? { storage_budget: memorySettings.storageBudget } : {}),
         ...(benchPath ? { bench_out_hierarchical: benchPath } : {}),
       });
       return {
@@ -514,6 +539,7 @@ export async function generateProof(
     if (benchPath) {
       args.push('--bench_out_hierarchical', benchPath);
     }
+    addProofMemoryArgs(args);
     const loggingArg = log.level === 'debug' || log.level === 'trace' ? '-d' : log.level === 'verbose' ? '-v' : '';
     if (loggingArg !== '') {
       args.push(loggingArg);
